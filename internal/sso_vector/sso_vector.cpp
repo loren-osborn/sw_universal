@@ -102,6 +102,6 @@ int main() {
 		(void)range_dst.at(1000);
 	});
 
-	ReportTestResult(nrOfFailedTestCases, "sso_vector", "unit test");
+	sw::universal::ReportTestResult(nrOfFailedTestCases, "sso_vector", "unit test");
 	return (nrOfFailedTestCases > 0 ? EXIT_FAILURE : EXIT_SUCCESS);
 }

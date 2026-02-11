@@ -14,6 +14,7 @@
 #include <initializer_list>
 #include <memory>
 #include <new>
+#include <optional>
 #include <tuple>
 #include <type_traits>
 #include <utility>
@@ -114,6 +115,8 @@ namespace custom_tagged_variant_detail {
 
 } // namespace custom_tagged_variant_detail
 
+namespace detail = custom_tagged_variant_detail;
+
 /// @brief A tagged variant implementation modeled after std::variant (C++20).
 /// @tparam TagEncoding Reserved tag encoding selector (currently unused).
 /// @tparam Types Alternative types stored in the variant.
@@ -121,8 +124,6 @@ namespace custom_tagged_variant_detail {
 template<typename TagEncoding, typename... Types>
 class custom_tagged_variant {
 	static_assert(sizeof...(Types) > 0, "custom_tagged_variant must have at least one alternative");
-
-	using detail = custom_tagged_variant_detail;
 	using storage_traits = detail::storage_traits<Types...>;
 
 public:
@@ -180,16 +181,18 @@ public:
 	template<typename T, typename... Args>
 	constexpr explicit custom_tagged_variant(std::in_place_type_t<T>, Args&&... args)
 		: index_(detail::index_of_exact_v<T, Types...>) {
-		static_assert(index_ != npos, "Type not found in custom_tagged_variant");
-		construct<detail::index_of_exact_v<T, Types...>>(std::forward<Args>(args)...);
+		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
+		static_assert(index != npos, "Type not found in custom_tagged_variant");
+		construct<index>(std::forward<Args>(args)...);
 	}
 
 	/// @brief Constructs the specified alternative in-place by type with initializer_list.
 	template<typename T, typename U, typename... Args>
 	constexpr explicit custom_tagged_variant(std::in_place_type_t<T>, std::initializer_list<U> init, Args&&... args)
 		: index_(detail::index_of_exact_v<T, Types...>) {
-		static_assert(index_ != npos, "Type not found in custom_tagged_variant");
-		construct<detail::index_of_exact_v<T, Types...>>(init, std::forward<Args>(args)...);
+		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
+		static_assert(index != npos, "Type not found in custom_tagged_variant");
+		construct<index>(init, std::forward<Args>(args)...);
 	}
 
 	/// @brief Converting constructor from a value (exact-type match).
@@ -622,15 +625,12 @@ namespace custom_tagged_variant_detail {
 	template<typename Variant, std::size_t... Is>
 	auto make_reference_variant_impl(Variant& v, std::index_sequence<Is...>) {
 		using ref_variant = std::variant<std::reference_wrapper<variant_alternative_t<Is, Variant>>...>;
-		ref_variant refs;
-		switch (v.index()) {
-		case variant_npos:
-			break;
-		default:
-			((v.index() == Is ? (refs.template emplace<Is>(std::ref(v.template get<Is>())), true) : false) || ...);
-			break;
+		if (v.index() == variant_npos) {
+			throw bad_variant_access{};
 		}
-		return refs;
+		std::optional<ref_variant> refs;
+		((v.index() == Is ? (refs.emplace(std::in_place_index<Is>, std::ref(v.template get<Is>())), true) : false) || ...);
+		return *refs;
 	}
 
 	template<typename Variant>
