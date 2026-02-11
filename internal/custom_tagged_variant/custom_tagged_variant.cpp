@@ -137,6 +137,42 @@ int ThrowingType::throw_on_move = -1;
 int ThrowingType::throw_on_copy_assign = -1;
 int ThrowingType::throw_on_move_assign = -1;
 
+struct StrongGuaranteeExpectations {
+	bool emplace_preserves = false;
+	bool assign_preserves = false;
+};
+
+StrongGuaranteeExpectations compute_std_expectations() {
+	StrongGuaranteeExpectations expectations{};
+	using StdVariant = std::variant<int, std::string, ThrowingType, LiveCountedType>;
+	{
+		ThrowingType::reset();
+		StdVariant v(123);
+		ThrowingType::throw_on_default = 1;
+		try {
+			v.emplace<ThrowingType>();
+		} catch (...) {
+		}
+		expectations.emplace_preserves = !v.valueless_by_exception() &&
+			std::holds_alternative<int>(v) &&
+			std::get<int>(v) == 123;
+	}
+	{
+		ThrowingType::reset();
+		StdVariant v(123);
+		ThrowingType::throw_on_copy = 1;
+		ThrowingType::throw_on_move = 1;
+		try {
+			v = ThrowingType(9);
+		} catch (...) {
+		}
+		expectations.assign_preserves = !v.valueless_by_exception() &&
+			std::holds_alternative<int>(v) &&
+			std::get<int>(v) == 123;
+	}
+	return expectations;
+}
+
 namespace variant_test {
 	using std::get;
 	using std::get_if;
@@ -174,6 +210,7 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	TestContext ctx{impl_name, failures};
 	using namespace variant_test;
 	using VariantT = Variant<int, std::string, ThrowingType, LiveCountedType>;
+	const auto expectations = compute_std_expectations();
 
 	{
 		VariantT v;
@@ -256,36 +293,39 @@ void run_variant_suite(const char* impl_name, int& failures) {
 
 	{
 		ThrowingType::reset();
-		VariantT v(1);
+		VariantT v(123);
 		ThrowingType::throw_on_default = 1;
 		expect_throw<std::runtime_error>(ctx, "emplace throws", [&]() {
 			v.template emplace<ThrowingType>();
 		});
-		if (v.valueless_by_exception()) {
-			check(ctx, get_if<ThrowingType>(&v) == nullptr, "emplace valueless get_if null");
-		} else {
-			check(ctx, holds_alternative<int>(v), "emplace preserves old alternative");
-			check(ctx, get<int>(v) == 1, "emplace preserves old value");
+		const bool preserved = !v.valueless_by_exception() &&
+			holds_alternative<int>(v) &&
+			get<int>(v) == 123;
+		check(ctx, preserved == expectations.emplace_preserves, "emplace throw preserves per std");
+		if (!preserved) {
+			check(ctx, v.valueless_by_exception(), "emplace throw leaves valueless when not preserved");
 		}
 		v = 3;
-		check(ctx, get<int>(v) == 3, "recovery after valueless");
+		check(ctx, get<int>(v) == 3, "recovery after emplace throw");
 	}
 
 	{
 		ThrowingType::reset();
-		VariantT v(2);
+		VariantT v(123);
+		ThrowingType::throw_on_copy = 1;
 		ThrowingType::throw_on_move = 1;
 		expect_throw<std::runtime_error>(ctx, "assign different alternative throws", [&]() {
 			v = ThrowingType(9);
 		});
-		if (v.valueless_by_exception()) {
-			check(ctx, get_if<ThrowingType>(&v) == nullptr, "assign throw valueless get_if null");
-		} else {
-			check(ctx, holds_alternative<int>(v), "assign throw preserves old alternative");
-			check(ctx, get<int>(v) == 2, "assign throw preserves old value");
+		const bool preserved = !v.valueless_by_exception() &&
+			holds_alternative<int>(v) &&
+			get<int>(v) == 123;
+		check(ctx, preserved == expectations.assign_preserves, "assign throw preserves per std");
+		if (!preserved) {
+			check(ctx, v.valueless_by_exception(), "assign throw leaves valueless when not preserved");
 		}
 		v = std::string("ok");
-		check(ctx, get<std::string>(v) == "ok", "assign after valueless");
+		check(ctx, get<std::string>(v) == "ok", "assign after throw");
 	}
 
 	{
@@ -295,6 +335,50 @@ void run_variant_suite(const char* impl_name, int& failures) {
 			check(ctx, LiveCountedType::live == 1, "live count increments");
 		}
 		check(ctx, LiveCountedType::live == 0, "live count decrements");
+	}
+
+	{
+		check(ctx, LiveCountedType::live == 0, "live count before repeated assigns");
+		{
+			VariantT v(std::in_place_type<LiveCountedType>, LiveCountedType{5});
+			for (int i = 0; i < 8; ++i) {
+				v = LiveCountedType{i};
+				v = std::string("swap");
+				v = i;
+			}
+		}
+		check(ctx, LiveCountedType::live == 0, "live count after repeated assigns");
+	}
+
+	{
+		ThrowingType::reset();
+		VariantT left(1);
+		VariantT right(std::in_place_type<ThrowingType>, ThrowingType{7});
+		ThrowingType::throw_on_copy = 1;
+		ThrowingType::throw_on_move = 1;
+		ThrowingType::throw_on_copy_assign = 1;
+		ThrowingType::throw_on_move_assign = 1;
+		bool threw = false;
+		try {
+			left.swap(right);
+		} catch (const std::runtime_error&) {
+			threw = true;
+		}
+		int held_throwing = 0;
+		if (!left.valueless_by_exception() && holds_alternative<ThrowingType>(left)) {
+			++held_throwing;
+		}
+		if (!right.valueless_by_exception() && holds_alternative<ThrowingType>(right)) {
+			++held_throwing;
+		}
+		check(ctx, ThrowingType::live == held_throwing, "swap throw live count matches");
+		if (!threw) {
+			check(ctx, ThrowingType::live == 1, "swap no-throw keeps one ThrowingType alive");
+		}
+		left = 7;
+		right = std::string("ok");
+		check(ctx, holds_alternative<int>(left) && get<int>(left) == 7, "swap throw recovery left");
+		check(ctx, holds_alternative<std::string>(right) && get<std::string>(right) == "ok", "swap throw recovery right");
 	}
 }
 

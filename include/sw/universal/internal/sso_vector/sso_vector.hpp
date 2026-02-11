@@ -463,11 +463,6 @@ public:
 		assign_range(init.begin(), init.end());
 	}
 
-	/// @brief Returns whether storage is using the inline buffer.
-	bool using_sso() const noexcept {
-		return false;
-	}
-
 private:
 	void ensure_capacity(size_type desired) {
 		if (desired <= capacity_) {
