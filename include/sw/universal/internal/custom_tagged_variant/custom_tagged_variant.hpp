@@ -259,9 +259,21 @@ public:
 		if (index_ == I) {
 			*std::launder(reinterpret_cast<U*>(&storage_)) = std::forward<T>(value);
 		} else {
-			destroy_active();
-			construct<I>(std::forward<T>(value));
-			index_ = I;
+			if constexpr (std::is_nothrow_move_constructible_v<U> || std::is_nothrow_copy_constructible_v<U>) {
+				std::optional<U> temp;
+				temp.emplace(std::forward<T>(value));
+				destroy_active();
+				if constexpr (std::is_nothrow_move_constructible_v<U>) {
+					construct<I>(std::move(*temp));
+				} else {
+					construct<I>(*temp);
+				}
+				index_ = I;
+			} else {
+				destroy_active();
+				construct<I>(std::forward<T>(value));
+				index_ = I;
+			}
 		}
 		return *this;
 	}
@@ -275,18 +287,44 @@ public:
 	/// @brief Constructs a new alternative in-place by index.
 	template<std::size_t I, typename... Args>
 	decltype(auto) emplace(Args&&... args) {
-		destroy_active();
-		construct<I>(std::forward<Args>(args)...);
-		index_ = I;
+		using T = detail::type_at_t<I, Types...>;
+		if constexpr (std::is_nothrow_move_constructible_v<T> || std::is_nothrow_copy_constructible_v<T>) {
+			std::optional<T> temp;
+			temp.emplace(std::forward<Args>(args)...);
+			destroy_active();
+			if constexpr (std::is_nothrow_move_constructible_v<T>) {
+				construct<I>(std::move(*temp));
+			} else {
+				construct<I>(*temp);
+			}
+			index_ = I;
+		} else {
+			destroy_active();
+			construct<I>(std::forward<Args>(args)...);
+			index_ = I;
+		}
 		return get<I>();
 	}
 
 	/// @brief Constructs a new alternative in-place by index with initializer_list.
 	template<std::size_t I, typename U, typename... Args>
 	decltype(auto) emplace(std::initializer_list<U> init, Args&&... args) {
-		destroy_active();
-		construct<I>(init, std::forward<Args>(args)...);
-		index_ = I;
+		using T = detail::type_at_t<I, Types...>;
+		if constexpr (std::is_nothrow_move_constructible_v<T> || std::is_nothrow_copy_constructible_v<T>) {
+			std::optional<T> temp;
+			temp.emplace(init, std::forward<Args>(args)...);
+			destroy_active();
+			if constexpr (std::is_nothrow_move_constructible_v<T>) {
+				construct<I>(std::move(*temp));
+			} else {
+				construct<I>(*temp);
+			}
+			index_ = I;
+		} else {
+			destroy_active();
+			construct<I>(init, std::forward<Args>(args)...);
+			index_ = I;
+		}
 		return get<I>();
 	}
 
@@ -308,7 +346,7 @@ public:
 
 	/// @brief Swaps this variant with another.
 	void swap(custom_tagged_variant& other)
-		requires detail::all_swappable<Types...>::value {
+		requires detail::all_swappable<Types...>::value && detail::all_move_constructible<Types...>::value {
 		if (this == &other) {
 			return;
 		}
@@ -319,9 +357,39 @@ public:
 			swap_same_index(other);
 			return;
 		}
-		custom_tagged_variant tmp(std::move(*this));
-		*this = std::move(other);
-		other = std::move(tmp);
+		if (valueless_by_exception()) {
+			bool constructed = false;
+			visit_active(other, [&](auto index_tag, auto& value) {
+				constexpr std::size_t I = decltype(index_tag)::value;
+				construct<I>(std::move(value));
+				index_ = I;
+				constructed = true;
+			});
+			if (constructed) {
+				other.destroy_active();
+			}
+			return;
+		}
+		if (other.valueless_by_exception()) {
+			bool constructed = false;
+			visit_active(*this, [&](auto index_tag, auto& value) {
+				constexpr std::size_t I = decltype(index_tag)::value;
+				other.template construct<I>(std::move(value));
+				other.index_ = I;
+				constructed = true;
+			});
+			if (constructed) {
+				destroy_active();
+			}
+			return;
+		}
+		visit_active(*this, [&](auto left_tag, auto&) {
+			constexpr std::size_t L = decltype(left_tag)::value;
+			visit_active(other, [&](auto right_tag, auto&) {
+				constexpr std::size_t R = decltype(right_tag)::value;
+				swap_different_index<L, R>(other);
+			});
+		});
 	}
 
 	/// @brief Access the active alternative by index.
@@ -445,36 +513,52 @@ private:
 		if (valueless_by_exception()) {
 			return;
 		}
-		visit_active(*this, [&](auto index_tag, auto& value) {
-			using T = std::decay_t<decltype(value)>;
-			value.~T();
-			index_ = npos;
-		});
+		const std::size_t active = index_;
+		destroy_active_impl<0>(active);
+		index_ = npos;
+	}
+
+	template<std::size_t I, typename Variant>
+	static auto active_ptr(Variant& variant) noexcept {
+		using VariantNoRef = std::remove_reference_t<Variant>;
+		using Base = detail::type_at_t<I, Types...>;
+		using CvBase = std::conditional_t<std::is_const_v<VariantNoRef>, std::add_const_t<Base>, Base>;
+		using CvVolBase = std::conditional_t<std::is_volatile_v<VariantNoRef>, std::add_volatile_t<CvBase>, CvBase>;
+		return std::launder(reinterpret_cast<CvVolBase*>(&variant.storage_));
 	}
 
 	template<typename Variant, typename Fn>
 	static void visit_active(Variant&& variant, Fn&& fn) {
-		using VariantNoRef = std::remove_reference_t<Variant>;
-		switch (variant.index_) {
-		case 0:
-			fn(std::integral_constant<std::size_t, 0>{},
-				*std::launder(reinterpret_cast<std::conditional_t<std::is_volatile_v<VariantNoRef>,
-					std::add_volatile_t<std::conditional_t<std::is_const_v<VariantNoRef>, std::add_const_t<detail::type_at_t<0, Types...>>, detail::type_at_t<0, Types...>>>,
-					std::conditional_t<std::is_const_v<VariantNoRef>, std::add_const_t<detail::type_at_t<0, Types...>>, detail::type_at_t<0, Types...>>>*>(&variant.storage_)));
-			return;
-		default:
-			visit_active_impl(std::forward<Variant>(variant), std::forward<Fn>(fn), std::make_index_sequence<sizeof...(Types)>{});
-			return;
+		visit_active_impl<0>(std::forward<Variant>(variant), std::forward<Fn>(fn));
+	}
+
+	template<std::size_t I, typename Variant, typename Fn>
+	static void visit_active_impl(Variant&& variant, Fn&& fn) {
+		if constexpr (I < sizeof...(Types)) {
+			switch (variant.index_) {
+			case I:
+				fn(std::integral_constant<std::size_t, I>{}, *active_ptr<I>(variant));
+				return;
+			default:
+				visit_active_impl<I + 1>(std::forward<Variant>(variant), std::forward<Fn>(fn));
+				return;
+			}
 		}
 	}
 
-	template<typename Variant, typename Fn, std::size_t... Is>
-	static void visit_active_impl(Variant&& variant, Fn&& fn, std::index_sequence<Is...>) {
-		using VariantNoRef = std::remove_reference_t<Variant>;
-		((variant.index_ == Is ? (fn(std::integral_constant<std::size_t, Is>{},
-			*std::launder(reinterpret_cast<std::conditional_t<std::is_volatile_v<VariantNoRef>,
-				std::add_volatile_t<std::conditional_t<std::is_const_v<VariantNoRef>, std::add_const_t<detail::type_at_t<Is, Types...>>, detail::type_at_t<Is, Types...>>>,
-				std::conditional_t<std::is_const_v<VariantNoRef>, std::add_const_t<detail::type_at_t<Is, Types...>>, detail::type_at_t<Is, Types...>>>*>(&variant.storage_))), true) : false) || ...);
+	template<std::size_t I>
+	void destroy_active_impl(std::size_t active) noexcept {
+		if constexpr (I < sizeof...(Types)) {
+			using T = detail::type_at_t<I, Types...>;
+			switch (active) {
+			case I:
+				active_ptr<I>(*this)->~T();
+				return;
+			default:
+				destroy_active_impl<I + 1>(active);
+				return;
+			}
+		}
 	}
 
 	template<typename Other>
@@ -498,6 +582,37 @@ private:
 			using std::swap;
 			swap(value, other.template get<decltype(index_tag)::value>());
 		});
+	}
+
+	template<std::size_t L, std::size_t R>
+	void swap_different_index(custom_tagged_variant& other) {
+		using Left = detail::type_at_t<L, Types...>;
+		using Right = detail::type_at_t<R, Types...>;
+		std::optional<Left> left_value;
+		std::optional<Right> right_value;
+		left_value.emplace(std::move(*active_ptr<L>(*this)));
+		right_value.emplace(std::move(*active_ptr<R>(other)));
+		destroy_active();
+		other.destroy_active();
+		bool left_constructed = false;
+		try {
+			construct<R>(std::move(*right_value));
+			index_ = R;
+			left_constructed = true;
+		} catch (...) {
+			index_ = npos;
+			throw;
+		}
+		try {
+			other.template construct<L>(std::move(*left_value));
+			other.index_ = L;
+		} catch (...) {
+			other.index_ = npos;
+			if (left_constructed) {
+				destroy_active();
+			}
+			throw;
+		}
 	}
 
 	typename storage_traits::storage_t storage_{};
