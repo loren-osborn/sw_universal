@@ -72,7 +72,7 @@ public:
 	}
 
 	/// @brief Constructs from an iterator range.
-	template<typename InputIt>
+	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	sso_vector(InputIt first, InputIt last, const Allocator& alloc = Allocator())
 		: sso_vector(alloc) {
 		assign_range(first, last);
@@ -305,7 +305,7 @@ public:
 	}
 
 	/// @brief Inserts a range.
-	template<typename InputIt>
+	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	iterator insert(const_iterator pos, InputIt first, InputIt last) {
 		const size_type index = static_cast<size_type>(pos - cbegin());
 		insert_range(index, first, last);
@@ -436,7 +436,7 @@ public:
 	}
 
 	/// @brief Assigns from range.
-	template<typename InputIt>
+	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	void assign(InputIt first, InputIt last) {
 		assign_range(first, last);
 	}

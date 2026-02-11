@@ -104,9 +104,13 @@ int main() {
 
 	Variant v7(Tracker{5});
 	int visit_result = visit([](auto& value) {
-		if constexpr (std::is_same_v<std::decay_t<decltype(value)>, int>) return value;
-		if constexpr (std::is_same_v<std::decay_t<decltype(value)>, std::string>) return static_cast<int>(value.size());
-		return value.value;
+		if constexpr (std::is_same_v<std::decay_t<decltype(value)>, int>) {
+			return value;
+		} else if constexpr (std::is_same_v<std::decay_t<decltype(value)>, std::string>) {
+			return static_cast<int>(value.size());
+		} else {
+			return value.value;
+		}
 	}, v7);
 	check(visit_result == 5, nrOfFailedTestCases, "visit single variant");
 
@@ -121,6 +125,6 @@ int main() {
 	}, x, y);
 	check(multi_result == 6, nrOfFailedTestCases, "visit multiple variants");
 
-	ReportTestResult(nrOfFailedTestCases, "custom_tagged_variant", "unit test");
+	sw::universal::ReportTestResult(nrOfFailedTestCases, "custom_tagged_variant", "unit test");
 	return (nrOfFailedTestCases > 0 ? EXIT_FAILURE : EXIT_SUCCESS);
 }
