@@ -10,31 +10,37 @@
 #include <stdexcept>
 #include <type_traits>
 #include <utility>
+#include <variant>
 
 #include <universal/internal/custom_tagged_variant/custom_tagged_variant.hpp>
 #include <universal/verification/test_status.hpp>
 
 namespace {
 
-void check(bool condition, int& failures, const char* label) {
+struct TestContext {
+	const char* impl = "";
+	int& failures;
+};
+
+void check(const TestContext& ctx, bool condition, const char* label) {
 	if (!condition) {
-		std::cerr << "FAIL: " << label << "\n";
-		++failures;
+		std::cerr << "FAIL(" << ctx.impl << "): " << label << "\n";
+		++ctx.failures;
 	}
 }
 
 template<typename Exception, typename Fn>
-bool expect_throw(int& failures, const char* label, Fn&& fn) {
+bool expect_throw(const TestContext& ctx, const char* label, Fn&& fn) {
 	try {
 		fn();
-		std::cerr << "FAIL: " << label << " did not throw\n";
-		++failures;
+		std::cerr << "FAIL(" << ctx.impl << "): " << label << " did not throw\n";
+		++ctx.failures;
 		return false;
 	} catch (const Exception&) {
 		return true;
 	} catch (...) {
-		std::cerr << "FAIL: " << label << " threw unexpected exception\n";
-		++failures;
+		std::cerr << "FAIL(" << ctx.impl << "): " << label << " threw unexpected exception\n";
+		++ctx.failures;
 		return false;
 	}
 }
@@ -131,69 +137,99 @@ int ThrowingType::throw_on_move = -1;
 int ThrowingType::throw_on_copy_assign = -1;
 int ThrowingType::throw_on_move_assign = -1;
 
+namespace variant_test {
+	using std::get;
+	using std::get_if;
+	using std::holds_alternative;
+	using sw::universal::internal::get;
+	using sw::universal::internal::get_if;
+	using sw::universal::internal::holds_alternative;
+
+	template<typename Variant>
+	struct is_custom_variant : std::false_type {};
+
+	template<typename TagEncoding, typename... Ts>
+	struct is_custom_variant<sw::universal::internal::custom_tagged_variant<TagEncoding, Ts...>> : std::true_type {};
+
+	template<typename Variant>
+	inline constexpr bool is_custom_variant_v = is_custom_variant<std::decay_t<Variant>>::value;
+
+	template<typename Visitor, typename... Variants>
+	decltype(auto) visit_adapter(Visitor&& vis, Variants&&... variants) {
+		if constexpr ((is_custom_variant_v<Variants> || ...)) {
+			return sw::universal::internal::visit(std::forward<Visitor>(vis), std::forward<Variants>(variants)...);
+		} else {
+			return std::visit(std::forward<Visitor>(vis), std::forward<Variants>(variants)...);
+		}
+	}
+}
+
 } // namespace
 
-int main() {
-	using namespace sw::universal::internal;
-	int nrOfFailedTestCases = 0;
+template<class... Ts>
+using CustomVariant = sw::universal::internal::custom_tagged_variant<void, Ts...>;
 
-	using Variant = custom_tagged_variant<void, int, std::string, ThrowingType, LiveCountedType>;
+template<template<class...> class Variant>
+void run_variant_suite(const char* impl_name, int& failures) {
+	TestContext ctx{impl_name, failures};
+	using namespace variant_test;
+	using VariantT = Variant<int, std::string, ThrowingType, LiveCountedType>;
 
 	{
-		Variant v;
-		check(v.index() == 0, nrOfFailedTestCases, "default index is 0");
-		check(v.holds_alternative<int>(), nrOfFailedTestCases, "default holds int");
-		check(v.get<int>() == 0, nrOfFailedTestCases, "default int value is 0");
+		VariantT v;
+		check(ctx, v.index() == 0, "default index is 0");
+		check(ctx, holds_alternative<int>(v), "default holds int");
+		check(ctx, get<int>(v) == 0, "default int value is 0");
 
-		Variant v2(std::in_place_type<std::string>, "hello");
-		check(v2.index() == 1, nrOfFailedTestCases, "in_place_type sets index");
-		check(v2.get<std::string>() == "hello", nrOfFailedTestCases, "in_place_type stores string");
+		VariantT v2(std::in_place_type<std::string>, "hello");
+		check(ctx, v2.index() == 1, "in_place_type sets index");
+		check(ctx, get<std::string>(v2) == "hello", "in_place_type stores string");
 
-		Variant v3(std::in_place_index<3>, LiveCountedType{42});
-		check(v3.index() == 3, nrOfFailedTestCases, "in_place_index sets index");
-		check(v3.get<3>().value == 42, nrOfFailedTestCases, "in_place_index stores value");
+		VariantT v3(std::in_place_index<3>, LiveCountedType{42});
+		check(ctx, v3.index() == 3, "in_place_index sets index");
+		check(ctx, get<3>(v3).value == 42, "in_place_index stores value");
 	}
 
 	{
-		Variant v(ThrowingType{7});
-		check(v.index() == 2, nrOfFailedTestCases, "exact-type converting ctor");
+		VariantT v(ThrowingType{7});
+		check(ctx, v.index() == 2, "exact-type converting ctor");
 		v = ThrowingType{9};
-		check(v.get<ThrowingType>().value == 9, nrOfFailedTestCases, "assign from exact type");
+		check(ctx, get<ThrowingType>(v).value == 9, "assign from exact type");
 	}
 
 	{
-		Variant v(std::in_place_type<std::string>, "text");
-		check(v.get<1>() == "text", nrOfFailedTestCases, "get by index");
-		check(v.get<std::string>() == "text", nrOfFailedTestCases, "get by type");
-		check(get_if<1>(&v) != nullptr, nrOfFailedTestCases, "get_if by index non-null");
-		check(get_if<2>(&v) == nullptr, nrOfFailedTestCases, "get_if by index null when inactive");
-		check(get_if<std::string>(&v) != nullptr, nrOfFailedTestCases, "get_if by type non-null");
-		check(holds_alternative<std::string>(v), nrOfFailedTestCases, "holds_alternative by type");
+		VariantT v(std::in_place_type<std::string>, "text");
+		check(ctx, get<1>(v) == "text", "get by index");
+		check(ctx, get<std::string>(v) == "text", "get by type");
+		check(ctx, get_if<1>(&v) != nullptr, "get_if by index non-null");
+		check(ctx, get_if<2>(&v) == nullptr, "get_if by index null when inactive");
+		check(ctx, get_if<std::string>(&v) != nullptr, "get_if by type non-null");
+		check(ctx, holds_alternative<std::string>(v), "holds_alternative by type");
 
-		const Variant cv(v);
-		check(cv.get<1>() == "text", nrOfFailedTestCases, "const get by index");
-		check(cv.get<std::string>() == "text", nrOfFailedTestCases, "const get by type");
+		const VariantT cv(v);
+		check(ctx, get<1>(cv) == "text", "const get by index");
+		check(ctx, get<std::string>(cv) == "text", "const get by type");
 
-		auto moved = std::move(v).get<1>();
-		check(moved == "text", nrOfFailedTestCases, "rvalue get by index");
+		auto moved = get<1>(std::move(v));
+		check(ctx, moved == "text", "rvalue get by index");
 	}
 
 	{
-		Variant a(1);
-		Variant b(2);
+		VariantT a(1);
+		VariantT b(2);
 		a.swap(b);
-		check(a.get<int>() == 2 && b.get<int>() == 1, nrOfFailedTestCases, "swap same index");
+		check(ctx, get<int>(a) == 2 && get<int>(b) == 1, "swap same index");
 
-		Variant c(3);
-		Variant d(std::in_place_type<std::string>, "world");
+		VariantT c(3);
+		VariantT d(std::in_place_type<std::string>, "world");
 		c.swap(d);
-		check(c.index() == 1, nrOfFailedTestCases, "swap different index");
-		check(c.get<std::string>() == "world", nrOfFailedTestCases, "swap moves string");
+		check(ctx, c.index() == 1, "swap different index");
+		check(ctx, get<std::string>(c) == "world", "swap moves string");
 	}
 
 	{
-		Variant v(std::in_place_type<LiveCountedType>, LiveCountedType{5});
-		int visit_result = visit([](auto& value) {
+		VariantT v(std::in_place_type<LiveCountedType>, LiveCountedType{5});
+		int visit_result = visit_adapter([](auto& value) {
 			if constexpr (std::is_same_v<std::decay_t<decltype(value)>, int>) {
 				return value;
 			} else if constexpr (std::is_same_v<std::decay_t<decltype(value)>, std::string>) {
@@ -204,55 +240,68 @@ int main() {
 				return value.value;
 			}
 		}, v);
-		check(visit_result == 5, nrOfFailedTestCases, "visit single variant");
+		check(ctx, visit_result == 5, "visit single variant");
 
-		Variant x(4);
-		Variant y(std::in_place_type<std::string>, "abc");
-		int multi_result = visit([](auto& left, auto& right) {
+		VariantT x(4);
+		VariantT y(std::in_place_type<std::string>, "abc");
+		int multi_result = visit_adapter([](auto& left, auto& right) {
 			int lhs = 0;
 			int rhs = 0;
 			if constexpr (std::is_same_v<std::decay_t<decltype(left)>, int>) lhs = left;
 			if constexpr (std::is_same_v<std::decay_t<decltype(right)>, std::string>) rhs = static_cast<int>(right.size());
 			return lhs + rhs;
 		}, x, y);
-		check(multi_result == 7, nrOfFailedTestCases, "visit multiple variants");
+		check(ctx, multi_result == 7, "visit multiple variants");
 	}
 
 	{
 		ThrowingType::reset();
-		Variant v(1);
+		VariantT v(1);
 		ThrowingType::throw_on_default = 1;
-		expect_throw<std::runtime_error>(nrOfFailedTestCases, "emplace throws", [&]() {
-			v.emplace<ThrowingType>();
+		expect_throw<std::runtime_error>(ctx, "emplace throws", [&]() {
+			v.template emplace<ThrowingType>();
 		});
-		check(v.valueless_by_exception(), nrOfFailedTestCases, "emplace leaves valueless_by_exception");
-		check(v.index() == Variant::npos, nrOfFailedTestCases, "emplace valueless index");
-		check(get_if<ThrowingType>(&v) == nullptr, nrOfFailedTestCases, "emplace valueless get_if null");
+		if (v.valueless_by_exception()) {
+			check(ctx, get_if<ThrowingType>(&v) == nullptr, "emplace valueless get_if null");
+		} else {
+			check(ctx, holds_alternative<int>(v), "emplace preserves old alternative");
+			check(ctx, get<int>(v) == 1, "emplace preserves old value");
+		}
 		v = 3;
-		check(v.get<int>() == 3, nrOfFailedTestCases, "recovery after valueless");
+		check(ctx, get<int>(v) == 3, "recovery after valueless");
 	}
 
 	{
 		ThrowingType::reset();
-		Variant v(2);
+		VariantT v(2);
 		ThrowingType::throw_on_move = 1;
-		expect_throw<std::runtime_error>(nrOfFailedTestCases, "assign different alternative throws", [&]() {
+		expect_throw<std::runtime_error>(ctx, "assign different alternative throws", [&]() {
 			v = ThrowingType(9);
 		});
-		check(v.valueless_by_exception(), nrOfFailedTestCases, "assign throw leaves valueless");
-		check(v.index() == Variant::npos, nrOfFailedTestCases, "assign throw index npos");
+		if (v.valueless_by_exception()) {
+			check(ctx, get_if<ThrowingType>(&v) == nullptr, "assign throw valueless get_if null");
+		} else {
+			check(ctx, holds_alternative<int>(v), "assign throw preserves old alternative");
+			check(ctx, get<int>(v) == 2, "assign throw preserves old value");
+		}
 		v = std::string("ok");
-		check(v.get<std::string>() == "ok", nrOfFailedTestCases, "assign after valueless");
+		check(ctx, get<std::string>(v) == "ok", "assign after valueless");
 	}
 
 	{
-		check(LiveCountedType::live == 0, nrOfFailedTestCases, "live count starts at 0");
+		check(ctx, LiveCountedType::live == 0, "live count starts at 0");
 		{
-			Variant v(std::in_place_type<LiveCountedType>, LiveCountedType{11});
-			check(LiveCountedType::live == 1, nrOfFailedTestCases, "live count increments");
+			VariantT v(std::in_place_type<LiveCountedType>, LiveCountedType{11});
+			check(ctx, LiveCountedType::live == 1, "live count increments");
 		}
-		check(LiveCountedType::live == 0, nrOfFailedTestCases, "live count decrements");
+		check(ctx, LiveCountedType::live == 0, "live count decrements");
 	}
+}
+
+int main() {
+	int nrOfFailedTestCases = 0;
+	run_variant_suite<CustomVariant>("custom_tagged_variant", nrOfFailedTestCases);
+	run_variant_suite<std::variant>("std::variant", nrOfFailedTestCases);
 
 	sw::universal::ReportTestResult(nrOfFailedTestCases, "custom_tagged_variant", "unit test");
 	return (nrOfFailedTestCases > 0 ? EXIT_FAILURE : EXIT_SUCCESS);
