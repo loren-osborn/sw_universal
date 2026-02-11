@@ -135,18 +135,20 @@ public:
 	/// @brief Default-constructs the first alternative.
 	custom_tagged_variant() noexcept(std::is_nothrow_default_constructible_v<detail::type_at_t<0, Types...>>)
 		requires std::is_default_constructible_v<detail::type_at_t<0, Types...>>
-		: index_(0) {
+		: index_(npos) {
 		construct<0>();
+		index_ = 0;
 	}
 
 	/// @brief Copy-constructs from another variant.
 	custom_tagged_variant(const custom_tagged_variant& other)
 		requires detail::all_copy_constructible<Types...>::value
-		: index_(other.index_) {
+		: index_(npos) {
 		if (!other.valueless_by_exception()) {
 			visit_active(other, [&](auto index_tag, const auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				construct<I>(value);
+				index_ = I;
 			});
 		}
 	}
@@ -154,11 +156,12 @@ public:
 	/// @brief Move-constructs from another variant.
 	custom_tagged_variant(custom_tagged_variant&& other) noexcept(detail::all_nothrow_move_constructible<Types...>::value)
 		requires detail::all_move_constructible<Types...>::value
-		: index_(other.index_) {
+		: index_(npos) {
 		if (!other.valueless_by_exception()) {
 			visit_active(other, [&](auto index_tag, auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				construct<I>(std::move(value));
+				index_ = I;
 			});
 		}
 	}
@@ -166,33 +169,37 @@ public:
 	/// @brief Constructs the specified alternative in-place by index.
 	template<std::size_t I, typename... Args>
 	constexpr explicit custom_tagged_variant(std::in_place_index_t<I>, Args&&... args)
-		: index_(I) {
+		: index_(npos) {
 		construct<I>(std::forward<Args>(args)...);
+		index_ = I;
 	}
 
 	/// @brief Constructs the specified alternative in-place by index with initializer_list.
 	template<std::size_t I, typename U, typename... Args>
 	constexpr explicit custom_tagged_variant(std::in_place_index_t<I>, std::initializer_list<U> init, Args&&... args)
-		: index_(I) {
+		: index_(npos) {
 		construct<I>(init, std::forward<Args>(args)...);
+		index_ = I;
 	}
 
 	/// @brief Constructs the specified alternative in-place by type.
 	template<typename T, typename... Args>
 	constexpr explicit custom_tagged_variant(std::in_place_type_t<T>, Args&&... args)
-		: index_(detail::index_of_exact_v<T, Types...>) {
+		: index_(npos) {
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
 		static_assert(index != npos, "Type not found in custom_tagged_variant");
 		construct<index>(std::forward<Args>(args)...);
+		index_ = index;
 	}
 
 	/// @brief Constructs the specified alternative in-place by type with initializer_list.
 	template<typename T, typename U, typename... Args>
 	constexpr explicit custom_tagged_variant(std::in_place_type_t<T>, std::initializer_list<U> init, Args&&... args)
-		: index_(detail::index_of_exact_v<T, Types...>) {
+		: index_(npos) {
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
 		static_assert(index != npos, "Type not found in custom_tagged_variant");
 		construct<index>(init, std::forward<Args>(args)...);
+		index_ = index;
 	}
 
 	/// @brief Converting constructor from a value (exact-type match).
@@ -203,8 +210,10 @@ public:
 							!detail::is_in_place_type_v<U> &&
 							(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
 		constexpr custom_tagged_variant(T&& value)
-		: index_(detail::index_of_exact_v<U, Types...>) {
-		construct<detail::index_of_exact_v<U, Types...>>(std::forward<T>(value));
+		: index_(npos) {
+		constexpr std::size_t index = detail::index_of_exact_v<U, Types...>;
+		construct<index>(std::forward<T>(value));
+		index_ = index;
 	}
 
 	~custom_tagged_variant() {
@@ -251,8 +260,8 @@ public:
 			*std::launder(reinterpret_cast<U*>(&storage_)) = std::forward<T>(value);
 		} else {
 			destroy_active();
-			index_ = I;
 			construct<I>(std::forward<T>(value));
+			index_ = I;
 		}
 		return *this;
 	}
@@ -267,8 +276,8 @@ public:
 	template<std::size_t I, typename... Args>
 	decltype(auto) emplace(Args&&... args) {
 		destroy_active();
-		index_ = I;
 		construct<I>(std::forward<Args>(args)...);
+		index_ = I;
 		return get<I>();
 	}
 
@@ -276,8 +285,8 @@ public:
 	template<std::size_t I, typename U, typename... Args>
 	decltype(auto) emplace(std::initializer_list<U> init, Args&&... args) {
 		destroy_active();
-		index_ = I;
 		construct<I>(init, std::forward<Args>(args)...);
+		index_ = I;
 		return get<I>();
 	}
 
@@ -477,10 +486,10 @@ private:
 			return;
 		}
 		destroy_active();
-		index_ = other.index_;
 		visit_active(other, [&](auto index_tag, auto&& value) {
 			constexpr std::size_t I = decltype(index_tag)::value;
 			construct<I>(std::forward<decltype(value)>(value));
+			index_ = I;
 		});
 	}
 

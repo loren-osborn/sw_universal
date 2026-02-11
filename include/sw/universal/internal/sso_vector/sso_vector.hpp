@@ -1,5 +1,5 @@
 #pragma once
-// sso_vector.hpp: small-string-optimized vector utility mirroring std::vector (C++20)
+// sso_vector.hpp: vector utility mirroring std::vector (C++20)
 //
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
 // SPDX-License-Identifier: MIT
@@ -21,10 +21,9 @@ namespace sw { namespace universal {
 
 namespace internal {
 
-/// @brief std::vector-compatible container with a small-buffer optimization.
+/// @brief std::vector-compatible container.
 /// @tparam T Element type.
 /// @tparam Allocator Allocator type.
-/// @note The inline storage size is chosen based on pointer-sized budget.
 template<typename T, typename Allocator = std::allocator<T>>
 class sso_vector {
 public:
@@ -47,7 +46,7 @@ public:
 
 	/// @brief Constructs with an allocator.
 	explicit sso_vector(const Allocator& alloc) noexcept
-		: alloc_(alloc), size_(0), capacity_(sso_capacity), data_(sso_data()) {}
+		: alloc_(alloc), size_(0), capacity_(0), data_(nullptr) {}
 
 	/// @brief Constructs with count default-inserted elements.
 	sso_vector(size_type count, const Allocator& alloc = Allocator())
@@ -56,8 +55,13 @@ public:
 			return;
 		}
 		ensure_capacity(count);
-		uninitialized_default_n(data_, count);
-		size_ = count;
+		try {
+			uninitialized_default_n(data_, count);
+			size_ = count;
+		} catch (...) {
+			release_heap();
+			throw;
+		}
 	}
 
 	/// @brief Constructs with count copies of value.
@@ -67,8 +71,13 @@ public:
 			return;
 		}
 		ensure_capacity(count);
-		uninitialized_fill_n(data_, count, value);
-		size_ = count;
+		try {
+			uninitialized_fill_n(data_, count, value);
+			size_ = count;
+		} catch (...) {
+			release_heap();
+			throw;
+		}
 	}
 
 	/// @brief Constructs from an iterator range.
@@ -89,19 +98,24 @@ public:
 			return;
 		}
 		ensure_capacity(other.size_);
-		uninitialized_copy_n(other.data_, other.size_, data_);
-		size_ = other.size_;
+		try {
+			uninitialized_copy_n(other.data_, other.size_, data_);
+			size_ = other.size_;
+		} catch (...) {
+			release_heap();
+			throw;
+		}
 	}
 
 	/// @brief Move constructor.
 	sso_vector(sso_vector&& other) noexcept
-		: alloc_(std::move(other.alloc_)), size_(0), capacity_(sso_capacity), data_(sso_data()) {
+		: alloc_(std::move(other.alloc_)), size_(0), capacity_(0), data_(nullptr) {
 		move_from_other(std::move(other));
 	}
 
 	/// @brief Move constructor with allocator.
 	sso_vector(sso_vector&& other, const Allocator& alloc)
-		: alloc_(alloc), size_(0), capacity_(sso_capacity), data_(sso_data()) {
+		: alloc_(alloc), size_(0), capacity_(0), data_(nullptr) {
 		if (alloc_ == other.alloc_) {
 			move_from_other(std::move(other));
 		} else {
@@ -214,13 +228,13 @@ public:
 	const_iterator cbegin() const noexcept { return data_; }
 
 	/// @brief End iterator.
-	iterator end() noexcept { return data_ + size_; }
+	iterator end() noexcept { return data_ ? data_ + size_ : data_; }
 
 	/// @brief End iterator (const).
-	const_iterator end() const noexcept { return data_ + size_; }
+	const_iterator end() const noexcept { return data_ ? data_ + size_ : data_; }
 
 	/// @brief End iterator (const).
-	const_iterator cend() const noexcept { return data_ + size_; }
+	const_iterator cend() const noexcept { return data_ ? data_ + size_ : data_; }
 
 	/// @brief Reverse begin iterator.
 	reverse_iterator rbegin() noexcept { return reverse_iterator(end()); }
@@ -267,8 +281,8 @@ public:
 		if (size_ == capacity_) {
 			return;
 		}
-		if (size_ <= sso_capacity) {
-			move_to_sso();
+		if (size_ == 0) {
+			release_heap();
 			return;
 		}
 		reallocate(size_);
@@ -296,12 +310,19 @@ public:
 		if (count == 0) {
 			return begin() + index;
 		}
-		ensure_capacity(size_ + count);
-		iterator insert_pos = begin() + index;
-		move_tail_backward(insert_pos, count);
-		std::uninitialized_fill_n(insert_pos, count, value);
-		size_ += count;
-		return insert_pos;
+		sso_vector temp(alloc_);
+		temp.reserve(size_ + count);
+		for (size_type i = 0; i < index; ++i) {
+			temp.emplace_back(std::move_if_noexcept(data_[i]));
+		}
+		for (size_type i = 0; i < count; ++i) {
+			temp.emplace_back(value);
+		}
+		for (size_type i = index; i < size_; ++i) {
+			temp.emplace_back(std::move_if_noexcept(data_[i]));
+		}
+		swap(temp);
+		return begin() + index;
 	}
 
 	/// @brief Inserts a range.
@@ -321,17 +342,23 @@ public:
 	template<typename... Args>
 	iterator emplace(const_iterator pos, Args&&... args) {
 		const size_type index = static_cast<size_type>(pos - cbegin());
-		ensure_capacity(size_ + 1);
-		iterator insert_pos = begin() + index;
-		if (insert_pos == end()) {
+		if (index == size_) {
+			ensure_capacity(size_ + 1);
 			std::allocator_traits<Allocator>::construct(alloc_, data_ + size_, std::forward<Args>(args)...);
 			size_ += 1;
 			return end() - 1;
 		}
-		move_tail_backward(insert_pos, 1);
-		std::allocator_traits<Allocator>::construct(alloc_, insert_pos, std::forward<Args>(args)...);
-		size_ += 1;
-		return insert_pos;
+		sso_vector temp(alloc_);
+		temp.reserve(size_ + 1);
+		for (size_type i = 0; i < index; ++i) {
+			temp.emplace_back(std::move_if_noexcept(data_[i]));
+		}
+		temp.emplace_back(std::forward<Args>(args)...);
+		for (size_type i = index; i < size_; ++i) {
+			temp.emplace_back(std::move_if_noexcept(data_[i]));
+		}
+		swap(temp);
+		return begin() + index;
 	}
 
 	/// @brief Emplaces an element at the end.
@@ -412,16 +439,6 @@ public:
 		if constexpr (std::allocator_traits<Allocator>::propagate_on_container_swap::value) {
 			std::swap(alloc_, other.alloc_);
 		}
-		if (using_sso() && other.using_sso()) {
-			swap_sso(other);
-			return;
-		}
-		if (using_sso() || other.using_sso()) {
-			sso_vector tmp(std::move(*this));
-			*this = std::move(other);
-			other = std::move(tmp);
-			return;
-		}
 		std::swap(data_, other.data_);
 		std::swap(size_, other.size_);
 		std::swap(capacity_, other.capacity_);
@@ -448,30 +465,10 @@ public:
 
 	/// @brief Returns whether storage is using the inline buffer.
 	bool using_sso() const noexcept {
-		return data_ == sso_data();
+		return false;
 	}
 
 private:
-	static constexpr size_type sso_bytes = 3 * sizeof(void*);
-	static constexpr size_type sso_capacity = (sizeof(T) <= sso_bytes) ? (sso_bytes / sizeof(T)) : 0;
-
-	pointer sso_data() noexcept {
-		return reinterpret_cast<pointer>(sso_buffer_);
-	}
-
-	const_pointer sso_data() const noexcept {
-		return reinterpret_cast<const_pointer>(sso_buffer_);
-	}
-
-	void fixup_sso_pointer() noexcept {
-		if (data_ == nullptr) {
-			return;
-		}
-		if (capacity_ <= sso_capacity) {
-			data_ = sso_data();
-		}
-	}
-
 	void ensure_capacity(size_type desired) {
 		if (desired <= capacity_) {
 			return;
@@ -488,40 +485,32 @@ private:
 		return std::max(desired, doubled);
 	}
 
-	void move_to_sso() {
-		if (using_sso()) {
-			capacity_ = sso_capacity;
-			return;
-		}
-		pointer old = data_;
-		pointer target = sso_data();
-		for (size_type i = 0; i < size_; ++i) {
-			std::allocator_traits<Allocator>::construct(alloc_, target + i, std::move(old[i]));
-		}
-		destroy_range(old, old + size_);
-		deallocate_heap(old, capacity_);
-		data_ = target;
-		capacity_ = sso_capacity;
-	}
-
 	void release_heap() noexcept {
-		if (using_sso() || data_ == nullptr) {
+		if (data_ == nullptr) {
 			return;
 		}
 		deallocate_heap(data_, capacity_);
-		data_ = sso_data();
-		capacity_ = sso_capacity;
+		data_ = nullptr;
+		capacity_ = 0;
 	}
 
 	void reallocate(size_type new_cap) {
 		pointer new_data = allocate_heap(new_cap);
 		pointer old_data = data_;
 		size_type old_size = size_;
-		for (size_type i = 0; i < old_size; ++i) {
-			std::allocator_traits<Allocator>::construct(alloc_, new_data + i, std::move_if_noexcept(old_data[i]));
+		size_type constructed = 0;
+		try {
+			for (; constructed < old_size; ++constructed) {
+				std::allocator_traits<Allocator>::construct(
+					alloc_, new_data + constructed, std::move_if_noexcept(old_data[constructed]));
+			}
+		} catch (...) {
+			destroy_range(new_data, new_data + constructed);
+			deallocate_heap(new_data, new_cap);
+			throw;
 		}
 		destroy_range(old_data, old_data + old_size);
-		if (!using_sso()) {
+		if (old_data != nullptr) {
 			deallocate_heap(old_data, capacity_);
 		}
 		data_ = new_data;
@@ -529,111 +518,80 @@ private:
 	}
 
 	void move_from_other(sso_vector&& other) {
-		if (other.using_sso()) {
-			ensure_capacity(other.size_);
-			for (size_type i = 0; i < other.size_; ++i) {
-				std::allocator_traits<Allocator>::construct(alloc_, data_ + i, std::move(other.data_[i]));
-			}
-			size_ = other.size_;
-			other.clear();
-			return;
-		}
 		data_ = other.data_;
 		size_ = other.size_;
 		capacity_ = other.capacity_;
-		other.data_ = other.sso_data();
-		other.capacity_ = sso_capacity;
+		other.data_ = nullptr;
+		other.capacity_ = 0;
 		other.size_ = 0;
-	}
-
-	void swap_sso(sso_vector& other) noexcept {
-		const size_type max_size = std::max(size_, other.size_);
-		for (size_type i = 0; i < max_size; ++i) {
-			if (i < size_ && i < other.size_) {
-				using std::swap;
-				swap(data_[i], other.data_[i]);
-			} else if (i < size_) {
-				std::allocator_traits<Allocator>::construct(other.alloc_, other.data_ + i, std::move(data_[i]));
-				std::allocator_traits<Allocator>::destroy(alloc_, data_ + i);
-			} else if (i < other.size_) {
-				std::allocator_traits<Allocator>::construct(alloc_, data_ + i, std::move(other.data_[i]));
-				std::allocator_traits<Allocator>::destroy(other.alloc_, other.data_ + i);
-			}
-		}
-		std::swap(size_, other.size_);
-	}
-
-	void move_tail_backward(iterator insert_pos, size_type count) {
-		if (count == 0) {
-			return;
-		}
-		iterator old_end = end();
-		for (iterator src = old_end; src != insert_pos; --src) {
-			iterator src_elem = src - 1;
-			iterator dst_elem = src_elem + count;
-			if (dst_elem >= old_end) {
-				std::allocator_traits<Allocator>::construct(alloc_, dst_elem, std::move(*src_elem));
-			} else {
-				*dst_elem = std::move(*src_elem);
-			}
-		}
-		const size_type tail = static_cast<size_type>(old_end - insert_pos);
-		const size_type destroy_count = std::min(count, tail);
-		destroy_range(insert_pos, insert_pos + destroy_count);
 	}
 
 	template<typename InputIt>
 	void insert_range(size_type index, InputIt first, InputIt last) {
 		using category = typename std::iterator_traits<InputIt>::iterator_category;
+		sso_vector temp(alloc_);
 		if constexpr (std::is_base_of_v<std::forward_iterator_tag, category>) {
 			const size_type count = static_cast<size_type>(std::distance(first, last));
 			if (count == 0) {
 				return;
 			}
-			ensure_capacity(size_ + count);
-			iterator insert_pos = begin() + index;
-			move_tail_backward(insert_pos, count);
-			uninitialized_copy_n(first, count, insert_pos);
-			size_ += count;
+			temp.reserve(size_ + count);
 		} else {
-			for (; first != last; ++first) {
-				emplace(begin() + index++, *first);
-			}
+			temp.reserve(size_);
 		}
+		for (size_type i = 0; i < index; ++i) {
+			temp.emplace_back(std::move_if_noexcept(data_[i]));
+		}
+		for (; first != last; ++first) {
+			temp.emplace_back(*first);
+		}
+		for (size_type i = index; i < size_; ++i) {
+			temp.emplace_back(std::move_if_noexcept(data_[i]));
+		}
+		swap(temp);
 	}
 
 	template<typename InputIt>
 	void assign_range(InputIt first, InputIt last) {
-		clear();
-		using category = typename std::iterator_traits<InputIt>::iterator_category;
-		if constexpr (std::is_base_of_v<std::forward_iterator_tag, category>) {
-			const size_type count = static_cast<size_type>(std::distance(first, last));
-			ensure_capacity(count);
-			uninitialized_copy_n(first, count, data_);
-			size_ = count;
-		} else {
-			for (; first != last; ++first) {
-				emplace_back(*first);
-			}
-		}
+		sso_vector temp(alloc_);
+		temp.insert_range(0, first, last);
+		swap(temp);
 	}
 
 	void uninitialized_default_n(pointer dest, size_type count) {
-		for (size_type i = 0; i < count; ++i) {
-			std::allocator_traits<Allocator>::construct(alloc_, dest + i);
+		size_type constructed = 0;
+		try {
+			for (; constructed < count; ++constructed) {
+				std::allocator_traits<Allocator>::construct(alloc_, dest + constructed);
+			}
+		} catch (...) {
+			destroy_range(dest, dest + constructed);
+			throw;
 		}
 	}
 
 	void uninitialized_fill_n(pointer dest, size_type count, const T& value) {
-		for (size_type i = 0; i < count; ++i) {
-			std::allocator_traits<Allocator>::construct(alloc_, dest + i, value);
+		size_type constructed = 0;
+		try {
+			for (; constructed < count; ++constructed) {
+				std::allocator_traits<Allocator>::construct(alloc_, dest + constructed, value);
+			}
+		} catch (...) {
+			destroy_range(dest, dest + constructed);
+			throw;
 		}
 	}
 
 	template<typename InputIt>
 	void uninitialized_copy_n(InputIt src, size_type count, pointer dest) {
-		for (size_type i = 0; i < count; ++i, ++src) {
-			std::allocator_traits<Allocator>::construct(alloc_, dest + i, *src);
+		size_type constructed = 0;
+		try {
+			for (; constructed < count; ++constructed, ++src) {
+				std::allocator_traits<Allocator>::construct(alloc_, dest + constructed, *src);
+			}
+		} catch (...) {
+			destroy_range(dest, dest + constructed);
+			throw;
 		}
 	}
 
@@ -653,9 +611,8 @@ private:
 
 	Allocator alloc_{};
 	size_type size_{0};
-	size_type capacity_{sso_capacity};
-	pointer data_{sso_data()};
-	alignas(T) unsigned char sso_buffer_[sso_capacity > 0 ? sso_capacity * sizeof(T) : 1]{};
+	size_type capacity_{0};
+	pointer data_{nullptr};
 };
 
 /// @brief Equality comparison.
