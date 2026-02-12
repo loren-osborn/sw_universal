@@ -413,7 +413,36 @@ public:
 
 	/// @brief Resizes to count default-inserted elements.
 	void resize(size_type count) {
-		resize(count, T());
+		if (count < size_) {
+			destroy_range(data_ + count, data_ + size_);
+			size_ = count;
+			return;
+		}
+		if (count == size_) {
+			return;
+		}
+		if (count > capacity_) {
+			sso_vector temp(alloc_);
+			temp.reserve(count);
+			for (size_type i = 0; i < size_; ++i) {
+				temp.emplace_back(std::move_if_noexcept(data_[i]));
+			}
+			for (size_type i = size_; i < count; ++i) {
+				temp.emplace_back();
+			}
+			swap(temp);
+			return;
+		}
+		size_type constructed = 0;
+		try {
+			for (; constructed < count - size_; ++constructed) {
+				std::allocator_traits<Allocator>::construct(alloc_, data_ + size_ + constructed);
+			}
+		} catch (...) {
+			destroy_range(data_ + size_, data_ + size_ + constructed);
+			throw;
+		}
+		size_ = count;
 	}
 
 	/// @brief Resizes to count elements, value-initializing new ones with value.
@@ -426,8 +455,28 @@ public:
 		if (count == size_) {
 			return;
 		}
-		ensure_capacity(count);
-		uninitialized_fill_n(data_ + size_, count - size_, value);
+		if (count > capacity_) {
+			const T value_copy = value;
+			sso_vector temp(alloc_);
+			temp.reserve(count);
+			for (size_type i = 0; i < size_; ++i) {
+				temp.emplace_back(std::move_if_noexcept(data_[i]));
+			}
+			for (size_type i = size_; i < count; ++i) {
+				temp.emplace_back(value_copy);
+			}
+			swap(temp);
+			return;
+		}
+		size_type constructed = 0;
+		try {
+			for (; constructed < count - size_; ++constructed) {
+				std::allocator_traits<Allocator>::construct(alloc_, data_ + size_ + constructed, value);
+			}
+		} catch (...) {
+			destroy_range(data_ + size_, data_ + size_ + constructed);
+			throw;
+		}
 		size_ = count;
 	}
 
