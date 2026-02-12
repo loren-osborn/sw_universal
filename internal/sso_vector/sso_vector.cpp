@@ -59,6 +59,20 @@ struct LiveCountedType {
 
 int LiveCountedType::live = 0;
 
+struct MoveOnly {
+	static int live;
+	int value;
+	MoveOnly() : value(123) { ++live; }
+	explicit MoveOnly(int v) : value(v) { ++live; }
+	MoveOnly(const MoveOnly&) = delete;
+	MoveOnly& operator=(const MoveOnly&) = delete;
+	MoveOnly(MoveOnly&& other) noexcept : value(other.value) { other.value = 0; ++live; }
+	MoveOnly& operator=(MoveOnly&& other) noexcept { value = other.value; other.value = 0; return *this; }
+	~MoveOnly() { --live; }
+};
+
+int MoveOnly::live = 0;
+
 struct ThrowingType {
 	static int live;
 	static int default_count;
@@ -136,6 +150,11 @@ int ThrowingType::throw_on_copy = -1;
 int ThrowingType::throw_on_move = -1;
 int ThrowingType::throw_on_copy_assign = -1;
 int ThrowingType::throw_on_move_assign = -1;
+
+template<class V>
+constexpr bool has_using_sso = requires(const V& v) { v.using_sso(); };
+
+static_assert(!has_using_sso<sw::universal::internal::sso_vector<int>>);
 
 struct AllocState {
 	int alloc_calls = 0;
@@ -320,6 +339,20 @@ void run_vector_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		MoveOnly::live = 0;
+		VecDefaultAlloc<Vec, MoveOnly> v;
+		v.resize(3);
+		check(ctx, v.size() == 3, "resize default size");
+		check(ctx, v[0].value == 123 && v[1].value == 123 && v[2].value == 123, "resize default values");
+		check(ctx, MoveOnly::live == 3, "resize default live count");
+		v.resize(1);
+		check(ctx, v.size() == 1, "resize shrink size");
+		check(ctx, MoveOnly::live == 1, "resize shrink live count");
+		v.clear();
+		check(ctx, MoveOnly::live == 0, "resize clear live count");
+	}
+
+	{
 		VecDefaultAlloc<Vec, std::string> vs({"a", "b", "c"});
 		VecDefaultAlloc<Vec, std::string> vs_copy(vs);
 		check(ctx, vs_copy == vs, "copy equality");
@@ -385,6 +418,21 @@ void run_vector_suite(const char* impl_name, int& failures) {
 		check_invariants(v, ctx, "insert throw invariants");
 		v.clear();
 		check(ctx, ThrowingType::live == 0, "clear after insert throw");
+	}
+
+	{
+		ThrowingType::reset();
+		VecDefaultAlloc<Vec, ThrowingType> v;
+		for (int i = 0; i < 3; ++i) v.emplace_back(i);
+		ThrowingType::throw_on_default = 2;
+		expect_throw<std::runtime_error>(ctx, "resize growth throws", [&]() {
+			v.resize(6);
+		});
+		check(ctx, v.size() == 3, "resize throw size unchanged");
+		check(ctx, v[0].value == 0 && v[1].value == 1 && v[2].value == 2, "resize throw values preserved");
+		check(ctx, ThrowingType::live == static_cast<int>(v.size()), "resize throw live count");
+		v.clear();
+		check(ctx, ThrowingType::live == 0, "resize throw clear live count");
 	}
 
 	{
