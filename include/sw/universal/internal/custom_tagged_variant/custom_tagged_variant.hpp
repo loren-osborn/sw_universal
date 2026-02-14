@@ -24,17 +24,6 @@ namespace sw { namespace universal {
 
 namespace internal {
 
-/// @brief Exception type thrown on invalid variant access.
-class bad_variant_access final : public std::exception {
-public:
-	const char* what() const noexcept override {
-		return "bad custom_tagged_variant access";
-	}
-};
-
-/// @brief Sentinel index value for valueless variants.
-inline constexpr std::size_t variant_npos = static_cast<std::size_t>(-1);
-
 namespace custom_tagged_variant_detail {
 
 	template<std::size_t I, typename... Ts>
@@ -56,12 +45,12 @@ namespace custom_tagged_variant_detail {
 	struct index_of_exact<T, U, Ts...> {
 		static constexpr std::size_t value = std::is_same_v<T, U>
 			? 0
-			: (index_of_exact<T, Ts...>::value == variant_npos ? variant_npos : 1 + index_of_exact<T, Ts...>::value);
+			: (index_of_exact<T, Ts...>::value == std::variant_npos ? std::variant_npos : 1 + index_of_exact<T, Ts...>::value);
 	};
 
 	template<typename T>
 	struct index_of_exact<T> {
-		static constexpr std::size_t value = variant_npos;
+		static constexpr std::size_t value = std::variant_npos;
 	};
 
 	template<typename T, typename... Ts>
@@ -128,7 +117,7 @@ class custom_tagged_variant {
 
 public:
 	using tag_encoding = TagEncoding;
-	static constexpr std::size_t npos = variant_npos;
+	static constexpr std::size_t npos = std::variant_npos;
 
 	using index_type = std::size_t;
 
@@ -396,7 +385,7 @@ public:
 	template<std::size_t I>
 	decltype(auto) get() & {
 		if (index_ != I) {
-			throw bad_variant_access{};
+			throw std::bad_variant_access{};
 		}
 		using T = detail::type_at_t<I, Types...>;
 		return *std::launder(reinterpret_cast<T*>(&storage_));
@@ -406,7 +395,7 @@ public:
 	template<std::size_t I>
 	decltype(auto) get() const & {
 		if (index_ != I) {
-			throw bad_variant_access{};
+			throw std::bad_variant_access{};
 		}
 		using T = detail::type_at_t<I, Types...>;
 		return *std::launder(reinterpret_cast<const T*>(&storage_));
@@ -416,7 +405,7 @@ public:
 	template<std::size_t I>
 	decltype(auto) get() && {
 		if (index_ != I) {
-			throw bad_variant_access{};
+			throw std::bad_variant_access{};
 		}
 		using T = detail::type_at_t<I, Types...>;
 		return std::move(*std::launder(reinterpret_cast<T*>(&storage_)));
@@ -426,7 +415,7 @@ public:
 	template<std::size_t I>
 	decltype(auto) get() const && {
 		if (index_ != I) {
-			throw bad_variant_access{};
+			throw std::bad_variant_access{};
 		}
 		using T = detail::type_at_t<I, Types...>;
 		return std::move(*std::launder(reinterpret_cast<const T*>(&storage_)));
@@ -503,7 +492,7 @@ public:
 	}
 
 private:
-	template<std::size_t I, typename... Args>	
+	template<std::size_t I, typename... Args>
 	void construct(Args&&... args) {
 		using T = detail::type_at_t<I, Types...>;
 		::new (static_cast<void*>(&storage_)) T(std::forward<Args>(args)...);
@@ -749,8 +738,8 @@ namespace custom_tagged_variant_detail {
 	template<typename Variant, std::size_t... Is>
 	auto make_reference_variant_impl(Variant& v, std::index_sequence<Is...>) {
 		using ref_variant = std::variant<std::reference_wrapper<variant_alternative_t<Is, Variant>>...>;
-		if (v.index() == variant_npos) {
-			throw bad_variant_access{};
+		if (v.index() == std::variant_npos) {
+			throw std::bad_variant_access{};
 		}
 		std::optional<ref_variant> refs;
 		((v.index() == Is ? (refs.emplace(std::in_place_index<Is>, std::ref(v.template get<Is>())), true) : false) || ...);
@@ -768,7 +757,7 @@ namespace custom_tagged_variant_detail {
 template<typename Visitor, typename... Variants>
 inline decltype(auto) visit(Visitor&& vis, Variants&&... variants) {
 	if ((variants.valueless_by_exception() || ...)) {
-		throw bad_variant_access{};
+		throw std::bad_variant_access{};
 	}
 	auto ref_variants = std::make_tuple(custom_tagged_variant_detail::make_reference_variant(variants)...);
 	return std::apply([
