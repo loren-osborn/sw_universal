@@ -1,4 +1,4 @@
-// custom_tagged_variant.cpp: unit tests for custom_tagged_variant
+// custom_indexed_variant.cpp: unit tests for custom_indexed_variant
 //
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
 // SPDX-License-Identifier: MIT
@@ -13,7 +13,7 @@
 #include <utility>
 #include <variant>
 
-#include <universal/internal/custom_tagged_variant/custom_tagged_variant.hpp>
+#include <universal/internal/custom_indexed_variant/custom_indexed_variant.hpp>
 #include <universal/verification/test_status.hpp>
 
 namespace {
@@ -185,8 +185,8 @@ namespace variant_test {
 	template<typename Variant>
 	struct is_custom_variant : std::false_type {};
 
-	template<template<std::size_t NTypes> class EncodedTag, typename... Ts>
-	struct is_custom_variant<sw::universal::internal::custom_tagged_variant<EncodedTag, Ts...>> : std::true_type {};
+	template<template<std::size_t NTypes> class EncodedIndex, typename... Ts>
+	struct is_custom_variant<sw::universal::internal::custom_indexed_variant<EncodedIndex, Ts...>> : std::true_type {};
 
 	template<typename Variant>
 	inline constexpr bool is_custom_variant_v = is_custom_variant<std::decay_t<Variant>>::value;
@@ -204,58 +204,58 @@ namespace variant_test {
 } // namespace
 
 template<class... Ts>
-using CustomVariant = sw::universal::internal::custom_tagged_variant<sw::universal::internal::simple_encoded_tag, Ts...>;
+using CustomVariant = sw::universal::internal::custom_indexed_variant<sw::universal::internal::simple_encoded_index, Ts...>;
 
 template<class... Ts>
-using SidebandVariant = sw::universal::internal::custom_tagged_variant<sw::universal::internal::tag_encoded_with_sideband_data, Ts...>;
+using SidebandVariant = sw::universal::internal::custom_indexed_variant<sw::universal::internal::index_encoded_with_sideband_data, Ts...>;
 
-void run_encoded_tag_tests(const char* impl_name, int& failures) {
+void run_encoded_index_tests(const char* impl_name, int& failures) {
 	TestContext ctx{impl_name, failures};
 
 	{
-		sw::universal::internal::simple_encoded_tag<3> tag{};
-		check(ctx, tag.tag() == 0, "simple_encoded_tag default tag is 0");
-		tag.set_tag(2);
-		check(ctx, tag.tag() == 2, "simple_encoded_tag set/get normal value");
-		tag.set_tag(std::variant_npos);
-		check(ctx, tag.tag() == std::variant_npos, "simple_encoded_tag variant_npos round trip");
+		sw::universal::internal::simple_encoded_index<3> index{};
+		check(ctx, index.index() == 0, "simple_encoded_index default index is 0");
+		index.set_index(2);
+		check(ctx, index.index() == 2, "simple_encoded_index set/get normal value");
+		index.set_index(std::variant_npos);
+		check(ctx, index.index() == std::variant_npos, "simple_encoded_index variant_npos round trip");
 	}
 
 	{
-		using Tag = sw::universal::internal::tag_encoded_with_sideband_data<3>;
-		Tag tag{};
-		check(ctx, tag.tag() == 0, "tag_encoded_with_sideband_data default tag is 0");
-		check(ctx, static_cast<std::size_t>(tag.sideband()) == 0, "tag_encoded_with_sideband_data default sideband is 0");
-		tag.set_tag(1);
-		check(ctx, tag.tag() == 1, "tag_encoded_with_sideband_data stores tag");
-		tag.set_tag(2);
-		tag.sideband() = 5;
-		check(ctx, tag.tag() == 2, "tag_encoded_with_sideband_data sideband write preserves tag");
-		check(ctx, static_cast<std::size_t>(tag.sideband()) == 5, "tag_encoded_with_sideband_data sideband shift semantics");
-		tag.set_tag(std::variant_npos);
-		check(ctx, tag.tag() == std::variant_npos, "tag_encoded_with_sideband_data npos round trip");
-		check(ctx, static_cast<std::size_t>(tag.sideband()) == 5, "tag_encoded_with_sideband_data npos preserves sideband");
-		tag.set_tag(1);
-		check(ctx, static_cast<std::size_t>(tag.sideband()) == 5, "tag_encoded_with_sideband_data tag write preserves sideband");
-		tag.sideband() = 3;
-		check(ctx, tag.tag() == 1, "tag_encoded_with_sideband_data sideband write preserves tag");
+		using Index = sw::universal::internal::index_encoded_with_sideband_data<3>;
+		Index index{};
+		check(ctx, index.index() == 0, "index_encoded_with_sideband_data default index is 0");
+		check(ctx, static_cast<std::size_t>(index.sideband()) == 0, "index_encoded_with_sideband_data default sideband is 0");
+		index.set_index(1);
+		check(ctx, index.index() == 1, "index_encoded_with_sideband_data stores index");
+		index.set_index(2);
+		index.sideband() = 5;
+		check(ctx, index.index() == 2, "index_encoded_with_sideband_data sideband write preserves index");
+		check(ctx, static_cast<std::size_t>(index.sideband()) == 5, "index_encoded_with_sideband_data sideband shift semantics");
+		index.set_index(std::variant_npos);
+		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data npos round trip");
+		check(ctx, static_cast<std::size_t>(index.sideband()) == 5, "index_encoded_with_sideband_data npos preserves sideband");
+		index.set_index(1);
+		check(ctx, static_cast<std::size_t>(index.sideband()) == 5, "index_encoded_with_sideband_data index write preserves sideband");
+		index.sideband() = 3;
+		check(ctx, index.index() == 1, "index_encoded_with_sideband_data sideband write preserves index");
 
-		auto proxy_a = tag.sideband();
-		auto proxy_b = tag.sideband();
+		auto proxy_a = index.sideband();
+		auto proxy_b = index.sideband();
 		proxy_a = 7;
-		check(ctx, static_cast<std::size_t>(proxy_b) == 7, "tag_encoded_with_sideband_data proxy coherence A->B");
+		check(ctx, static_cast<std::size_t>(proxy_b) == 7, "index_encoded_with_sideband_data proxy coherence A->B");
 		proxy_b = 2;
-		check(ctx, static_cast<std::size_t>(proxy_a) == 2, "tag_encoded_with_sideband_data proxy coherence B->A");
+		check(ctx, static_cast<std::size_t>(proxy_a) == 2, "index_encoded_with_sideband_data proxy coherence B->A");
 	}
 
 	{
-		using Tag = sw::universal::internal::tag_encoded_with_sideband_data<7>;
-		Tag tag{};
-		check(ctx, tag.tag() == 0, "tag_encoded_with_sideband_data(7) default tag is 0");
-		tag.set_tag(6);
-		check(ctx, tag.tag() == 6, "tag_encoded_with_sideband_data(7) stores tag");
-		tag.sideband() = 12;
-		check(ctx, static_cast<std::size_t>(tag.sideband()) == 12, "tag_encoded_with_sideband_data(7) sideband round trip");
+		using Index = sw::universal::internal::index_encoded_with_sideband_data<7>;
+		Index index{};
+		check(ctx, index.index() == 0, "index_encoded_with_sideband_data(7) default index is 0");
+		index.set_index(6);
+		check(ctx, index.index() == 6, "index_encoded_with_sideband_data(7) stores index");
+		index.sideband() = 12;
+		check(ctx, static_cast<std::size_t>(index.sideband()) == 12, "index_encoded_with_sideband_data(7) sideband round trip");
 	}
 }
 
@@ -438,11 +438,11 @@ void run_variant_suite(const char* impl_name, int& failures) {
 
 int main() {
 	int nrOfFailedTestCases = 0;
-	run_encoded_tag_tests("encoded_tag", nrOfFailedTestCases);
-	run_variant_suite<CustomVariant>("custom_tagged_variant", nrOfFailedTestCases);
-	run_variant_suite<SidebandVariant>("custom_tagged_variant_sideband", nrOfFailedTestCases);
+	run_encoded_index_tests("encoded_index", nrOfFailedTestCases);
+	run_variant_suite<CustomVariant>("custom_indexed_variant", nrOfFailedTestCases);
+	run_variant_suite<SidebandVariant>("custom_indexed_variant_sideband", nrOfFailedTestCases);
 	run_variant_suite<std::variant>("std::variant", nrOfFailedTestCases);
 
-	sw::universal::ReportTestResult(nrOfFailedTestCases, "custom_tagged_variant", "unit test");
+	sw::universal::ReportTestResult(nrOfFailedTestCases, "custom_indexed_variant", "unit test");
 	return (nrOfFailedTestCases > 0 ? EXIT_FAILURE : EXIT_SUCCESS);
 }
