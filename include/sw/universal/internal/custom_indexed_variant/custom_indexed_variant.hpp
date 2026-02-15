@@ -1,5 +1,5 @@
 #pragma once
-// custom_tagged_variant.hpp: tagged variant utility mirroring std::variant (C++20)
+// custom_indexed_variant.hpp: indexed variant utility mirroring std::variant (C++20)
 //
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
 // SPDX-License-Identifier: MIT
@@ -25,7 +25,7 @@ namespace sw { namespace universal {
 
 namespace internal {
 
-namespace custom_tagged_variant_detail {
+namespace custom_indexed_variant_detail {
 
 	template<std::size_t I, typename... Ts>
 	struct type_at;
@@ -103,22 +103,22 @@ namespace custom_tagged_variant_detail {
 	template<typename T>
 	inline constexpr bool is_in_place_type_v = is_in_place_type<T>::value;
 
-} // namespace custom_tagged_variant_detail
+} // namespace custom_indexed_variant_detail
 
-namespace detail = custom_tagged_variant_detail;
+namespace detail = custom_indexed_variant_detail;
 
 template<std::size_t NTypes>
-struct simple_encoded_tag {
-	simple_encoded_tag() = default;
-	std::size_t tag() const { return tag_; }
-	void set_tag(std::size_t val) { tag_ = val; }
+struct simple_encoded_index {
+	simple_encoded_index() = default;
+	std::size_t index() const { return index_; }
+	void set_index(std::size_t val) { index_ = val; }
 
 private:
-	std::size_t tag_ = 0;
+	std::size_t index_ = 0;
 };
 
 template<std::size_t NTypes>
-struct tag_encoded_with_sideband_data {
+struct index_encoded_with_sideband_data {
 	static constexpr std::size_t width = std::numeric_limits<std::size_t>::digits;
 	static constexpr std::size_t npos_code = NTypes;
 
@@ -132,40 +132,40 @@ struct tag_encoded_with_sideband_data {
 		return bits;
 	}
 
-	static constexpr std::size_t tag_bits = ceil_log2(NTypes + 1);
-	static constexpr std::size_t tag_mask = tag_bits == 0 ? 0
-		: (tag_bits >= width ? ~std::size_t(0) : ((std::size_t(1) << tag_bits) - 1));
-	static constexpr std::size_t sideband_mask = ~tag_mask;
+	static constexpr std::size_t index_bits = ceil_log2(NTypes + 1);
+	static constexpr std::size_t index_mask = index_bits == 0 ? 0
+		: (index_bits >= width ? ~std::size_t(0) : ((std::size_t(1) << index_bits) - 1));
+	static constexpr std::size_t sideband_mask = ~index_mask;
 
 	struct sideband_proxy {
 		std::size_t* data = nullptr;
 
 		operator std::size_t() const {
-			if constexpr (tag_bits >= width) {
+			if constexpr (index_bits >= width) {
 				return 0;
 			} else {
-				return ((*data) & sideband_mask) >> tag_bits;
+				return ((*data) & sideband_mask) >> index_bits;
 			}
 		}
 
 		sideband_proxy& operator=(std::size_t value) {
-			if constexpr (tag_bits < width) {
-				const std::size_t shifted = (value << tag_bits) & sideband_mask;
-				*data = ((*data) & tag_mask) | shifted;
+			if constexpr (index_bits < width) {
+				const std::size_t shifted = (value << index_bits) & sideband_mask;
+				*data = ((*data) & index_mask) | shifted;
 			}
 			return *this;
 		}
 	};
 
-	tag_encoded_with_sideband_data() = default;
+	index_encoded_with_sideband_data() = default;
 
-	std::size_t tag() const {
-		const std::size_t stored = data_ & tag_mask;
+	std::size_t index() const {
+		const std::size_t stored = data_ & index_mask;
 		return stored == npos_code ? std::variant_npos : stored;
 	}
 
-	void set_tag(std::size_t val) {
-		const std::size_t stored = (val == std::variant_npos) ? npos_code : (val & tag_mask);
+	void set_index(std::size_t val) {
+		const std::size_t stored = (val == std::variant_npos) ? npos_code : (val & index_mask);
 		data_ = (data_ & sideband_mask) | stored;
 	}
 
@@ -175,25 +175,25 @@ private:
 	std::size_t data_ = 0;
 };
 
-/// @brief A tagged variant implementation modeled after std::variant (C++20).
-/// @tparam EncodedTag Reserved tag encoding selector (currently unused).
+/// @brief An indexed variant implementation modeled after std::variant (C++20).
+/// @tparam EncodedIndex Reserved index encoding selector (currently unused).
 /// @tparam Types Alternative types stored in the variant.
 /// @note This implementation prefers exact-type construction when using converting constructors.
-template<template<std::size_t NTypes> class EncodedTag, typename... Types>
-class custom_tagged_variant {
-	static_assert(sizeof...(Types) > 0, "custom_tagged_variant must have at least one alternative");
+template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
+class custom_indexed_variant {
+	static_assert(sizeof...(Types) > 0, "custom_indexed_variant must have at least one alternative");
 	using storage_traits = detail::storage_traits<Types...>;
 	static constexpr std::size_t ntypes = sizeof...(Types);
 
 public:
-	using encoded_tag_t = EncodedTag<ntypes>;
-	using tag_encoding = encoded_tag_t;
+	using encoded_index_t = EncodedIndex<ntypes>;
+	using index_encoding = encoded_index_t;
 	static constexpr std::size_t npos = std::variant_npos;
 
 	using index_type = std::size_t;
 
 	/// @brief Default-constructs the first alternative.
-	custom_tagged_variant() noexcept(std::is_nothrow_default_constructible_v<detail::type_at_t<0, Types...>>)
+	custom_indexed_variant() noexcept(std::is_nothrow_default_constructible_v<detail::type_at_t<0, Types...>>)
 		requires std::is_default_constructible_v<detail::type_at_t<0, Types...>>
 		: index_(npos) {
 		construct<0>();
@@ -201,7 +201,7 @@ public:
 	}
 
 	/// @brief Copy-constructs from another variant.
-	custom_tagged_variant(const custom_tagged_variant& other)
+	custom_indexed_variant(const custom_indexed_variant& other)
 		requires detail::all_copy_constructible<Types...>::value
 		: index_(npos) {
 		if (!other.valueless_by_exception()) {
@@ -214,7 +214,7 @@ public:
 	}
 
 	/// @brief Move-constructs from another variant.
-	custom_tagged_variant(custom_tagged_variant&& other) noexcept(detail::all_nothrow_move_constructible<Types...>::value)
+	custom_indexed_variant(custom_indexed_variant&& other) noexcept(detail::all_nothrow_move_constructible<Types...>::value)
 		requires detail::all_move_constructible<Types...>::value
 		: index_(npos) {
 		if (!other.valueless_by_exception()) {
@@ -228,7 +228,7 @@ public:
 
 	/// @brief Constructs the specified alternative in-place by index.
 	template<std::size_t I, typename... Args>
-	constexpr explicit custom_tagged_variant(std::in_place_index_t<I>, Args&&... args)
+	constexpr explicit custom_indexed_variant(std::in_place_index_t<I>, Args&&... args)
 		: index_(npos) {
 		construct<I>(std::forward<Args>(args)...);
 		index_ = I;
@@ -236,7 +236,7 @@ public:
 
 	/// @brief Constructs the specified alternative in-place by index with initializer_list.
 	template<std::size_t I, typename U, typename... Args>
-	constexpr explicit custom_tagged_variant(std::in_place_index_t<I>, std::initializer_list<U> init, Args&&... args)
+	constexpr explicit custom_indexed_variant(std::in_place_index_t<I>, std::initializer_list<U> init, Args&&... args)
 		: index_(npos) {
 		construct<I>(init, std::forward<Args>(args)...);
 		index_ = I;
@@ -244,20 +244,20 @@ public:
 
 	/// @brief Constructs the specified alternative in-place by type.
 	template<typename T, typename... Args>
-	constexpr explicit custom_tagged_variant(std::in_place_type_t<T>, Args&&... args)
+	constexpr explicit custom_indexed_variant(std::in_place_type_t<T>, Args&&... args)
 		: index_(npos) {
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
-		static_assert(index != npos, "Type not found in custom_tagged_variant");
+		static_assert(index != npos, "Type not found in custom_indexed_variant");
 		construct<index>(std::forward<Args>(args)...);
 		index_ = index;
 	}
 
 	/// @brief Constructs the specified alternative in-place by type with initializer_list.
 	template<typename T, typename U, typename... Args>
-	constexpr explicit custom_tagged_variant(std::in_place_type_t<T>, std::initializer_list<U> init, Args&&... args)
+	constexpr explicit custom_indexed_variant(std::in_place_type_t<T>, std::initializer_list<U> init, Args&&... args)
 		: index_(npos) {
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
-		static_assert(index != npos, "Type not found in custom_tagged_variant");
+		static_assert(index != npos, "Type not found in custom_indexed_variant");
 		construct<index>(init, std::forward<Args>(args)...);
 		index_ = index;
 	}
@@ -265,23 +265,23 @@ public:
 	/// @brief Converting constructor from a value (exact-type match).
 	template<typename T,
 			typename U = detail::remove_cvref_t<T>,
-			std::enable_if_t<!std::is_same_v<U, custom_tagged_variant> &&
+			std::enable_if_t<!std::is_same_v<U, custom_indexed_variant> &&
 							!detail::is_in_place_index_v<U> &&
 							!detail::is_in_place_type_v<U> &&
 							(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
-		constexpr custom_tagged_variant(T&& value)
+		constexpr custom_indexed_variant(T&& value)
 		: index_(npos) {
 		constexpr std::size_t index = detail::index_of_exact_v<U, Types...>;
 		construct<index>(std::forward<T>(value));
 		index_ = index;
 	}
 
-	~custom_tagged_variant() {
+	~custom_indexed_variant() {
 		destroy_active();
 	}
 
 	/// @brief Copy-assigns from another variant.
-	custom_tagged_variant& operator=(const custom_tagged_variant& other)
+	custom_indexed_variant& operator=(const custom_indexed_variant& other)
 		requires detail::all_copy_constructible<Types...>::value && detail::all_copy_assignable<Types...>::value {
 		if (this == &other) {
 			return *this;
@@ -296,7 +296,7 @@ public:
 	}
 
 	/// @brief Move-assigns from another variant.
-	custom_tagged_variant& operator=(custom_tagged_variant&& other) noexcept(detail::all_nothrow_move_constructible<Types...>::value)
+	custom_indexed_variant& operator=(custom_indexed_variant&& other) noexcept(detail::all_nothrow_move_constructible<Types...>::value)
 		requires detail::all_move_constructible<Types...>::value && detail::all_move_assignable<Types...>::value {
 		if (this == &other) {
 			return *this;
@@ -314,7 +314,7 @@ public:
 	template<typename T,
 			typename U = detail::remove_cvref_t<T>,
 			std::enable_if_t<(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
-	custom_tagged_variant& operator=(T&& value) {
+	custom_indexed_variant& operator=(T&& value) {
 		constexpr std::size_t I = detail::index_of_exact_v<U, Types...>;
 		if (index_ == I) {
 			*std::launder(reinterpret_cast<U*>(&storage_)) = std::forward<T>(value);
@@ -392,7 +392,7 @@ public:
 	template<typename T, typename... Args>
 	decltype(auto) emplace(Args&&... args) {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
-		static_assert(I != npos, "Type not found in custom_tagged_variant");
+		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return emplace<I>(std::forward<Args>(args)...);
 	}
 
@@ -400,12 +400,12 @@ public:
 	template<typename T, typename U, typename... Args>
 	decltype(auto) emplace(std::initializer_list<U> init, Args&&... args) {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
-		static_assert(I != npos, "Type not found in custom_tagged_variant");
+		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return emplace<I>(init, std::forward<Args>(args)...);
 	}
 
 	/// @brief Swaps this variant with another.
-	void swap(custom_tagged_variant& other)
+	void swap(custom_indexed_variant& other)
 		requires detail::all_swappable<Types...>::value && detail::all_move_constructible<Types...>::value {
 		if (this == &other) {
 			return;
@@ -496,7 +496,7 @@ public:
 	template<typename T>
 	decltype(auto) get() & {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
-		static_assert(I != npos, "Type not found in custom_tagged_variant");
+		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return get<I>();
 	}
 
@@ -504,7 +504,7 @@ public:
 	template<typename T>
 	decltype(auto) get() const & {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
-		static_assert(I != npos, "Type not found in custom_tagged_variant");
+		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return get<I>();
 	}
 
@@ -512,7 +512,7 @@ public:
 	template<typename T>
 	decltype(auto) get() && {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
-		static_assert(I != npos, "Type not found in custom_tagged_variant");
+		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return std::move(get<I>());
 	}
 
@@ -520,7 +520,7 @@ public:
 	template<typename T>
 	decltype(auto) get() const && {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
-		static_assert(I != npos, "Type not found in custom_tagged_variant");
+		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return std::move(get<I>());
 	}
 
@@ -542,7 +542,7 @@ public:
 	template<typename T>
 	auto get_if() noexcept {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
-		static_assert(I != npos, "Type not found in custom_tagged_variant");
+		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return get_if<I>();
 	}
 
@@ -550,7 +550,7 @@ public:
 	template<typename T>
 	auto get_if() const noexcept {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
-		static_assert(I != npos, "Type not found in custom_tagged_variant");
+		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return get_if<I>();
 	}
 
@@ -558,7 +558,7 @@ public:
 	template<typename T>
 	bool holds_alternative() const noexcept {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
-		static_assert(I != npos, "Type not found in custom_tagged_variant");
+		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return index_ == I;
 	}
 
@@ -637,7 +637,7 @@ private:
 		});
 	}
 
-	void swap_same_index(custom_tagged_variant& other) {
+	void swap_same_index(custom_indexed_variant& other) {
 		visit_active(*this, [&](auto index_tag, auto& value) {
 			using std::swap;
 			swap(value, other.template get<decltype(index_tag)::value>());
@@ -645,7 +645,7 @@ private:
 	}
 
 	template<std::size_t L, std::size_t R>
-	void swap_different_index(custom_tagged_variant& other) {
+	void swap_different_index(custom_indexed_variant& other) {
 		using Left = detail::type_at_t<L, Types...>;
 		using Right = detail::type_at_t<R, Types...>;
 		std::optional<Left> left_value;
@@ -679,132 +679,132 @@ private:
 	std::size_t index_ = npos;
 };
 
-/// @brief Variant size trait for custom_tagged_variant.
+/// @brief Variant size trait for custom_indexed_variant.
 template<typename Variant>
 struct variant_size;
 
-template<template<std::size_t NTypes> class EncodedTag, typename... Types>
-struct variant_size<custom_tagged_variant<EncodedTag, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
+template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
+struct variant_size<custom_indexed_variant<EncodedIndex, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
-template<template<std::size_t NTypes> class EncodedTag, typename... Types>
-struct variant_size<const custom_tagged_variant<EncodedTag, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
+template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
+struct variant_size<const custom_indexed_variant<EncodedIndex, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
-template<template<std::size_t NTypes> class EncodedTag, typename... Types>
-struct variant_size<volatile custom_tagged_variant<EncodedTag, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
+template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
+struct variant_size<volatile custom_indexed_variant<EncodedIndex, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
-template<template<std::size_t NTypes> class EncodedTag, typename... Types>
-struct variant_size<const volatile custom_tagged_variant<EncodedTag, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
+template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
+struct variant_size<const volatile custom_indexed_variant<EncodedIndex, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
 template<typename Variant>
 inline constexpr std::size_t variant_size_v = variant_size<Variant>::value;
 
-/// @brief Variant alternative trait for custom_tagged_variant.
+/// @brief Variant alternative trait for custom_indexed_variant.
 template<std::size_t I, typename Variant>
 struct variant_alternative;
 
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-struct variant_alternative<I, custom_tagged_variant<EncodedTag, Types...>> {
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+struct variant_alternative<I, custom_indexed_variant<EncodedIndex, Types...>> {
 	static_assert(I < sizeof...(Types), "variant alternative index out of bounds");
-	using type = custom_tagged_variant_detail::type_at_t<I, Types...>;
+	using type = custom_indexed_variant_detail::type_at_t<I, Types...>;
 };
 
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-struct variant_alternative<I, const custom_tagged_variant<EncodedTag, Types...>> {
-	using type = std::add_const_t<typename variant_alternative<I, custom_tagged_variant<EncodedTag, Types...>>::type>;
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+struct variant_alternative<I, const custom_indexed_variant<EncodedIndex, Types...>> {
+	using type = std::add_const_t<typename variant_alternative<I, custom_indexed_variant<EncodedIndex, Types...>>::type>;
 };
 
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-struct variant_alternative<I, volatile custom_tagged_variant<EncodedTag, Types...>> {
-	using type = std::add_volatile_t<typename variant_alternative<I, custom_tagged_variant<EncodedTag, Types...>>::type>;
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+struct variant_alternative<I, volatile custom_indexed_variant<EncodedIndex, Types...>> {
+	using type = std::add_volatile_t<typename variant_alternative<I, custom_indexed_variant<EncodedIndex, Types...>>::type>;
 };
 
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-struct variant_alternative<I, const volatile custom_tagged_variant<EncodedTag, Types...>> {
-	using type = std::add_cv_t<typename variant_alternative<I, custom_tagged_variant<EncodedTag, Types...>>::type>;
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+struct variant_alternative<I, const volatile custom_indexed_variant<EncodedIndex, Types...>> {
+	using type = std::add_cv_t<typename variant_alternative<I, custom_indexed_variant<EncodedIndex, Types...>>::type>;
 };
 
 template<std::size_t I, typename Variant>
 using variant_alternative_t = typename variant_alternative<I, Variant>::type;
 
 /// @brief True if variant holds the alternative T.
-template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline bool holds_alternative(const custom_tagged_variant<EncodedTag, Types...>& v) noexcept {
+template<typename T, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline bool holds_alternative(const custom_indexed_variant<EncodedIndex, Types...>& v) noexcept {
 	return v.template holds_alternative<T>();
 }
 
 /// @brief Access the alternative by index.
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline decltype(auto) get(custom_tagged_variant<EncodedTag, Types...>& v) {
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline decltype(auto) get(custom_indexed_variant<EncodedIndex, Types...>& v) {
 	return v.template get<I>();
 }
 
 /// @brief Access the alternative by index (const).
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline decltype(auto) get(const custom_tagged_variant<EncodedTag, Types...>& v) {
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline decltype(auto) get(const custom_indexed_variant<EncodedIndex, Types...>& v) {
 	return v.template get<I>();
 }
 
 /// @brief Access the alternative by index (rvalue).
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline decltype(auto) get(custom_tagged_variant<EncodedTag, Types...>&& v) {
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline decltype(auto) get(custom_indexed_variant<EncodedIndex, Types...>&& v) {
 	return std::move(v).template get<I>();
 }
 
 /// @brief Access the alternative by index (const rvalue).
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline decltype(auto) get(const custom_tagged_variant<EncodedTag, Types...>&& v) {
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline decltype(auto) get(const custom_indexed_variant<EncodedIndex, Types...>&& v) {
 	return std::move(v).template get<I>();
 }
 
 /// @brief Access the alternative by type.
-template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline decltype(auto) get(custom_tagged_variant<EncodedTag, Types...>& v) {
+template<typename T, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline decltype(auto) get(custom_indexed_variant<EncodedIndex, Types...>& v) {
 	return v.template get<T>();
 }
 
 /// @brief Access the alternative by type (const).
-template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline decltype(auto) get(const custom_tagged_variant<EncodedTag, Types...>& v) {
+template<typename T, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline decltype(auto) get(const custom_indexed_variant<EncodedIndex, Types...>& v) {
 	return v.template get<T>();
 }
 
 /// @brief Access the alternative by type (rvalue).
-template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline decltype(auto) get(custom_tagged_variant<EncodedTag, Types...>&& v) {
+template<typename T, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline decltype(auto) get(custom_indexed_variant<EncodedIndex, Types...>&& v) {
 	return std::move(v).template get<T>();
 }
 
 /// @brief Access the alternative by type (const rvalue).
-template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline decltype(auto) get(const custom_tagged_variant<EncodedTag, Types...>&& v) {
+template<typename T, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline decltype(auto) get(const custom_indexed_variant<EncodedIndex, Types...>&& v) {
 	return std::move(v).template get<T>();
 }
 
 /// @brief Pointer access to alternative by index.
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline auto get_if(custom_tagged_variant<EncodedTag, Types...>* v) noexcept {
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline auto get_if(custom_indexed_variant<EncodedIndex, Types...>* v) noexcept {
 	return v ? v->template get_if<I>() : nullptr;
 }
 
 /// @brief Pointer access to alternative by index (const).
-template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline auto get_if(const custom_tagged_variant<EncodedTag, Types...>* v) noexcept {
+template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline auto get_if(const custom_indexed_variant<EncodedIndex, Types...>* v) noexcept {
 	return v ? v->template get_if<I>() : nullptr;
 }
 
 /// @brief Pointer access to alternative by type.
-template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline auto get_if(custom_tagged_variant<EncodedTag, Types...>* v) noexcept {
+template<typename T, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline auto get_if(custom_indexed_variant<EncodedIndex, Types...>* v) noexcept {
 	return v ? v->template get_if<T>() : nullptr;
 }
 
 /// @brief Pointer access to alternative by type (const).
-template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
-inline auto get_if(const custom_tagged_variant<EncodedTag, Types...>* v) noexcept {
+template<typename T, template<std::size_t NTypes> class EncodedIndex, typename... Types>
+inline auto get_if(const custom_indexed_variant<EncodedIndex, Types...>* v) noexcept {
 	return v ? v->template get_if<T>() : nullptr;
 }
 
-namespace custom_tagged_variant_detail {
+namespace custom_indexed_variant_detail {
 
 	template<typename Variant, std::size_t... Is>
 	auto make_reference_variant_impl(Variant& v, std::index_sequence<Is...>) {
@@ -822,7 +822,7 @@ namespace custom_tagged_variant_detail {
 		return make_reference_variant_impl(v, std::make_index_sequence<variant_size_v<Variant>>{});
 	}
 
-} // namespace custom_tagged_variant_detail
+} // namespace custom_indexed_variant_detail
 
 /// @brief Visit the active alternative(s) with a callable.
 template<typename Visitor, typename... Variants>
@@ -830,7 +830,7 @@ inline decltype(auto) visit(Visitor&& vis, Variants&&... variants) {
 	if ((variants.valueless_by_exception() || ...)) {
 		throw std::bad_variant_access{};
 	}
-	auto ref_variants = std::make_tuple(custom_tagged_variant_detail::make_reference_variant(variants)...);
+	auto ref_variants = std::make_tuple(custom_indexed_variant_detail::make_reference_variant(variants)...);
 	return std::apply([
 		&](auto&... refs) -> decltype(auto) {
 			auto wrapper = [&](auto&... ref_wrappers) -> decltype(auto) {
