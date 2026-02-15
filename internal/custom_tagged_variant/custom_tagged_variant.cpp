@@ -5,6 +5,7 @@
 //
 // This file is part of the universal numbers project, which is released under an MIT Open Source license.
 #include <cstdlib>
+#include <cstddef>
 #include <iostream>
 #include <string>
 #include <stdexcept>
@@ -184,8 +185,8 @@ namespace variant_test {
 	template<typename Variant>
 	struct is_custom_variant : std::false_type {};
 
-	template<typename TagEncoding, typename... Ts>
-	struct is_custom_variant<sw::universal::internal::custom_tagged_variant<TagEncoding, Ts...>> : std::true_type {};
+	template<template<std::size_t NTypes> class EncodedTag, typename... Ts>
+	struct is_custom_variant<sw::universal::internal::custom_tagged_variant<EncodedTag, Ts...>> : std::true_type {};
 
 	template<typename Variant>
 	inline constexpr bool is_custom_variant_v = is_custom_variant<std::decay_t<Variant>>::value;
@@ -203,7 +204,60 @@ namespace variant_test {
 } // namespace
 
 template<class... Ts>
-using CustomVariant = sw::universal::internal::custom_tagged_variant<void, Ts...>;
+using CustomVariant = sw::universal::internal::custom_tagged_variant<sw::universal::internal::simple_encoded_tag, Ts...>;
+
+template<class... Ts>
+using SidebandVariant = sw::universal::internal::custom_tagged_variant<sw::universal::internal::tag_encoded_with_sideband_data, Ts...>;
+
+void run_encoded_tag_tests(const char* impl_name, int& failures) {
+	TestContext ctx{impl_name, failures};
+
+	{
+		sw::universal::internal::simple_encoded_tag<3> tag{};
+		check(ctx, tag.tag() == 0, "simple_encoded_tag default tag is 0");
+		tag.set_tag(2);
+		check(ctx, tag.tag() == 2, "simple_encoded_tag set/get normal value");
+		tag.set_tag(std::variant_npos);
+		check(ctx, tag.tag() == std::variant_npos, "simple_encoded_tag variant_npos round trip");
+	}
+
+	{
+		using Tag = sw::universal::internal::tag_encoded_with_sideband_data<3>;
+		Tag tag{};
+		check(ctx, tag.tag() == 0, "tag_encoded_with_sideband_data default tag is 0");
+		check(ctx, static_cast<std::size_t>(tag.sideband()) == 0, "tag_encoded_with_sideband_data default sideband is 0");
+		tag.set_tag(1);
+		check(ctx, tag.tag() == 1, "tag_encoded_with_sideband_data stores tag");
+		tag.set_tag(2);
+		tag.sideband() = 5;
+		check(ctx, tag.tag() == 2, "tag_encoded_with_sideband_data sideband write preserves tag");
+		check(ctx, static_cast<std::size_t>(tag.sideband()) == 5, "tag_encoded_with_sideband_data sideband shift semantics");
+		tag.set_tag(std::variant_npos);
+		check(ctx, tag.tag() == std::variant_npos, "tag_encoded_with_sideband_data npos round trip");
+		check(ctx, static_cast<std::size_t>(tag.sideband()) == 5, "tag_encoded_with_sideband_data npos preserves sideband");
+		tag.set_tag(1);
+		check(ctx, static_cast<std::size_t>(tag.sideband()) == 5, "tag_encoded_with_sideband_data tag write preserves sideband");
+		tag.sideband() = 3;
+		check(ctx, tag.tag() == 1, "tag_encoded_with_sideband_data sideband write preserves tag");
+
+		auto proxy_a = tag.sideband();
+		auto proxy_b = tag.sideband();
+		proxy_a = 7;
+		check(ctx, static_cast<std::size_t>(proxy_b) == 7, "tag_encoded_with_sideband_data proxy coherence A->B");
+		proxy_b = 2;
+		check(ctx, static_cast<std::size_t>(proxy_a) == 2, "tag_encoded_with_sideband_data proxy coherence B->A");
+	}
+
+	{
+		using Tag = sw::universal::internal::tag_encoded_with_sideband_data<7>;
+		Tag tag{};
+		check(ctx, tag.tag() == 0, "tag_encoded_with_sideband_data(7) default tag is 0");
+		tag.set_tag(6);
+		check(ctx, tag.tag() == 6, "tag_encoded_with_sideband_data(7) stores tag");
+		tag.sideband() = 12;
+		check(ctx, static_cast<std::size_t>(tag.sideband()) == 12, "tag_encoded_with_sideband_data(7) sideband round trip");
+	}
+}
 
 template<template<class...> class Variant>
 void run_variant_suite(const char* impl_name, int& failures) {
@@ -384,7 +438,9 @@ void run_variant_suite(const char* impl_name, int& failures) {
 
 int main() {
 	int nrOfFailedTestCases = 0;
+	run_encoded_tag_tests("encoded_tag", nrOfFailedTestCases);
 	run_variant_suite<CustomVariant>("custom_tagged_variant", nrOfFailedTestCases);
+	run_variant_suite<SidebandVariant>("custom_tagged_variant_sideband", nrOfFailedTestCases);
 	run_variant_suite<std::variant>("std::variant", nrOfFailedTestCases);
 
 	sw::universal::ReportTestResult(nrOfFailedTestCases, "custom_tagged_variant", "unit test");

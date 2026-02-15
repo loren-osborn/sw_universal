@@ -12,6 +12,7 @@
 #include <exception>
 #include <functional>
 #include <initializer_list>
+#include <limits>
 #include <memory>
 #include <new>
 #include <optional>
@@ -106,17 +107,87 @@ namespace custom_tagged_variant_detail {
 
 namespace detail = custom_tagged_variant_detail;
 
+template<std::size_t NTypes>
+struct simple_encoded_tag {
+	simple_encoded_tag() = default;
+	std::size_t tag() const { return tag_; }
+	void set_tag(std::size_t val) { tag_ = val; }
+
+private:
+	std::size_t tag_ = 0;
+};
+
+template<std::size_t NTypes>
+struct tag_encoded_with_sideband_data {
+	static constexpr std::size_t width = std::numeric_limits<std::size_t>::digits;
+	static constexpr std::size_t npos_code = NTypes;
+
+	static constexpr std::size_t ceil_log2(std::size_t value) {
+		std::size_t bits = 0;
+		std::size_t v = value > 0 ? value - 1 : 0;
+		while (v > 0) {
+			v >>= 1;
+			++bits;
+		}
+		return bits;
+	}
+
+	static constexpr std::size_t tag_bits = ceil_log2(NTypes + 1);
+	static constexpr std::size_t tag_mask = tag_bits == 0 ? 0
+		: (tag_bits >= width ? ~std::size_t(0) : ((std::size_t(1) << tag_bits) - 1));
+	static constexpr std::size_t sideband_mask = ~tag_mask;
+
+	struct sideband_proxy {
+		std::size_t* data = nullptr;
+
+		operator std::size_t() const {
+			if constexpr (tag_bits >= width) {
+				return 0;
+			} else {
+				return ((*data) & sideband_mask) >> tag_bits;
+			}
+		}
+
+		sideband_proxy& operator=(std::size_t value) {
+			if constexpr (tag_bits < width) {
+				const std::size_t shifted = (value << tag_bits) & sideband_mask;
+				*data = ((*data) & tag_mask) | shifted;
+			}
+			return *this;
+		}
+	};
+
+	tag_encoded_with_sideband_data() = default;
+
+	std::size_t tag() const {
+		const std::size_t stored = data_ & tag_mask;
+		return stored == npos_code ? std::variant_npos : stored;
+	}
+
+	void set_tag(std::size_t val) {
+		const std::size_t stored = (val == std::variant_npos) ? npos_code : (val & tag_mask);
+		data_ = (data_ & sideband_mask) | stored;
+	}
+
+	sideband_proxy sideband() { return sideband_proxy{&data_}; }
+
+private:
+	std::size_t data_ = 0;
+};
+
 /// @brief A tagged variant implementation modeled after std::variant (C++20).
-/// @tparam TagEncoding Reserved tag encoding selector (currently unused).
+/// @tparam EncodedTag Reserved tag encoding selector (currently unused).
 /// @tparam Types Alternative types stored in the variant.
 /// @note This implementation prefers exact-type construction when using converting constructors.
-template<typename TagEncoding, typename... Types>
+template<template<std::size_t NTypes> class EncodedTag, typename... Types>
 class custom_tagged_variant {
 	static_assert(sizeof...(Types) > 0, "custom_tagged_variant must have at least one alternative");
 	using storage_traits = detail::storage_traits<Types...>;
+	static constexpr std::size_t ntypes = sizeof...(Types);
 
 public:
-	using tag_encoding = TagEncoding;
+	using encoded_tag_t = EncodedTag<ntypes>;
+	using tag_encoding = encoded_tag_t;
 	static constexpr std::size_t npos = std::variant_npos;
 
 	using index_type = std::size_t;
@@ -612,17 +683,17 @@ private:
 template<typename Variant>
 struct variant_size;
 
-template<typename TagEncoding, typename... Types>
-struct variant_size<custom_tagged_variant<TagEncoding, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
+template<template<std::size_t NTypes> class EncodedTag, typename... Types>
+struct variant_size<custom_tagged_variant<EncodedTag, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
-template<typename TagEncoding, typename... Types>
-struct variant_size<const custom_tagged_variant<TagEncoding, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
+template<template<std::size_t NTypes> class EncodedTag, typename... Types>
+struct variant_size<const custom_tagged_variant<EncodedTag, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
-template<typename TagEncoding, typename... Types>
-struct variant_size<volatile custom_tagged_variant<TagEncoding, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
+template<template<std::size_t NTypes> class EncodedTag, typename... Types>
+struct variant_size<volatile custom_tagged_variant<EncodedTag, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
-template<typename TagEncoding, typename... Types>
-struct variant_size<const volatile custom_tagged_variant<TagEncoding, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
+template<template<std::size_t NTypes> class EncodedTag, typename... Types>
+struct variant_size<const volatile custom_tagged_variant<EncodedTag, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
 template<typename Variant>
 inline constexpr std::size_t variant_size_v = variant_size<Variant>::value;
@@ -631,105 +702,105 @@ inline constexpr std::size_t variant_size_v = variant_size<Variant>::value;
 template<std::size_t I, typename Variant>
 struct variant_alternative;
 
-template<std::size_t I, typename TagEncoding, typename... Types>
-struct variant_alternative<I, custom_tagged_variant<TagEncoding, Types...>> {
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+struct variant_alternative<I, custom_tagged_variant<EncodedTag, Types...>> {
 	static_assert(I < sizeof...(Types), "variant alternative index out of bounds");
 	using type = custom_tagged_variant_detail::type_at_t<I, Types...>;
 };
 
-template<std::size_t I, typename TagEncoding, typename... Types>
-struct variant_alternative<I, const custom_tagged_variant<TagEncoding, Types...>> {
-	using type = std::add_const_t<typename variant_alternative<I, custom_tagged_variant<TagEncoding, Types...>>::type>;
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+struct variant_alternative<I, const custom_tagged_variant<EncodedTag, Types...>> {
+	using type = std::add_const_t<typename variant_alternative<I, custom_tagged_variant<EncodedTag, Types...>>::type>;
 };
 
-template<std::size_t I, typename TagEncoding, typename... Types>
-struct variant_alternative<I, volatile custom_tagged_variant<TagEncoding, Types...>> {
-	using type = std::add_volatile_t<typename variant_alternative<I, custom_tagged_variant<TagEncoding, Types...>>::type>;
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+struct variant_alternative<I, volatile custom_tagged_variant<EncodedTag, Types...>> {
+	using type = std::add_volatile_t<typename variant_alternative<I, custom_tagged_variant<EncodedTag, Types...>>::type>;
 };
 
-template<std::size_t I, typename TagEncoding, typename... Types>
-struct variant_alternative<I, const volatile custom_tagged_variant<TagEncoding, Types...>> {
-	using type = std::add_cv_t<typename variant_alternative<I, custom_tagged_variant<TagEncoding, Types...>>::type>;
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+struct variant_alternative<I, const volatile custom_tagged_variant<EncodedTag, Types...>> {
+	using type = std::add_cv_t<typename variant_alternative<I, custom_tagged_variant<EncodedTag, Types...>>::type>;
 };
 
 template<std::size_t I, typename Variant>
 using variant_alternative_t = typename variant_alternative<I, Variant>::type;
 
 /// @brief True if variant holds the alternative T.
-template<typename T, typename TagEncoding, typename... Types>
-inline bool holds_alternative(const custom_tagged_variant<TagEncoding, Types...>& v) noexcept {
+template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline bool holds_alternative(const custom_tagged_variant<EncodedTag, Types...>& v) noexcept {
 	return v.template holds_alternative<T>();
 }
 
 /// @brief Access the alternative by index.
-template<std::size_t I, typename TagEncoding, typename... Types>
-inline decltype(auto) get(custom_tagged_variant<TagEncoding, Types...>& v) {
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline decltype(auto) get(custom_tagged_variant<EncodedTag, Types...>& v) {
 	return v.template get<I>();
 }
 
 /// @brief Access the alternative by index (const).
-template<std::size_t I, typename TagEncoding, typename... Types>
-inline decltype(auto) get(const custom_tagged_variant<TagEncoding, Types...>& v) {
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline decltype(auto) get(const custom_tagged_variant<EncodedTag, Types...>& v) {
 	return v.template get<I>();
 }
 
 /// @brief Access the alternative by index (rvalue).
-template<std::size_t I, typename TagEncoding, typename... Types>
-inline decltype(auto) get(custom_tagged_variant<TagEncoding, Types...>&& v) {
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline decltype(auto) get(custom_tagged_variant<EncodedTag, Types...>&& v) {
 	return std::move(v).template get<I>();
 }
 
 /// @brief Access the alternative by index (const rvalue).
-template<std::size_t I, typename TagEncoding, typename... Types>
-inline decltype(auto) get(const custom_tagged_variant<TagEncoding, Types...>&& v) {
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline decltype(auto) get(const custom_tagged_variant<EncodedTag, Types...>&& v) {
 	return std::move(v).template get<I>();
 }
 
 /// @brief Access the alternative by type.
-template<typename T, typename TagEncoding, typename... Types>
-inline decltype(auto) get(custom_tagged_variant<TagEncoding, Types...>& v) {
+template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline decltype(auto) get(custom_tagged_variant<EncodedTag, Types...>& v) {
 	return v.template get<T>();
 }
 
 /// @brief Access the alternative by type (const).
-template<typename T, typename TagEncoding, typename... Types>
-inline decltype(auto) get(const custom_tagged_variant<TagEncoding, Types...>& v) {
+template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline decltype(auto) get(const custom_tagged_variant<EncodedTag, Types...>& v) {
 	return v.template get<T>();
 }
 
 /// @brief Access the alternative by type (rvalue).
-template<typename T, typename TagEncoding, typename... Types>
-inline decltype(auto) get(custom_tagged_variant<TagEncoding, Types...>&& v) {
+template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline decltype(auto) get(custom_tagged_variant<EncodedTag, Types...>&& v) {
 	return std::move(v).template get<T>();
 }
 
 /// @brief Access the alternative by type (const rvalue).
-template<typename T, typename TagEncoding, typename... Types>
-inline decltype(auto) get(const custom_tagged_variant<TagEncoding, Types...>&& v) {
+template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline decltype(auto) get(const custom_tagged_variant<EncodedTag, Types...>&& v) {
 	return std::move(v).template get<T>();
 }
 
 /// @brief Pointer access to alternative by index.
-template<std::size_t I, typename TagEncoding, typename... Types>
-inline auto get_if(custom_tagged_variant<TagEncoding, Types...>* v) noexcept {
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline auto get_if(custom_tagged_variant<EncodedTag, Types...>* v) noexcept {
 	return v ? v->template get_if<I>() : nullptr;
 }
 
 /// @brief Pointer access to alternative by index (const).
-template<std::size_t I, typename TagEncoding, typename... Types>
-inline auto get_if(const custom_tagged_variant<TagEncoding, Types...>* v) noexcept {
+template<std::size_t I, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline auto get_if(const custom_tagged_variant<EncodedTag, Types...>* v) noexcept {
 	return v ? v->template get_if<I>() : nullptr;
 }
 
 /// @brief Pointer access to alternative by type.
-template<typename T, typename TagEncoding, typename... Types>
-inline auto get_if(custom_tagged_variant<TagEncoding, Types...>* v) noexcept {
+template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline auto get_if(custom_tagged_variant<EncodedTag, Types...>* v) noexcept {
 	return v ? v->template get_if<T>() : nullptr;
 }
 
 /// @brief Pointer access to alternative by type (const).
-template<typename T, typename TagEncoding, typename... Types>
-inline auto get_if(const custom_tagged_variant<TagEncoding, Types...>* v) noexcept {
+template<typename T, template<std::size_t NTypes> class EncodedTag, typename... Types>
+inline auto get_if(const custom_tagged_variant<EncodedTag, Types...>* v) noexcept {
 	return v ? v->template get_if<T>() : nullptr;
 }
 
