@@ -214,7 +214,7 @@ void run_encoded_index_tests(const char* impl_name, int& failures) {
 
 	{
 		sw::universal::internal::simple_encoded_index<3> index{};
-		check(ctx, index.index() == 0, "simple_encoded_index default index is 0");
+		check(ctx, index.index() == std::variant_npos, "sximple_encoded_index default index is std::variant_npos");
 		index.set_index(2);
 		check(ctx, index.index() == 2, "simple_encoded_index set/get normal value");
 		index.set_index(std::variant_npos);
@@ -224,38 +224,38 @@ void run_encoded_index_tests(const char* impl_name, int& failures) {
 	{
 		using Index = sw::universal::internal::index_encoded_with_sideband_data<3>;
 		Index index{};
-		check(ctx, index.index() == 0, "index_encoded_with_sideband_data default index is 0");
-		check(ctx, static_cast<std::size_t>(index.sideband()) == 0, "index_encoded_with_sideband_data default sideband is 0");
+		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data default index is std::variant_npos");
+		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 0, "index_encoded_with_sideband_data default sideband is 0");
 		index.set_index(1);
 		check(ctx, index.index() == 1, "index_encoded_with_sideband_data stores index");
 		index.set_index(2);
-		index.sideband() = 5;
+		index.sideband().set_val(5);
 		check(ctx, index.index() == 2, "index_encoded_with_sideband_data sideband write preserves index");
-		check(ctx, static_cast<std::size_t>(index.sideband()) == 5, "index_encoded_with_sideband_data sideband shift semantics");
+		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 5, "index_encoded_with_sideband_data sideband shift semantics");
 		index.set_index(std::variant_npos);
 		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data npos round trip");
-		check(ctx, static_cast<std::size_t>(index.sideband()) == 5, "index_encoded_with_sideband_data npos preserves sideband");
+		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 5, "index_encoded_with_sideband_data npos preserves sideband");
 		index.set_index(1);
-		check(ctx, static_cast<std::size_t>(index.sideband()) == 5, "index_encoded_with_sideband_data index write preserves sideband");
-		index.sideband() = 3;
+		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 5, "index_encoded_with_sideband_data index write preserves sideband");
+		index.sideband().set_val(3);
 		check(ctx, index.index() == 1, "index_encoded_with_sideband_data sideband write preserves index");
 
 		auto proxy_a = index.sideband();
 		auto proxy_b = index.sideband();
-		proxy_a = 7;
-		check(ctx, static_cast<std::size_t>(proxy_b) == 7, "index_encoded_with_sideband_data proxy coherence A->B");
-		proxy_b = 2;
-		check(ctx, static_cast<std::size_t>(proxy_a) == 2, "index_encoded_with_sideband_data proxy coherence B->A");
+		proxy_a.set_val(7);
+		check(ctx, static_cast<std::size_t>(proxy_b.val()) == 7, "index_encoded_with_sideband_data proxy coherence A->B");
+		proxy_b.set_val(2);
+		check(ctx, static_cast<std::size_t>(proxy_a.val()) == 2, "index_encoded_with_sideband_data proxy coherence B->A");
 	}
 
 	{
 		using Index = sw::universal::internal::index_encoded_with_sideband_data<7>;
 		Index index{};
-		check(ctx, index.index() == 0, "index_encoded_with_sideband_data(7) default index is 0");
+		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data(7) default index is std::variant_npos");
 		index.set_index(6);
 		check(ctx, index.index() == 6, "index_encoded_with_sideband_data(7) stores index");
-		index.sideband() = 12;
-		check(ctx, static_cast<std::size_t>(index.sideband()) == 12, "index_encoded_with_sideband_data(7) sideband round trip");
+		index.sideband().set_val(12);
+		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 12, "index_encoded_with_sideband_data(7) sideband round trip");
 	}
 }
 
