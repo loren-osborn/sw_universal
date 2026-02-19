@@ -7,6 +7,7 @@
 // This file is part of the universal numbers project, which is released under an MIT Open Source license.
 
 #include <algorithm>
+#include <cassert>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -61,7 +62,10 @@ namespace custom_indexed_variant_detail {
 	struct storage_traits {
 		static constexpr std::size_t max_size = (std::max)({sizeof(Ts)...});
 		static constexpr std::size_t max_align = (std::max)({alignof(Ts)...});
-		using storage_t = std::aligned_storage_t<max_size, max_align>;
+
+		struct storage_t {
+			alignas(max_align) std::byte buffer[max_size];
+		};
 	};
 
 	template<typename T>
@@ -110,21 +114,27 @@ namespace detail = custom_indexed_variant_detail;
 template<std::size_t NTypes>
 struct simple_encoded_index {
 	simple_encoded_index() = default;
-	std::size_t index() const { return index_; }
-	void set_index(std::size_t val) { index_ = val; }
+	std::size_t index() const {
+		assert((index_ == std::variant_npos) || (index_ < NTypes));
+		return index_;
+	}
+	void set_index(std::size_t val) {
+		assert((val == std::variant_npos) || (val < NTypes));
+		index_ = val;
+		assert(index() == val);
+	}
 
 private:
-	std::size_t index_ = 0;
+	std::size_t index_ = std::variant_npos;
 };
 
 template<std::size_t NTypes>
 struct index_encoded_with_sideband_data {
 	static constexpr std::size_t width = std::numeric_limits<std::size_t>::digits;
-	static constexpr std::size_t npos_code = NTypes;
 
 	static constexpr std::size_t ceil_log2(std::size_t value) {
 		std::size_t bits = 0;
-		std::size_t v = value > 0 ? value - 1 : 0;
+		std::size_t v = (value > 0) ? (value - 1) : 0;
 		while (v > 0) {
 			v >>= 1;
 			++bits;
@@ -137,42 +147,61 @@ struct index_encoded_with_sideband_data {
 		: (index_bits >= width ? ~std::size_t(0) : ((std::size_t(1) << index_bits) - 1));
 	static constexpr std::size_t sideband_mask = ~index_mask;
 
+	static constexpr std::size_t npos_code = index_mask;
+	static_assert(npos_code >= NTypes); // Ensures npos_code is distinct from all other valid indicies
+
 	struct sideband_proxy {
-		std::size_t* data = nullptr;
 
-		operator std::size_t() const {
-			if constexpr (index_bits >= width) {
-				return 0;
-			} else {
-				return ((*data) & sideband_mask) >> index_bits;
-			}
+		sideband_proxy() = delete;
+
+		sideband_proxy(index_encoded_with_sideband_data* src): data_(src) {}
+
+		std::size_t val() const {
+			return data_->sideband_val();
 		}
 
-		sideband_proxy& operator=(std::size_t value) {
-			if constexpr (index_bits < width) {
-				const std::size_t shifted = (value << index_bits) & sideband_mask;
-				*data = ((*data) & index_mask) | shifted;
-			}
-			return *this;
+		void set_val(std::size_t value) {
+			data_->set_sideband_val(value);
 		}
+	private:
+		index_encoded_with_sideband_data* data_;
 	};
+
+	using sideband_t = sideband_proxy;
 
 	index_encoded_with_sideband_data() = default;
 
 	std::size_t index() const {
 		const std::size_t stored = data_ & index_mask;
-		return stored == npos_code ? std::variant_npos : stored;
+		const auto actual = (stored == npos_code) ? std::variant_npos : stored;
+		assert((actual == std::variant_npos) || (actual < NTypes));
+		return actual;
 	}
 
 	void set_index(std::size_t val) {
+		assert((val == std::variant_npos) || (val < NTypes));
 		const std::size_t stored = (val == std::variant_npos) ? npos_code : (val & index_mask);
 		data_ = (data_ & sideband_mask) | stored;
+		assert(index() == val);
 	}
 
-	sideband_proxy sideband() { return sideband_proxy{&data_}; }
+	sideband_t sideband() { return sideband_proxy(this); }
+
+private: // we want these to be accessible through sideband()
+	std::size_t sideband_val() const {
+		const std::size_t stored = (data_ & sideband_mask) >> index_bits;
+		return stored;
+	}
+
+	void set_sideband_val(std::size_t val) {
+		const std::size_t stored = (val << index_bits) & sideband_mask;
+		const std::size_t new_data = (data_ & index_mask) | stored;
+		assert((data_ & index_mask) == (new_data & index_mask));
+		data_ = new_data;
+	}
 
 private:
-	std::size_t data_ = 0;
+	std::size_t data_ = npos_code;  // This default value is exposed as std::variant_npos
 };
 
 /// @brief An indexed variant implementation modeled after std::variant (C++20).
@@ -187,7 +216,6 @@ class custom_indexed_variant {
 
 public:
 	using encoded_index_t = EncodedIndex<ntypes>;
-	using index_encoding = encoded_index_t;
 	static constexpr std::size_t npos = std::variant_npos;
 
 	using index_type = std::size_t;
@@ -195,20 +223,20 @@ public:
 	/// @brief Default-constructs the first alternative.
 	custom_indexed_variant() noexcept(std::is_nothrow_default_constructible_v<detail::type_at_t<0, Types...>>)
 		requires std::is_default_constructible_v<detail::type_at_t<0, Types...>>
-		: index_(npos) {
+		: index_obj_() {
 		construct<0>();
-		index_ = 0;
+		index_obj_.set_index(0);
 	}
 
 	/// @brief Copy-constructs from another variant.
 	custom_indexed_variant(const custom_indexed_variant& other)
 		requires detail::all_copy_constructible<Types...>::value
-		: index_(npos) {
+		: index_obj_() {
 		if (!other.valueless_by_exception()) {
 			visit_active(other, [&](auto index_tag, const auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				construct<I>(value);
-				index_ = I;
+				index_obj_.set_index(I);
 			});
 		}
 	}
@@ -216,12 +244,12 @@ public:
 	/// @brief Move-constructs from another variant.
 	custom_indexed_variant(custom_indexed_variant&& other) noexcept(detail::all_nothrow_move_constructible<Types...>::value)
 		requires detail::all_move_constructible<Types...>::value
-		: index_(npos) {
+		: index_obj_() {
 		if (!other.valueless_by_exception()) {
 			visit_active(other, [&](auto index_tag, auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				construct<I>(std::move(value));
-				index_ = I;
+				index_obj_.set_index(I);
 			});
 		}
 	}
@@ -229,37 +257,37 @@ public:
 	/// @brief Constructs the specified alternative in-place by index.
 	template<std::size_t I, typename... Args>
 	constexpr explicit custom_indexed_variant(std::in_place_index_t<I>, Args&&... args)
-		: index_(npos) {
+		: index_obj_() {
 		construct<I>(std::forward<Args>(args)...);
-		index_ = I;
+		index_obj_.set_index(I);
 	}
 
 	/// @brief Constructs the specified alternative in-place by index with initializer_list.
 	template<std::size_t I, typename U, typename... Args>
 	constexpr explicit custom_indexed_variant(std::in_place_index_t<I>, std::initializer_list<U> init, Args&&... args)
-		: index_(npos) {
+		: index_obj_() {
 		construct<I>(init, std::forward<Args>(args)...);
-		index_ = I;
+		index_obj_.set_index(I);
 	}
 
 	/// @brief Constructs the specified alternative in-place by type.
 	template<typename T, typename... Args>
 	constexpr explicit custom_indexed_variant(std::in_place_type_t<T>, Args&&... args)
-		: index_(npos) {
+		: index_obj_() {
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
 		static_assert(index != npos, "Type not found in custom_indexed_variant");
 		construct<index>(std::forward<Args>(args)...);
-		index_ = index;
+		index_obj_.set_index(index);
 	}
 
 	/// @brief Constructs the specified alternative in-place by type with initializer_list.
 	template<typename T, typename U, typename... Args>
 	constexpr explicit custom_indexed_variant(std::in_place_type_t<T>, std::initializer_list<U> init, Args&&... args)
-		: index_(npos) {
+		: index_obj_() {
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
 		static_assert(index != npos, "Type not found in custom_indexed_variant");
 		construct<index>(init, std::forward<Args>(args)...);
-		index_ = index;
+		index_obj_.set_index(index);
 	}
 
 	/// @brief Converting constructor from a value (exact-type match).
@@ -270,10 +298,10 @@ public:
 							!detail::is_in_place_type_v<U> &&
 							(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
 		constexpr custom_indexed_variant(T&& value)
-		: index_(npos) {
+		: index_obj_() {
 		constexpr std::size_t index = detail::index_of_exact_v<U, Types...>;
 		construct<index>(std::forward<T>(value));
-		index_ = index;
+		index_obj_.set_index(index);
 	}
 
 	~custom_indexed_variant() {
@@ -288,7 +316,7 @@ public:
 		}
 		if (other.valueless_by_exception()) {
 			destroy_active();
-			index_ = npos;
+			index_obj_.set_index(npos);
 			return *this;
 		}
 		assign_from_other(other);
@@ -303,7 +331,7 @@ public:
 		}
 		if (other.valueless_by_exception()) {
 			destroy_active();
-			index_ = npos;
+			index_obj_.set_index(npos);
 			return *this;
 		}
 		assign_from_other(std::move(other));
@@ -316,7 +344,7 @@ public:
 			std::enable_if_t<(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
 	custom_indexed_variant& operator=(T&& value) {
 		constexpr std::size_t I = detail::index_of_exact_v<U, Types...>;
-		if (index_ == I) {
+		if (index_obj_.index() == I) {
 			*std::launder(reinterpret_cast<U*>(&storage_)) = std::forward<T>(value);
 		} else {
 			if constexpr (std::is_nothrow_move_constructible_v<U> || std::is_nothrow_copy_constructible_v<U>) {
@@ -328,21 +356,21 @@ public:
 				} else {
 					construct<I>(*temp);
 				}
-				index_ = I;
+				index_obj_.set_index(I);
 			} else {
 				destroy_active();
 				construct<I>(std::forward<T>(value));
-				index_ = I;
+				index_obj_.set_index(I);
 			}
 		}
 		return *this;
 	}
 
 	/// @brief Checks if the variant has no active alternative.
-	bool valueless_by_exception() const noexcept { return index_ == npos; }
+	bool valueless_by_exception() const noexcept { return index_obj_.index() == npos; }
 
 	/// @brief Returns the index of the active alternative.
-	std::size_t index() const noexcept { return index_; }
+	std::size_t index() const noexcept { return index_obj_.index(); }
 
 	/// @brief Constructs a new alternative in-place by index.
 	template<std::size_t I, typename... Args>
@@ -357,11 +385,11 @@ public:
 			} else {
 				construct<I>(*temp);
 			}
-			index_ = I;
+			index_obj_.set_index(I);
 		} else {
 			destroy_active();
 			construct<I>(std::forward<Args>(args)...);
-			index_ = I;
+			index_obj_.set_index(I);
 		}
 		return get<I>();
 	}
@@ -379,11 +407,11 @@ public:
 			} else {
 				construct<I>(*temp);
 			}
-			index_ = I;
+			index_obj_.set_index(I);
 		} else {
 			destroy_active();
 			construct<I>(init, std::forward<Args>(args)...);
-			index_ = I;
+			index_obj_.set_index(I);
 		}
 		return get<I>();
 	}
@@ -413,7 +441,7 @@ public:
 		if (valueless_by_exception() && other.valueless_by_exception()) {
 			return;
 		}
-		if (index_ == other.index_) {
+		if (index_obj_.index() == other.index_obj_.index()) {
 			swap_same_index(other);
 			return;
 		}
@@ -422,7 +450,7 @@ public:
 			visit_active(other, [&](auto index_tag, auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				construct<I>(std::move(value));
-				index_ = I;
+				index_obj_.set_index(I);
 				constructed = true;
 			});
 			if (constructed) {
@@ -435,7 +463,7 @@ public:
 			visit_active(*this, [&](auto index_tag, auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				other.template construct<I>(std::move(value));
-				other.index_ = I;
+				other.index_obj_.set_index(I);
 				constructed = true;
 			});
 			if (constructed) {
@@ -455,7 +483,7 @@ public:
 	/// @brief Access the active alternative by index.
 	template<std::size_t I>
 	decltype(auto) get() & {
-		if (index_ != I) {
+		if (index_obj_.index() != I) {
 			throw std::bad_variant_access{};
 		}
 		using T = detail::type_at_t<I, Types...>;
@@ -465,7 +493,7 @@ public:
 	/// @brief Access the active alternative by index (const).
 	template<std::size_t I>
 	decltype(auto) get() const & {
-		if (index_ != I) {
+		if (index_obj_.index() != I) {
 			throw std::bad_variant_access{};
 		}
 		using T = detail::type_at_t<I, Types...>;
@@ -475,7 +503,7 @@ public:
 	/// @brief Access the active alternative by index (rvalue).
 	template<std::size_t I>
 	decltype(auto) get() && {
-		if (index_ != I) {
+		if (index_obj_.index() != I) {
 			throw std::bad_variant_access{};
 		}
 		using T = detail::type_at_t<I, Types...>;
@@ -485,7 +513,7 @@ public:
 	/// @brief Access the active alternative by index (const rvalue).
 	template<std::size_t I>
 	decltype(auto) get() const && {
-		if (index_ != I) {
+		if (index_obj_.index() != I) {
 			throw std::bad_variant_access{};
 		}
 		using T = detail::type_at_t<I, Types...>;
@@ -528,14 +556,14 @@ public:
 	template<std::size_t I>
 	auto get_if() noexcept {
 		using T = detail::type_at_t<I, Types...>;
-		return (index_ == I) ? std::launder(reinterpret_cast<T*>(&storage_)) : nullptr;
+		return (index_obj_.index() == I) ? std::launder(reinterpret_cast<T*>(&storage_)) : nullptr;
 	}
 
 	/// @brief Pointer access to alternative by index (const).
 	template<std::size_t I>
 	auto get_if() const noexcept {
 		using T = detail::type_at_t<I, Types...>;
-		return (index_ == I) ? std::launder(reinterpret_cast<const T*>(&storage_)) : nullptr;
+		return (index_obj_.index() == I) ? std::launder(reinterpret_cast<const T*>(&storage_)) : nullptr;
 	}
 
 	/// @brief Pointer access to alternative by type.
@@ -559,7 +587,7 @@ public:
 	bool holds_alternative() const noexcept {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
-		return index_ == I;
+		return index_obj_.index() == I;
 	}
 
 private:
@@ -573,9 +601,9 @@ private:
 		if (valueless_by_exception()) {
 			return;
 		}
-		const std::size_t active = index_;
+		const std::size_t active = index_obj_.index();
 		destroy_active_impl<0>(active);
-		index_ = npos;
+		index_obj_.set_index(npos);
 	}
 
 	template<std::size_t I, typename Variant>
@@ -595,7 +623,7 @@ private:
 	template<std::size_t I, typename Variant, typename Fn>
 	static void visit_active_impl(Variant&& variant, Fn&& fn) {
 		if constexpr (I < sizeof...(Types)) {
-			switch (variant.index_) {
+			switch (variant.index_obj_.index()) {
 			case I:
 				fn(std::integral_constant<std::size_t, I>{}, *active_ptr<I>(variant));
 				return;
@@ -623,7 +651,7 @@ private:
 
 	template<typename Other>
 	void assign_from_other(Other&& other) {
-		if (index_ == other.index_) {
+		if (index_obj_.index() == other.index_obj_.index()) {
 			visit_active(*this, [&](auto index_tag, auto& value) {
 				value = std::forward<Other>(other).template get<decltype(index_tag)::value>();
 			});
@@ -633,7 +661,7 @@ private:
 		visit_active(other, [&](auto index_tag, auto&& value) {
 			constexpr std::size_t I = decltype(index_tag)::value;
 			construct<I>(std::forward<decltype(value)>(value));
-			index_ = I;
+			index_obj_.set_index(I);
 		});
 	}
 
@@ -657,17 +685,17 @@ private:
 		bool left_constructed = false;
 		try {
 			construct<R>(std::move(*right_value));
-			index_ = R;
+			index_obj_.set_index(R);
 			left_constructed = true;
 		} catch (...) {
-			index_ = npos;
+			index_obj_.set_index(npos);
 			throw;
 		}
 		try {
 			other.template construct<L>(std::move(*left_value));
-			other.index_ = L;
+			other.index_obj_.set_index(L);
 		} catch (...) {
-			other.index_ = npos;
+			other.index_obj_.set_index(npos);
 			if (left_constructed) {
 				destroy_active();
 			}
@@ -675,8 +703,8 @@ private:
 		}
 	}
 
+	encoded_index_t index_obj_;
 	typename storage_traits::storage_t storage_{};
-	std::size_t index_ = npos;
 };
 
 /// @brief Variant size trait for custom_indexed_variant.
