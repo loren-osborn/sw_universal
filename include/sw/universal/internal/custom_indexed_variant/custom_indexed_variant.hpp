@@ -108,6 +108,15 @@ namespace custom_indexed_variant_detail {
 	template<typename T>
 	inline constexpr bool is_in_place_type_v = is_in_place_type<T>::value;
 
+	template<typename T, typename = void>
+	struct has_sideband : std::false_type {};
+
+	template<typename T>
+	struct has_sideband<T, std::void_t<decltype(std::declval<T&>().sideband())>> : std::true_type {};
+
+	template<typename T>
+	inline constexpr bool has_sideband_v = has_sideband<T>::value;
+
 	template<typename EncodedIndex>
 	concept encoded_index_noexcept_api =
 		std::default_initializable<EncodedIndex> &&
@@ -373,8 +382,14 @@ public:
 	/// @brief Checks if the variant has no active alternative.
 	bool valueless_by_exception() const noexcept { return index_obj_.index() == npos; }
 
-	/// @brief Returns the index of the active alternative.
-	std::size_t index() const noexcept { return index_obj_.index(); }
+		/// @brief Returns the index of the active alternative.
+		std::size_t index() const noexcept { return index_obj_.index(); }
+
+		/// @brief Exposes encoded index sideband when the encoded index type supports it.
+		template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_v<EI>>>
+		auto sideband() noexcept(noexcept(std::declval<EI&>().sideband())) {
+			return index_obj_.sideband();
+		}
 
 	/// @brief Constructs a new alternative in-place by index.
 	template<std::size_t I, typename... Args>
