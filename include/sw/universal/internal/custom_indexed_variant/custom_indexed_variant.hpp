@@ -225,7 +225,6 @@ public:
 		requires std::is_default_constructible_v<detail::type_at_t<0, Types...>>
 		: index_obj_() {
 		construct<0>();
-		index_obj_.set_index(0);
 	}
 
 	/// @brief Copy-constructs from another variant.
@@ -236,7 +235,6 @@ public:
 			visit_active(other, [&](auto index_tag, const auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				construct<I>(value);
-				index_obj_.set_index(I);
 			});
 		}
 	}
@@ -249,7 +247,6 @@ public:
 			visit_active(other, [&](auto index_tag, auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				construct<I>(std::move(value));
-				index_obj_.set_index(I);
 			});
 		}
 	}
@@ -259,7 +256,6 @@ public:
 	constexpr explicit custom_indexed_variant(std::in_place_index_t<I>, Args&&... args)
 		: index_obj_() {
 		construct<I>(std::forward<Args>(args)...);
-		index_obj_.set_index(I);
 	}
 
 	/// @brief Constructs the specified alternative in-place by index with initializer_list.
@@ -267,7 +263,6 @@ public:
 	constexpr explicit custom_indexed_variant(std::in_place_index_t<I>, std::initializer_list<U> init, Args&&... args)
 		: index_obj_() {
 		construct<I>(init, std::forward<Args>(args)...);
-		index_obj_.set_index(I);
 	}
 
 	/// @brief Constructs the specified alternative in-place by type.
@@ -277,7 +272,6 @@ public:
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
 		static_assert(index != npos, "Type not found in custom_indexed_variant");
 		construct<index>(std::forward<Args>(args)...);
-		index_obj_.set_index(index);
 	}
 
 	/// @brief Constructs the specified alternative in-place by type with initializer_list.
@@ -287,7 +281,6 @@ public:
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
 		static_assert(index != npos, "Type not found in custom_indexed_variant");
 		construct<index>(init, std::forward<Args>(args)...);
-		index_obj_.set_index(index);
 	}
 
 	/// @brief Converting constructor from a value (exact-type match).
@@ -301,7 +294,6 @@ public:
 		: index_obj_() {
 		constexpr std::size_t index = detail::index_of_exact_v<U, Types...>;
 		construct<index>(std::forward<T>(value));
-		index_obj_.set_index(index);
 	}
 
 	~custom_indexed_variant() {
@@ -316,7 +308,6 @@ public:
 		}
 		if (other.valueless_by_exception()) {
 			destroy_active();
-			index_obj_.set_index(npos);
 			return *this;
 		}
 		assign_from_other(other);
@@ -331,7 +322,6 @@ public:
 		}
 		if (other.valueless_by_exception()) {
 			destroy_active();
-			index_obj_.set_index(npos);
 			return *this;
 		}
 		assign_from_other(std::move(other));
@@ -342,11 +332,11 @@ public:
 	template<typename T,
 			typename U = detail::remove_cvref_t<T>,
 			std::enable_if_t<(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
-	custom_indexed_variant& operator=(T&& value) {
-		constexpr std::size_t I = detail::index_of_exact_v<U, Types...>;
-		if (index_obj_.index() == I) {
-			*std::launder(reinterpret_cast<U*>(&storage_)) = std::forward<T>(value);
-		} else {
+		custom_indexed_variant& operator=(T&& value) {
+			constexpr std::size_t I = detail::index_of_exact_v<U, Types...>;
+			if (index_obj_.index() == I) {
+				*std::launder(reinterpret_cast<U*>(storage_bytes())) = std::forward<T>(value);
+			} else {
 			if constexpr (std::is_nothrow_move_constructible_v<U> || std::is_nothrow_copy_constructible_v<U>) {
 				std::optional<U> temp;
 				temp.emplace(std::forward<T>(value));
@@ -356,11 +346,9 @@ public:
 				} else {
 					construct<I>(*temp);
 				}
-				index_obj_.set_index(I);
 			} else {
 				destroy_active();
 				construct<I>(std::forward<T>(value));
-				index_obj_.set_index(I);
 			}
 		}
 		return *this;
@@ -380,17 +368,15 @@ public:
 			std::optional<T> temp;
 			temp.emplace(std::forward<Args>(args)...);
 			destroy_active();
-			if constexpr (std::is_nothrow_move_constructible_v<T>) {
-				construct<I>(std::move(*temp));
+				if constexpr (std::is_nothrow_move_constructible_v<T>) {
+					construct<I>(std::move(*temp));
+				} else {
+					construct<I>(*temp);
+				}
 			} else {
-				construct<I>(*temp);
+				destroy_active();
+				construct<I>(std::forward<Args>(args)...);
 			}
-			index_obj_.set_index(I);
-		} else {
-			destroy_active();
-			construct<I>(std::forward<Args>(args)...);
-			index_obj_.set_index(I);
-		}
 		return get<I>();
 	}
 
@@ -402,17 +388,15 @@ public:
 			std::optional<T> temp;
 			temp.emplace(init, std::forward<Args>(args)...);
 			destroy_active();
-			if constexpr (std::is_nothrow_move_constructible_v<T>) {
-				construct<I>(std::move(*temp));
+				if constexpr (std::is_nothrow_move_constructible_v<T>) {
+					construct<I>(std::move(*temp));
+				} else {
+					construct<I>(*temp);
+				}
 			} else {
-				construct<I>(*temp);
+				destroy_active();
+				construct<I>(init, std::forward<Args>(args)...);
 			}
-			index_obj_.set_index(I);
-		} else {
-			destroy_active();
-			construct<I>(init, std::forward<Args>(args)...);
-			index_obj_.set_index(I);
-		}
 		return get<I>();
 	}
 
@@ -450,7 +434,6 @@ public:
 			visit_active(other, [&](auto index_tag, auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				construct<I>(std::move(value));
-				index_obj_.set_index(I);
 				constructed = true;
 			});
 			if (constructed) {
@@ -463,7 +446,6 @@ public:
 			visit_active(*this, [&](auto index_tag, auto& value) {
 				constexpr std::size_t I = decltype(index_tag)::value;
 				other.template construct<I>(std::move(value));
-				other.index_obj_.set_index(I);
 				constructed = true;
 			});
 			if (constructed) {
@@ -482,43 +464,43 @@ public:
 
 	/// @brief Access the active alternative by index.
 	template<std::size_t I>
-	decltype(auto) get() & {
-		if (index_obj_.index() != I) {
-			throw std::bad_variant_access{};
+		decltype(auto) get() & {
+			if (index_obj_.index() != I) {
+				throw std::bad_variant_access{};
+			}
+			using T = detail::type_at_t<I, Types...>;
+			return *std::launder(reinterpret_cast<T*>(storage_bytes()));
 		}
-		using T = detail::type_at_t<I, Types...>;
-		return *std::launder(reinterpret_cast<T*>(&storage_));
-	}
 
 	/// @brief Access the active alternative by index (const).
 	template<std::size_t I>
-	decltype(auto) get() const & {
-		if (index_obj_.index() != I) {
-			throw std::bad_variant_access{};
+		decltype(auto) get() const & {
+			if (index_obj_.index() != I) {
+				throw std::bad_variant_access{};
+			}
+			using T = detail::type_at_t<I, Types...>;
+			return *std::launder(reinterpret_cast<const T*>(storage_bytes()));
 		}
-		using T = detail::type_at_t<I, Types...>;
-		return *std::launder(reinterpret_cast<const T*>(&storage_));
-	}
 
 	/// @brief Access the active alternative by index (rvalue).
 	template<std::size_t I>
-	decltype(auto) get() && {
-		if (index_obj_.index() != I) {
-			throw std::bad_variant_access{};
+		decltype(auto) get() && {
+			if (index_obj_.index() != I) {
+				throw std::bad_variant_access{};
+			}
+			using T = detail::type_at_t<I, Types...>;
+			return std::move(*std::launder(reinterpret_cast<T*>(storage_bytes())));
 		}
-		using T = detail::type_at_t<I, Types...>;
-		return std::move(*std::launder(reinterpret_cast<T*>(&storage_)));
-	}
 
 	/// @brief Access the active alternative by index (const rvalue).
 	template<std::size_t I>
-	decltype(auto) get() const && {
-		if (index_obj_.index() != I) {
-			throw std::bad_variant_access{};
+		decltype(auto) get() const && {
+			if (index_obj_.index() != I) {
+				throw std::bad_variant_access{};
+			}
+			using T = detail::type_at_t<I, Types...>;
+			return std::move(*std::launder(reinterpret_cast<const T*>(storage_bytes())));
 		}
-		using T = detail::type_at_t<I, Types...>;
-		return std::move(*std::launder(reinterpret_cast<const T*>(&storage_)));
-	}
 
 	/// @brief Access the active alternative by type.
 	template<typename T>
@@ -554,17 +536,17 @@ public:
 
 	/// @brief Pointer access to alternative by index.
 	template<std::size_t I>
-	auto get_if() noexcept {
-		using T = detail::type_at_t<I, Types...>;
-		return (index_obj_.index() == I) ? std::launder(reinterpret_cast<T*>(&storage_)) : nullptr;
-	}
+		auto get_if() noexcept {
+			using T = detail::type_at_t<I, Types...>;
+			return (index_obj_.index() == I) ? std::launder(reinterpret_cast<T*>(storage_bytes())) : nullptr;
+		}
 
 	/// @brief Pointer access to alternative by index (const).
 	template<std::size_t I>
-	auto get_if() const noexcept {
-		using T = detail::type_at_t<I, Types...>;
-		return (index_obj_.index() == I) ? std::launder(reinterpret_cast<const T*>(&storage_)) : nullptr;
-	}
+		auto get_if() const noexcept {
+			using T = detail::type_at_t<I, Types...>;
+			return (index_obj_.index() == I) ? std::launder(reinterpret_cast<const T*>(storage_bytes())) : nullptr;
+		}
 
 	/// @brief Pointer access to alternative by type.
 	template<typename T>
@@ -594,7 +576,16 @@ private:
 	template<std::size_t I, typename... Args>
 	void construct(Args&&... args) {
 		using T = detail::type_at_t<I, Types...>;
-		::new (static_cast<void*>(&storage_)) T(std::forward<Args>(args)...);
+		::new (static_cast<void*>(storage_bytes())) T(std::forward<Args>(args)...);
+		index_obj_.set_index(I);
+	}
+
+	std::byte* storage_bytes() noexcept {
+		return storage_.buffer;
+	}
+
+	const std::byte* storage_bytes() const noexcept {
+		return storage_.buffer;
 	}
 
 	void destroy_active() noexcept {
@@ -612,7 +603,7 @@ private:
 		using Base = detail::type_at_t<I, Types...>;
 		using CvBase = std::conditional_t<std::is_const_v<VariantNoRef>, std::add_const_t<Base>, Base>;
 		using CvVolBase = std::conditional_t<std::is_volatile_v<VariantNoRef>, std::add_volatile_t<CvBase>, CvBase>;
-		return std::launder(reinterpret_cast<CvVolBase*>(&variant.storage_));
+		return std::launder(reinterpret_cast<CvVolBase*>(variant.storage_.buffer));
 	}
 
 	template<typename Variant, typename Fn>
@@ -661,7 +652,6 @@ private:
 		visit_active(other, [&](auto index_tag, auto&& value) {
 			constexpr std::size_t I = decltype(index_tag)::value;
 			construct<I>(std::forward<decltype(value)>(value));
-			index_obj_.set_index(I);
 		});
 	}
 
@@ -685,17 +675,13 @@ private:
 		bool left_constructed = false;
 		try {
 			construct<R>(std::move(*right_value));
-			index_obj_.set_index(R);
 			left_constructed = true;
 		} catch (...) {
-			index_obj_.set_index(npos);
 			throw;
 		}
 		try {
 			other.template construct<L>(std::move(*left_value));
-			other.index_obj_.set_index(L);
 		} catch (...) {
-			other.index_obj_.set_index(npos);
 			if (left_constructed) {
 				destroy_active();
 			}

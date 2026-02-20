@@ -212,9 +212,9 @@ using SidebandVariant = sw::universal::internal::custom_indexed_variant<sw::univ
 void run_encoded_index_tests(const char* impl_name, int& failures) {
 	TestContext ctx{impl_name, failures};
 
-	{
-		sw::universal::internal::simple_encoded_index<3> index{};
-		check(ctx, index.index() == std::variant_npos, "sximple_encoded_index default index is std::variant_npos");
+		{
+			sw::universal::internal::simple_encoded_index<3> index{};
+			check(ctx, index.index() == std::variant_npos, "simple_encoded_index default index is std::variant_npos");
 		index.set_index(2);
 		check(ctx, index.index() == 2, "simple_encoded_index set/get normal value");
 		index.set_index(std::variant_npos);
@@ -358,6 +358,7 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		check(ctx, preserved == expectations.emplace_preserves, "emplace throw preserves per std");
 		if (!preserved) {
 			check(ctx, v.valueless_by_exception(), "emplace throw leaves valueless when not preserved");
+			check(ctx, v.index() == std::variant_npos, "emplace throw valueless index is npos");
 		}
 		v = 3;
 		check(ctx, get<int>(v) == 3, "recovery after emplace throw");
@@ -377,9 +378,26 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		check(ctx, preserved == expectations.assign_preserves, "assign throw preserves per std");
 		if (!preserved) {
 			check(ctx, v.valueless_by_exception(), "assign throw leaves valueless when not preserved");
+			check(ctx, v.index() == std::variant_npos, "assign throw valueless index is npos");
 		}
 		v = std::string("ok");
 		check(ctx, get<std::string>(v) == "ok", "assign after throw");
+	}
+
+	{
+		ThrowingType::reset();
+		VariantT source(7);
+		VariantT dest(std::in_place_type<std::string>, "keep");
+		ThrowingType::throw_on_default = 1;
+		expect_throw<std::runtime_error>(ctx, "force source valueless", [&]() {
+			source.template emplace<ThrowingType>();
+		});
+		if (source.valueless_by_exception()) {
+			check(ctx, source.index() == std::variant_npos, "source valueless index is npos");
+			dest = source;
+			check(ctx, dest.valueless_by_exception(), "assign from valueless resets destination");
+			check(ctx, dest.index() == std::variant_npos, "assign from valueless sets destination index to npos");
+		}
 	}
 
 	{
