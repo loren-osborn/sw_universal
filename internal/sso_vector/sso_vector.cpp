@@ -45,6 +45,11 @@ bool expect_throw(const TestContext& ctx, const char* label, Fn&& fn) {
 	}
 }
 
+template<typename T>
+T& identity_ref(T& value) {
+	return value;
+}
+
 struct LiveCountedType {
 	static int live;
 	int value{0};
@@ -361,7 +366,8 @@ void run_vector_suite(const char* impl_name, int& failures) {
 		check(ctx, vs_move.size() == 3, "move size");
 		check(ctx, vs_move[2] == "c", "move data");
 
-		vs_move = vs_move;
+		// Exercise copy-assignment on the same object to verify self-assignment is a no-op.
+		vs_move = identity_ref(vs_move);
 		check(ctx, vs_move.size() == 3, "self copy assignment");
 
 		VecDefaultAlloc<Vec, std::string> vs_assign;
