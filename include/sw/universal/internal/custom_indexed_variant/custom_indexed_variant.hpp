@@ -841,7 +841,12 @@ namespace custom_indexed_variant_detail {
 			throw std::bad_variant_access{};
 		}
 		std::optional<ref_variant> refs;
-		((v.index() == Is ? (refs.emplace(std::in_place_index<Is>, std::ref(v.template get<Is>())), true) : false) || ...);
+		const bool matched = ((v.index() == Is
+			? (refs.emplace(std::in_place_index<Is>, std::ref(v.template get<Is>())), true)
+			: false) || ...);
+		if (!matched) {
+			throw std::bad_variant_access{};
+		}
 		return *refs;
 	}
 
