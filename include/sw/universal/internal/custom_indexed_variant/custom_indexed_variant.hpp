@@ -606,9 +606,11 @@ public:
 private:
 	template<std::size_t I, typename... Args>
 	void construct(Args&&... args) {
+		assert(index_obj_.index() == npos && "construct requires valueless state");
 		using T = detail::type_at_t<I, Types...>;
 		::new (static_cast<void*>(storage_bytes())) T(std::forward<Args>(args)...);
 		index_obj_.set_index(I);
+		assert(index_obj_.index() == I && "construct must set active index exactly once after full construction");
 	}
 
 	std::byte* storage_bytes() noexcept {
@@ -620,12 +622,14 @@ private:
 	}
 
 	void destroy_active() noexcept {
-		if (valueless_by_exception()) {
+		const std::size_t active = index_obj_.index();
+		if (active == npos) {
 			return;
 		}
-		const std::size_t active = index_obj_.index();
+		assert(active < ntypes && "active index out of bounds in destroy_active");
 		destroy_active_impl<0>(active);
 		index_obj_.set_index(npos);
+		assert(index_obj_.index() == npos && "destroy_active must transition to npos");
 	}
 
 	template<std::size_t I, typename Variant>
@@ -662,6 +666,7 @@ private:
 			using T = detail::type_at_t<I, Types...>;
 			switch (active) {
 			case I:
+				assert(index_obj_.index() == I && "destroy_active_impl index mismatch");
 				active_ptr<I>(*this)->~T();
 				return;
 			default:

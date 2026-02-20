@@ -5,6 +5,7 @@
 //
 // This file is part of the universal numbers project, which is released under an MIT Open Source license.
 #include <cstdlib>
+#include <algorithm>
 #include <cstddef>
 #include <iostream>
 #include <string>
@@ -48,17 +49,55 @@ bool expect_throw(const TestContext& ctx, const char* label, Fn&& fn) {
 
 struct LiveCountedType {
 	static int live;
+	static int min_live;
 	int value{0};
+	static void reset() {
+		live = 0;
+		min_live = 0;
+	}
 	LiveCountedType() { ++live; }
 	explicit LiveCountedType(int v) : value(v) { ++live; }
 	LiveCountedType(const LiveCountedType& other) : value(other.value) { ++live; }
 	LiveCountedType(LiveCountedType&& other) noexcept : value(other.value) { other.value = 0; ++live; }
 	LiveCountedType& operator=(const LiveCountedType& other) { value = other.value; return *this; }
 	LiveCountedType& operator=(LiveCountedType&& other) noexcept { value = other.value; other.value = 0; return *this; }
-	~LiveCountedType() { --live; }
+	~LiveCountedType() { --live; min_live = (std::min)(min_live, live); }
 };
 
 int LiveCountedType::live = 0;
+int LiveCountedType::min_live = 0;
+
+struct ThrowBeforeDestroyType {
+	static int live;
+	static int ctor_count;
+	static int throw_on_ctor;
+	int value{0};
+
+	static void reset() {
+		live = 0;
+		ctor_count = 0;
+		throw_on_ctor = -1;
+	}
+
+	explicit ThrowBeforeDestroyType(int v = 0) {
+		++ctor_count;
+		if (throw_on_ctor >= 0 && ctor_count == throw_on_ctor) {
+			throw std::runtime_error("ThrowBeforeDestroyType configured throw");
+		}
+		value = v;
+		++live;
+	}
+
+	ThrowBeforeDestroyType(const ThrowBeforeDestroyType&) = delete;
+	ThrowBeforeDestroyType& operator=(const ThrowBeforeDestroyType&) = delete;
+	ThrowBeforeDestroyType(ThrowBeforeDestroyType&& other) noexcept : value(other.value) { other.value = 0; ++live; }
+	ThrowBeforeDestroyType& operator=(ThrowBeforeDestroyType&& other) noexcept { value = other.value; other.value = 0; return *this; }
+	~ThrowBeforeDestroyType() { --live; }
+};
+
+int ThrowBeforeDestroyType::live = 0;
+int ThrowBeforeDestroyType::ctor_count = 0;
+int ThrowBeforeDestroyType::throw_on_ctor = -1;
 
 struct ThrowingType {
 	static int live;
@@ -209,6 +248,15 @@ using CustomVariant = sw::universal::internal::custom_indexed_variant<sw::univer
 template<class... Ts>
 using SidebandVariant = sw::universal::internal::custom_indexed_variant<sw::universal::internal::index_encoded_with_sideband_data, Ts...>;
 
+template<typename V>
+constexpr bool has_variant_sideband() {
+	if constexpr (requires(V& v) { v.sideband(); }) {
+		return true;
+	} else {
+		return false;
+	}
+}
+
 template<std::size_t>
 struct NonNoexceptEncodedIndex {
 	std::size_t index() const { return std::variant_npos; }
@@ -225,6 +273,9 @@ static_assert(!sw::universal::internal::custom_indexed_variant_detail::has_sideb
 	sw::universal::internal::simple_encoded_index<1>>);
 static_assert(sw::universal::internal::custom_indexed_variant_detail::has_sideband_v<
 	sw::universal::internal::index_encoded_with_sideband_data<1>>);
+static_assert(!has_variant_sideband<CustomVariant<int>>());
+static_assert(has_variant_sideband<SidebandVariant<int>>());
+static_assert(!has_variant_sideband<std::variant<int>>());
 
 void run_encoded_index_tests(const char* impl_name, int& failures) {
 	TestContext ctx{impl_name, failures};
@@ -430,6 +481,7 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		LiveCountedType::reset();
 		check(ctx, LiveCountedType::live == 0, "live count starts at 0");
 		{
 			VariantT v(std::in_place_type<LiveCountedType>, LiveCountedType{11});
@@ -439,6 +491,7 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		LiveCountedType::reset();
 		check(ctx, LiveCountedType::live == 0, "live count before repeated assigns");
 		{
 			VariantT v(std::in_place_type<LiveCountedType>, LiveCountedType{5});
@@ -449,6 +502,36 @@ void run_variant_suite(const char* impl_name, int& failures) {
 			}
 		}
 		check(ctx, LiveCountedType::live == 0, "live count after repeated assigns");
+	}
+
+	{
+		LiveCountedType::reset();
+		{
+			VariantT v(std::in_place_type<LiveCountedType>, LiveCountedType{1});
+			check(ctx, LiveCountedType::live == 1, "emplace double-destroy baseline live count");
+			for (int i = 0; i < 12; ++i) {
+				v.template emplace<0>(i);
+				check(ctx, LiveCountedType::live == 0, "emplace to int destroys LiveCountedType exactly once");
+				v.template emplace<3>(LiveCountedType{i + 10});
+				check(ctx, LiveCountedType::live == 1, "emplace back to LiveCountedType constructs exactly once");
+			}
+		}
+		check(ctx, LiveCountedType::live == 0, "emplace double-destroy final live count");
+		check(ctx, LiveCountedType::min_live >= 0, "LiveCountedType live count never negative during emplace churn");
+	}
+
+	if constexpr (variant_test::is_custom_variant_v<VariantT>) {
+		using ThrowBeforeDestroyVariant = Variant<int, ThrowBeforeDestroyType, std::string, LiveCountedType>;
+		ThrowBeforeDestroyType::reset();
+		ThrowBeforeDestroyVariant v(77);
+		ThrowBeforeDestroyType::throw_on_ctor = 1;
+		expect_throw<std::runtime_error>(ctx, "throw-before-destroy emplace", [&]() {
+			v.template emplace<1>(1234);
+		});
+		check(ctx, !v.valueless_by_exception(), "throw-before-destroy keeps prior state");
+		check(ctx, v.index() == 0, "throw-before-destroy preserves prior index");
+		check(ctx, get<int>(v) == 77, "throw-before-destroy preserves prior value");
+		check(ctx, ThrowBeforeDestroyType::live == 0, "throw-before-destroy does not leak construction");
 	}
 
 	{
@@ -473,6 +556,12 @@ void run_variant_suite(const char* impl_name, int& failures) {
 			++held_throwing;
 		}
 		check(ctx, ThrowingType::live == held_throwing, "swap throw live count matches");
+		if (threw && left.valueless_by_exception()) {
+			check(ctx, left.index() == std::variant_npos, "swap throw valueless left index is npos");
+		}
+		if (threw && right.valueless_by_exception()) {
+			check(ctx, right.index() == std::variant_npos, "swap throw valueless right index is npos");
+		}
 		if (!threw) {
 			check(ctx, ThrowingType::live == 1, "swap no-throw keeps one ThrowingType alive");
 		}
@@ -480,6 +569,25 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		right = std::string("ok");
 		check(ctx, holds_alternative<int>(left) && get<int>(left) == 7, "swap throw recovery left");
 		check(ctx, holds_alternative<std::string>(right) && get<std::string>(right) == "ok", "swap throw recovery right");
+	}
+
+	if constexpr (variant_test::is_custom_variant_v<VariantT>) {
+		ThrowingType::reset();
+		VariantT left(11);
+		VariantT right(std::in_place_type<ThrowingType>, ThrowingType{5});
+		ThrowingType::throw_on_move = ThrowingType::move_count + 1;
+		bool threw_before_destroy = false;
+		try {
+			left.swap(right);
+		} catch (const std::runtime_error&) {
+			threw_before_destroy = true;
+		}
+		if (threw_before_destroy) {
+			check(ctx, !left.valueless_by_exception(), "swap throw-before-destroy keeps left engaged");
+			check(ctx, !right.valueless_by_exception(), "swap throw-before-destroy keeps right engaged");
+			check(ctx, left.index() == 0, "swap throw-before-destroy preserves left index");
+			check(ctx, right.index() == 2, "swap throw-before-destroy preserves right index");
+		}
 	}
 }
 
