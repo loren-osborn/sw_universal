@@ -221,6 +221,10 @@ static_assert(sw::universal::internal::custom_indexed_variant_detail::encoded_in
 	sw::universal::internal::index_encoded_with_sideband_data<4>>);
 static_assert(!sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
 	NonNoexceptEncodedIndex<4>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::has_sideband_v<
+	sw::universal::internal::simple_encoded_index<1>>);
+static_assert(sw::universal::internal::custom_indexed_variant_detail::has_sideband_v<
+	sw::universal::internal::index_encoded_with_sideband_data<1>>);
 
 void run_encoded_index_tests(const char* impl_name, int& failures) {
 	TestContext ctx{impl_name, failures};
@@ -316,6 +320,18 @@ void run_variant_suite(const char* impl_name, int& failures) {
 
 		auto moved = get<1>(std::move(v));
 		check(ctx, moved == "text", "rvalue get by index");
+	}
+
+	if constexpr (requires(VariantT& v) { v.sideband(); }) {
+		VariantT v(std::in_place_type<std::string>, "sb");
+		auto sa = v.sideband();
+		auto sb = v.sideband();
+		sa.set_val(9);
+		check(ctx, static_cast<std::size_t>(sb.val()) == 9, "sideband proxies are coherent");
+		check(ctx, v.index() == 1, "sideband write preserves active index");
+		v.template emplace<0>(42);
+		check(ctx, static_cast<std::size_t>(v.sideband().val()) == 9, "sideband survives index update");
+		check(ctx, v.index() == 0, "emplace updates active index with sideband present");
 	}
 
 	{
