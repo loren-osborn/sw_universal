@@ -209,6 +209,19 @@ using CustomVariant = sw::universal::internal::custom_indexed_variant<sw::univer
 template<class... Ts>
 using SidebandVariant = sw::universal::internal::custom_indexed_variant<sw::universal::internal::index_encoded_with_sideband_data, Ts...>;
 
+template<std::size_t>
+struct NonNoexceptEncodedIndex {
+	std::size_t index() const { return std::variant_npos; }
+	void set_index(std::size_t) {}
+};
+
+static_assert(sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
+	sw::universal::internal::simple_encoded_index<4>>);
+static_assert(sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
+	sw::universal::internal::index_encoded_with_sideband_data<4>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
+	NonNoexceptEncodedIndex<4>>);
+
 void run_encoded_index_tests(const char* impl_name, int& failures) {
 	TestContext ctx{impl_name, failures};
 

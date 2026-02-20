@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <concepts>
 #include <cstdint>
 #include <exception>
 #include <functional>
@@ -107,18 +108,30 @@ namespace custom_indexed_variant_detail {
 	template<typename T>
 	inline constexpr bool is_in_place_type_v = is_in_place_type<T>::value;
 
+	template<typename EncodedIndex>
+	concept encoded_index_noexcept_api =
+		std::default_initializable<EncodedIndex> &&
+		requires(EncodedIndex idx, const EncodedIndex cidx, std::size_t i) {
+			{ cidx.index() } noexcept -> std::convertible_to<std::size_t>;
+			{ idx.set_index(i) } noexcept -> std::same_as<void>;
+		};
+
+	template<template<std::size_t NTypes> class EncodedIndex, std::size_t NTypes>
+	concept encoded_index_template_noexcept_api =
+		encoded_index_noexcept_api<EncodedIndex<NTypes>>;
+
 } // namespace custom_indexed_variant_detail
 
 namespace detail = custom_indexed_variant_detail;
 
 template<std::size_t NTypes>
 struct simple_encoded_index {
-	simple_encoded_index() = default;
-	std::size_t index() const {
+	simple_encoded_index() noexcept = default;
+	std::size_t index() const noexcept {
 		assert((index_ == std::variant_npos) || (index_ < NTypes));
 		return index_;
 	}
-	void set_index(std::size_t val) {
+	void set_index(std::size_t val) noexcept {
 		assert((val == std::variant_npos) || (val < NTypes));
 		index_ = val;
 		assert(index() == val);
@@ -154,13 +167,13 @@ struct index_encoded_with_sideband_data {
 
 		sideband_proxy() = delete;
 
-		sideband_proxy(index_encoded_with_sideband_data* src): data_(src) {}
+		sideband_proxy(index_encoded_with_sideband_data* src) noexcept : data_(src) {}
 
-		std::size_t val() const {
+		std::size_t val() const noexcept {
 			return data_->sideband_val();
 		}
 
-		void set_val(std::size_t value) {
+		void set_val(std::size_t value) noexcept {
 			data_->set_sideband_val(value);
 		}
 	private:
@@ -169,31 +182,31 @@ struct index_encoded_with_sideband_data {
 
 	using sideband_t = sideband_proxy;
 
-	index_encoded_with_sideband_data() = default;
+	index_encoded_with_sideband_data() noexcept = default;
 
-	std::size_t index() const {
+	std::size_t index() const noexcept {
 		const std::size_t stored = data_ & index_mask;
 		const auto actual = (stored == npos_code) ? std::variant_npos : stored;
 		assert((actual == std::variant_npos) || (actual < NTypes));
 		return actual;
 	}
 
-	void set_index(std::size_t val) {
+	void set_index(std::size_t val) noexcept {
 		assert((val == std::variant_npos) || (val < NTypes));
 		const std::size_t stored = (val == std::variant_npos) ? npos_code : (val & index_mask);
 		data_ = (data_ & sideband_mask) | stored;
 		assert(index() == val);
 	}
 
-	sideband_t sideband() { return sideband_proxy(this); }
+	sideband_t sideband() noexcept { return sideband_proxy(this); }
 
 private: // we want these to be accessible through sideband()
-	std::size_t sideband_val() const {
+	std::size_t sideband_val() const noexcept {
 		const std::size_t stored = (data_ & sideband_mask) >> index_bits;
 		return stored;
 	}
 
-	void set_sideband_val(std::size_t val) {
+	void set_sideband_val(std::size_t val) noexcept {
 		const std::size_t stored = (val << index_bits) & sideband_mask;
 		const std::size_t new_data = (data_ & index_mask) | stored;
 		assert((data_ & index_mask) == (new_data & index_mask));
@@ -209,6 +222,7 @@ private:
 /// @tparam Types Alternative types stored in the variant.
 /// @note This implementation prefers exact-type construction when using converting constructors.
 template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
+	requires detail::encoded_index_template_noexcept_api<EncodedIndex, sizeof...(Types)>
 class custom_indexed_variant {
 	static_assert(sizeof...(Types) > 0, "custom_indexed_variant must have at least one alternative");
 	using storage_traits = detail::storage_traits<Types...>;
@@ -216,6 +230,8 @@ class custom_indexed_variant {
 
 public:
 	using encoded_index_t = EncodedIndex<ntypes>;
+	static_assert(detail::encoded_index_noexcept_api<encoded_index_t>,
+		"EncodedIndex<NTypes> must provide noexcept default ctor, noexcept index() -> size_t, and noexcept set_index(size_t).");
 	static constexpr std::size_t npos = std::variant_npos;
 
 	using index_type = std::size_t;
