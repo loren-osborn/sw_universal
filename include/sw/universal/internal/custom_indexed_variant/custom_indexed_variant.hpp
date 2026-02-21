@@ -234,6 +234,9 @@ template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
 	requires detail::encoded_index_template_noexcept_api<EncodedIndex, sizeof...(Types)>
 class custom_indexed_variant {
 	static_assert(sizeof...(Types) > 0, "custom_indexed_variant must have at least one alternative");
+	static_assert((std::is_nothrow_destructible_v<Types> && ...),
+		"custom_indexed_variant requires all alternative types to be nothrow destructible "
+		"(throwing destructors typically lead to std::terminate and break noexcept destroy/reset paths).");
 	using storage_traits = detail::storage_traits<Types...>;
 	static constexpr std::size_t ntypes = sizeof...(Types);
 
