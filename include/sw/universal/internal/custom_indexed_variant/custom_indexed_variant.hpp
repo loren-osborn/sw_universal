@@ -235,8 +235,7 @@ template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
 class custom_indexed_variant {
 	static_assert(sizeof...(Types) > 0, "custom_indexed_variant must have at least one alternative");
 	static_assert((std::is_nothrow_destructible_v<Types> && ...),
-		"custom_indexed_variant requires all alternative types to be nothrow destructible "
-		"(throwing destructors typically lead to std::terminate and break noexcept destroy/reset paths).");
+		"custom_indexed_variant requires nothrow-destructible alternatives");
 	using storage_traits = detail::storage_traits<Types...>;
 	static constexpr std::size_t ntypes = sizeof...(Types);
 
@@ -360,11 +359,11 @@ public:
 	template<typename T,
 			typename U = detail::remove_cvref_t<T>,
 			std::enable_if_t<(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
-		custom_indexed_variant& operator=(T&& value) {
-			constexpr std::size_t I = detail::index_of_exact_v<U, Types...>;
-			if (index_obj_.index() == I) {
-				*std::launder(reinterpret_cast<U*>(storage_bytes())) = std::forward<T>(value);
-			} else {
+	custom_indexed_variant& operator=(T&& value) {
+		constexpr std::size_t I = detail::index_of_exact_v<U, Types...>;
+		if (index_obj_.index() == I) {
+			*std::launder(reinterpret_cast<U*>(storage_bytes())) = std::forward<T>(value);
+		} else {
 			if constexpr (std::is_nothrow_move_constructible_v<U> || std::is_nothrow_copy_constructible_v<U>) {
 				std::optional<U> temp;
 				temp.emplace(std::forward<T>(value));
@@ -385,14 +384,14 @@ public:
 	/// @brief Checks if the variant has no active alternative.
 	bool valueless_by_exception() const noexcept { return index_obj_.index() == npos; }
 
-		/// @brief Returns the index of the active alternative.
-		std::size_t index() const noexcept { return index_obj_.index(); }
+	/// @brief Returns the index of the active alternative.
+	std::size_t index() const noexcept { return index_obj_.index(); }
 
-		/// @brief Exposes encoded index sideband when the encoded index type supports it.
-		template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_v<EI>>>
-		auto sideband() noexcept(noexcept(std::declval<EI&>().sideband())) {
-			return index_obj_.sideband();
-		}
+	/// @brief Exposes encoded index sideband when the encoded index type supports it.
+	template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_v<EI>>>
+	auto sideband() noexcept(noexcept(std::declval<EI&>().sideband())) {
+		return index_obj_.sideband();
+	}
 
 	/// @brief Constructs a new alternative in-place by index.
 	template<std::size_t I, typename... Args>
@@ -402,15 +401,15 @@ public:
 			std::optional<T> temp;
 			temp.emplace(std::forward<Args>(args)...);
 			destroy_active();
-				if constexpr (std::is_nothrow_move_constructible_v<T>) {
-					construct<I>(std::move(*temp));
-				} else {
-					construct<I>(*temp);
-				}
+			if constexpr (std::is_nothrow_move_constructible_v<T>) {
+				construct<I>(std::move(*temp));
 			} else {
-				destroy_active();
-				construct<I>(std::forward<Args>(args)...);
+				construct<I>(*temp);
 			}
+		} else {
+			destroy_active();
+			construct<I>(std::forward<Args>(args)...);
+		}
 		return get<I>();
 	}
 
@@ -422,15 +421,15 @@ public:
 			std::optional<T> temp;
 			temp.emplace(init, std::forward<Args>(args)...);
 			destroy_active();
-				if constexpr (std::is_nothrow_move_constructible_v<T>) {
-					construct<I>(std::move(*temp));
-				} else {
-					construct<I>(*temp);
-				}
+			if constexpr (std::is_nothrow_move_constructible_v<T>) {
+				construct<I>(std::move(*temp));
 			} else {
-				destroy_active();
-				construct<I>(init, std::forward<Args>(args)...);
+				construct<I>(*temp);
 			}
+		} else {
+			destroy_active();
+			construct<I>(init, std::forward<Args>(args)...);
+		}
 		return get<I>();
 	}
 
@@ -631,6 +630,7 @@ private:
 		}
 		assert(active < ntypes && "active index out of bounds in destroy_active");
 		destroy_active_impl<0>(active);
+		assert(index_obj_.index() == active && "destroy_active must not change index before final npos transition");
 		index_obj_.set_index(npos);
 		assert(index_obj_.index() == npos && "destroy_active must transition to npos");
 	}
