@@ -1,5 +1,14 @@
 #pragma once
-// custom_indexed_variant.hpp: indexed variant utility mirroring std::variant (C++20)
+/**
+ * @file custom_indexed_variant.hpp
+ * @brief Indexed variant utility that mirrors key std::variant semantics.
+ *
+ * This header provides:
+ * - encoded index helpers used by custom_indexed_variant,
+ * - the custom_indexed_variant container template,
+ * - trait adapters (variant_size / variant_alternative),
+ * - and free-function helpers (get/get_if/holds_alternative/visit).
+ */
 //
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
 // SPDX-License-Identifier: MIT
@@ -133,13 +142,21 @@ namespace custom_indexed_variant_detail {
 
 namespace detail = custom_indexed_variant_detail;
 
+/// @brief Minimal index storage policy with std::variant_npos support.
+/// @tparam NTypes Number of variant alternatives.
 template<std::size_t NTypes>
 struct simple_encoded_index {
+	/// @brief Constructs an index in the valueless state (std::variant_npos).
 	simple_encoded_index() noexcept = default;
+
+	/// @brief Returns the currently stored active index.
 	std::size_t index() const noexcept {
 		assert((index_ == std::variant_npos) || (index_ < NTypes));
 		return index_;
 	}
+
+	/// @brief Sets the active index or std::variant_npos.
+	/// @param val New index value in [0, NTypes) or std::variant_npos.
 	void set_index(std::size_t val) noexcept {
 		assert((val == std::variant_npos) || (val < NTypes));
 		index_ = val;
@@ -150,10 +167,16 @@ private:
 	std::size_t index_ = std::variant_npos;
 };
 
+/// @brief Encodes variant index bits with additional sideband payload bits.
+/// @tparam NTypes Number of variant alternatives.
 template<std::size_t NTypes>
 struct index_encoded_with_sideband_data {
+	/// @brief Bit width of std::size_t.
 	static constexpr std::size_t width = std::numeric_limits<std::size_t>::digits;
 
+	/// @brief Computes ceil(log2(value)) for constexpr bit-allocation.
+	/// @param value Input value.
+	/// @return Number of bits required to encode value - 1.
 	static constexpr std::size_t ceil_log2(std::size_t value) {
 		std::size_t bits = 0;
 		std::size_t v = (value > 0) ? (value - 1) : 0;
@@ -164,24 +187,36 @@ struct index_encoded_with_sideband_data {
 		return bits;
 	}
 
+	/// @brief Number of bits reserved for the encoded index.
 	static constexpr std::size_t index_bits = ceil_log2(NTypes + 1);
+	/// @brief Mask selecting index bits.
 	static constexpr std::size_t index_mask = index_bits == 0 ? 0
 		: (index_bits >= width ? ~std::size_t(0) : ((std::size_t(1) << index_bits) - 1));
+	/// @brief Mask selecting sideband bits.
 	static constexpr std::size_t sideband_mask = ~index_mask;
 
+	/// @brief Encoded representation for std::variant_npos.
 	static constexpr std::size_t npos_code = index_mask;
 	static_assert(npos_code >= NTypes); // Ensures npos_code is distinct from all other valid indicies
 
+	/// @brief Proxy object exposing sideband read/write while preserving index bits.
 	struct sideband_proxy {
 
+		/// @brief sideband_proxy must be bound to a source index object.
 		sideband_proxy() = delete;
 
+		/// @brief Binds this proxy to an encoded-index object.
+		/// @param src Source encoded index storage.
 		sideband_proxy(index_encoded_with_sideband_data* src) noexcept : data_(src) {}
 
+		/// @brief Reads the current sideband payload.
+		/// @return Stored sideband value.
 		std::size_t val() const noexcept {
 			return data_->sideband_val();
 		}
 
+		/// @brief Updates sideband payload while keeping index bits unchanged.
+		/// @param value New sideband value.
 		void set_val(std::size_t value) noexcept {
 			data_->set_sideband_val(value);
 		}
@@ -189,10 +224,13 @@ struct index_encoded_with_sideband_data {
 		index_encoded_with_sideband_data* data_;
 	};
 
+	/// @brief Public alias for sideband proxy type.
 	using sideband_t = sideband_proxy;
 
+	/// @brief Constructs encoded index in the valueless state (std::variant_npos).
 	index_encoded_with_sideband_data() noexcept = default;
 
+	/// @brief Returns decoded active index.
 	std::size_t index() const noexcept {
 		const std::size_t stored = data_ & index_mask;
 		const auto actual = (stored == npos_code) ? std::variant_npos : stored;
@@ -200,6 +238,8 @@ struct index_encoded_with_sideband_data {
 		return actual;
 	}
 
+	/// @brief Writes encoded active index.
+	/// @param val New index in [0, NTypes) or std::variant_npos.
 	void set_index(std::size_t val) noexcept {
 		assert((val == std::variant_npos) || (val < NTypes));
 		const std::size_t stored = (val == std::variant_npos) ? npos_code : (val & index_mask);
@@ -207,6 +247,7 @@ struct index_encoded_with_sideband_data {
 		assert(index() == val);
 	}
 
+	/// @brief Returns a proxy to read/write sideband payload bits.
 	sideband_t sideband() noexcept { return sideband_proxy(this); }
 
 private: // we want these to be accessible through sideband()
@@ -240,11 +281,14 @@ class custom_indexed_variant {
 	static constexpr std::size_t ntypes = sizeof...(Types);
 
 public:
+	/// @brief Encoded index storage policy bound to this variant arity.
 	using encoded_index_t = EncodedIndex<ntypes>;
 	static_assert(detail::encoded_index_noexcept_api<encoded_index_t>,
 		"EncodedIndex<NTypes> must provide noexcept default ctor, noexcept index() -> size_t, and noexcept set_index(size_t).");
+	/// @brief Sentinel value indicating valueless state.
 	static constexpr std::size_t npos = std::variant_npos;
 
+	/// @brief Public index type used by index().
 	using index_type = std::size_t;
 
 	/// @brief Default-constructs the first alternative.
@@ -317,12 +361,13 @@ public:
 							!detail::is_in_place_index_v<U> &&
 							!detail::is_in_place_type_v<U> &&
 							(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
-		constexpr custom_indexed_variant(T&& value)
+	constexpr custom_indexed_variant(T&& value)
 		: index_obj_() {
 		constexpr std::size_t index = detail::index_of_exact_v<U, Types...>;
 		construct<index>(std::forward<T>(value));
 	}
 
+	/// @brief Destroys the active alternative if engaged.
 	~custom_indexed_variant() {
 		destroy_active();
 	}
@@ -736,18 +781,23 @@ private:
 template<typename Variant>
 struct variant_size;
 
+/// @brief variant_size specialization for custom_indexed_variant.
 template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
 struct variant_size<custom_indexed_variant<EncodedIndex, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
+/// @brief variant_size specialization for const custom_indexed_variant.
 template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
 struct variant_size<const custom_indexed_variant<EncodedIndex, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
+/// @brief variant_size specialization for volatile custom_indexed_variant.
 template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
 struct variant_size<volatile custom_indexed_variant<EncodedIndex, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
+/// @brief variant_size specialization for const volatile custom_indexed_variant.
 template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
 struct variant_size<const volatile custom_indexed_variant<EncodedIndex, Types...>> : std::integral_constant<std::size_t, sizeof...(Types)> {};
 
+/// @brief Convenience value wrapper for variant_size<Variant>::value.
 template<typename Variant>
 inline constexpr std::size_t variant_size_v = variant_size<Variant>::value;
 
@@ -755,27 +805,32 @@ inline constexpr std::size_t variant_size_v = variant_size<Variant>::value;
 template<std::size_t I, typename Variant>
 struct variant_alternative;
 
+/// @brief variant_alternative specialization for custom_indexed_variant.
 template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
 struct variant_alternative<I, custom_indexed_variant<EncodedIndex, Types...>> {
 	static_assert(I < sizeof...(Types), "variant alternative index out of bounds");
 	using type = custom_indexed_variant_detail::type_at_t<I, Types...>;
 };
 
+/// @brief variant_alternative specialization for const custom_indexed_variant.
 template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
 struct variant_alternative<I, const custom_indexed_variant<EncodedIndex, Types...>> {
 	using type = std::add_const_t<typename variant_alternative<I, custom_indexed_variant<EncodedIndex, Types...>>::type>;
 };
 
+/// @brief variant_alternative specialization for volatile custom_indexed_variant.
 template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
 struct variant_alternative<I, volatile custom_indexed_variant<EncodedIndex, Types...>> {
 	using type = std::add_volatile_t<typename variant_alternative<I, custom_indexed_variant<EncodedIndex, Types...>>::type>;
 };
 
+/// @brief variant_alternative specialization for const volatile custom_indexed_variant.
 template<std::size_t I, template<std::size_t NTypes> class EncodedIndex, typename... Types>
 struct variant_alternative<I, const volatile custom_indexed_variant<EncodedIndex, Types...>> {
 	using type = std::add_cv_t<typename variant_alternative<I, custom_indexed_variant<EncodedIndex, Types...>>::type>;
 };
 
+/// @brief Convenience alias for variant_alternative<I, Variant>::type.
 template<std::size_t I, typename Variant>
 using variant_alternative_t = typename variant_alternative<I, Variant>::type;
 
@@ -859,6 +914,11 @@ inline auto get_if(const custom_indexed_variant<EncodedIndex, Types...>* v) noex
 
 namespace custom_indexed_variant_detail {
 
+	/// @brief Builds a reference-variant for the currently active alternative.
+	/// @tparam Variant custom_indexed_variant type.
+	/// @tparam Is Candidate active indices.
+	/// @param v Source variant.
+	/// @return std::variant of std::reference_wrapper to the active alternative.
 	template<typename Variant, std::size_t... Is>
 	auto make_reference_variant_impl(Variant& v, std::index_sequence<Is...>) {
 		using ref_variant = std::variant<std::reference_wrapper<variant_alternative_t<Is, Variant>>...>;
@@ -875,6 +935,9 @@ namespace custom_indexed_variant_detail {
 		return *refs;
 	}
 
+	/// @brief Helper that dispatches make_reference_variant_impl with full index sequence.
+	/// @param v Source variant.
+	/// @return std::variant of reference_wrappers for the active alternative.
 	template<typename Variant>
 	auto make_reference_variant(Variant& v) {
 		return make_reference_variant_impl(v, std::make_index_sequence<variant_size_v<Variant>>{});
