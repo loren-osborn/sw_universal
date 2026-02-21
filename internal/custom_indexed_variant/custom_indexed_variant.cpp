@@ -249,7 +249,7 @@ template<class... Ts>
 using SidebandVariant = sw::universal::internal::custom_indexed_variant<sw::universal::internal::index_encoded_with_sideband_data, Ts...>;
 
 template<typename V>
-constexpr bool has_variant_sideband() {
+constexpr bool variant_has_sideband() {
 	if constexpr (requires(V& v) { v.sideband(); }) {
 		return true;
 	} else {
@@ -273,9 +273,17 @@ static_assert(!sw::universal::internal::custom_indexed_variant_detail::has_sideb
 	sw::universal::internal::simple_encoded_index<1>>);
 static_assert(sw::universal::internal::custom_indexed_variant_detail::has_sideband_v<
 	sw::universal::internal::index_encoded_with_sideband_data<1>>);
-static_assert(!has_variant_sideband<CustomVariant<int>>());
-static_assert(has_variant_sideband<SidebandVariant<int>>());
-static_assert(!has_variant_sideband<std::variant<int>>());
+static_assert(!variant_has_sideband<CustomVariant<int>>());
+static_assert(variant_has_sideband<SidebandVariant<int>>());
+static_assert(!variant_has_sideband<std::variant<int>>());
+
+#ifdef UNIVERSAL_COMPILE_FAIL_TESTS
+struct ThrowingDestructorType {
+	~ThrowingDestructorType() noexcept(false) {}
+};
+using CompileFailNothrowDtorVariant = CustomVariant<int, ThrowingDestructorType>;
+static_assert(sizeof(CompileFailNothrowDtorVariant) > 0, "compile-fail guard for nothrow dtor requirement");
+#endif
 
 void run_encoded_index_tests(const char* impl_name, int& failures) {
 	TestContext ctx{impl_name, failures};
@@ -442,6 +450,21 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		}
 		v = 3;
 		check(ctx, get<int>(v) == 3, "recovery after emplace throw");
+	}
+
+	{
+		ThrowingType::reset();
+		LiveCountedType::reset();
+		VariantT v(std::in_place_type<LiveCountedType>, LiveCountedType{55});
+		check(ctx, LiveCountedType::live == 1, "throw-emplace baseline live count");
+		ThrowingType::throw_on_default = 1;
+		expect_throw<std::runtime_error>(ctx, "throw-emplace leaves valueless", [&]() {
+			v.template emplace<ThrowingType>();
+		});
+		check(ctx, v.valueless_by_exception(), "throw-emplace produces valueless state");
+		check(ctx, v.index() == std::variant_npos, "throw-emplace valueless index is npos");
+		check(ctx, ThrowingType::live == 0, "throw-emplace does not leak ThrowingType");
+		check(ctx, LiveCountedType::live == 0, "throw-emplace destroys prior alternative exactly once");
 	}
 
 	{
