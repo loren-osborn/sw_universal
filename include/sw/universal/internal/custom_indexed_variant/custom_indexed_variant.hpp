@@ -142,130 +142,159 @@ namespace custom_indexed_variant_detail {
 
 namespace detail = custom_indexed_variant_detail;
 
-/// @brief Minimal index storage policy with std::variant_npos support.
-/// @tparam NTypes Number of variant alternatives.
-template<std::size_t NTypes>
-struct simple_encoded_index {
-	/// @brief Constructs an index in the valueless state (std::variant_npos).
-	simple_encoded_index() noexcept = default;
+/// @brief Wrapper template allows different size index.
+/// @tparam IndexT type to use for storing index.
+template<typename IndexT = std::size_t>
+struct for_index_type {
 
-	/// @brief Returns the currently stored active index.
-	std::size_t index() const noexcept {
-		assert((index_ == std::variant_npos) || (index_ < NTypes));
-		return index_;
-	}
+	static_assert(std::is_integral_v<IndexT>,
+			"IndexT must be an integral type");
+	static_assert(std::is_unsigned_v<IndexT>,
+			"IndexT must be an unsigned integral type");
+	static_assert(!std::is_same_v<IndexT, bool>,
+			"IndexT must not be bool");
+	static_assert(std::numeric_limits<IndexT>::radix == 2,
+			"IndexT must be base-2 (binary) integral");
 
-	/// @brief Sets the active index or std::variant_npos.
-	/// @param val New index value in [0, NTypes) or std::variant_npos.
-	void set_index(std::size_t val) noexcept {
-		assert((val == std::variant_npos) || (val < NTypes));
-		index_ = val;
-		assert(index() == val);
-	}
+	/// @brief Minimal index storage policy with std::variant_npos support.
+	/// @tparam NTypes Number of variant alternatives.
+	template<std::size_t NTypes>
+	struct simple_encoded_index {
 
-private:
-	std::size_t index_ = std::variant_npos;
-};
+		/// @brief Encoded representation for std::variant_npos.
+		static constexpr IndexT npos_code = ~IndexT(0);
+		static_assert(npos_code >= NTypes); // Ensures npos_code is distinct from all other valid indicies
 
-/// @brief Encodes variant index bits with additional sideband payload bits.
-/// @tparam NTypes Number of variant alternatives.
-template<std::size_t NTypes>
-struct index_encoded_with_sideband_data {
-	/// @brief Bit width of std::size_t.
-	static constexpr std::size_t width = std::numeric_limits<std::size_t>::digits;
+		/// @brief Constructs an index in the valueless state (std::variant_npos).
+		simple_encoded_index() noexcept = default;
 
-	/// @brief Computes ceil(log2(value)) for constexpr bit-allocation.
-	/// @param value Input value.
-	/// @return Number of bits required to encode value - 1.
-	static constexpr std::size_t ceil_log2(std::size_t value) {
-		std::size_t bits = 0;
-		std::size_t v = (value > 0) ? (value - 1) : 0;
-		while (v > 0) {
-			v >>= 1;
-			++bits;
-		}
-		return bits;
-	}
-
-	/// @brief Number of bits reserved for the encoded index.
-	static constexpr std::size_t index_bits = ceil_log2(NTypes + 1);
-	/// @brief Mask selecting index bits.
-	static constexpr std::size_t index_mask = index_bits == 0 ? 0
-		: (index_bits >= width ? ~std::size_t(0) : ((std::size_t(1) << index_bits) - 1));
-	/// @brief Mask selecting sideband bits.
-	static constexpr std::size_t sideband_mask = ~index_mask;
-
-	/// @brief Encoded representation for std::variant_npos.
-	static constexpr std::size_t npos_code = index_mask;
-	static_assert(npos_code >= NTypes); // Ensures npos_code is distinct from all other valid indicies
-
-	/// @brief Proxy object exposing sideband read/write while preserving index bits.
-	struct sideband_proxy {
-
-		/// @brief sideband_proxy must be bound to a source index object.
-		sideband_proxy() = delete;
-
-		/// @brief Binds this proxy to an encoded-index object.
-		/// @param src Source encoded index storage.
-		sideband_proxy(index_encoded_with_sideband_data* src) noexcept : data_(src) {}
-
-		/// @brief Reads the current sideband payload.
-		/// @return Stored sideband value.
-		std::size_t val() const noexcept {
-			return data_->sideband_val();
+		/// @brief Returns the currently stored active index.
+		std::size_t index() const noexcept {
+			assert((index_ == npos_code) || (index_ < NTypes));
+			return (index_ == npos_code) ? std::variant_npos : static_cast<std::size_t>(index_);
 		}
 
-		/// @brief Updates sideband payload while keeping index bits unchanged.
-		/// @param value New sideband value.
-		void set_val(std::size_t value) noexcept {
-			data_->set_sideband_val(value);
+		/// @brief Sets the active index or std::variant_npos.
+		/// @param val New index value in [0, NTypes) or std::variant_npos.
+		void set_index(std::size_t val) noexcept {
+			assert((val == std::variant_npos) || (val < NTypes));
+			index_ = (val == std::variant_npos) ? npos_code : static_cast<IndexT>(val);
+			assert(index() == val);
 		}
+
 	private:
-		index_encoded_with_sideband_data* data_;
+		IndexT index_ = npos_code;
 	};
 
-	/// @brief Public alias for sideband proxy type.
-	using sideband_t = sideband_proxy;
+	/// @brief Encodes variant index bits with additional sideband payload bits.
+	/// @tparam NTypes Number of variant alternatives.
+	template<std::size_t NTypes>
+	struct index_encoded_with_sideband_data {
+		/// @brief Bit width of std::size_t.
+		static constexpr std::size_t width = std::numeric_limits<IndexT>::digits;
 
-	/// @brief Constructs encoded index in the valueless state (std::variant_npos).
-	index_encoded_with_sideband_data() noexcept = default;
+		/// @brief Computes ceil(log2(value)) for constexpr bit-allocation.
+		/// @param value Input value.
+		/// @return Number of bits required to encode value - 1.
+		static constexpr std::size_t ceil_log2(std::size_t value) {
+			std::size_t bits = 0;
+			std::size_t v = (value > 0) ? (value - 1) : 0;
+			while (v > 0) {
+				v >>= 1;
+				++bits;
+			}
+			return bits;
+		}
 
-	/// @brief Returns decoded active index.
-	std::size_t index() const noexcept {
-		const std::size_t stored = data_ & index_mask;
-		const auto actual = (stored == npos_code) ? std::variant_npos : stored;
-		assert((actual == std::variant_npos) || (actual < NTypes));
-		return actual;
-	}
+		/// @brief Number of bits reserved for the encoded index.
+		static constexpr std::size_t index_bits = ceil_log2(NTypes + 1);
+		static_assert(index_bits <= width,
+			"IndexT too small to encode NTypes+1 (including npos)");
+		/// @brief Mask selecting index bits.
+		static constexpr IndexT index_mask = index_bits == 0 ? 0
+			: (index_bits >= width ? ~IndexT(0) : ((IndexT(1) << index_bits) - 1));
+		/// @brief Mask selecting sideband bits.
+		static constexpr IndexT sideband_mask = ~index_mask;
 
-	/// @brief Writes encoded active index.
-	/// @param val New index in [0, NTypes) or std::variant_npos.
-	void set_index(std::size_t val) noexcept {
-		assert((val == std::variant_npos) || (val < NTypes));
-		const std::size_t stored = (val == std::variant_npos) ? npos_code : (val & index_mask);
-		data_ = (data_ & sideband_mask) | stored;
-		assert(index() == val);
-	}
+		/// @brief Encoded representation for std::variant_npos.
+		static constexpr IndexT npos_code = index_mask;
+		static_assert(npos_code >= NTypes); // Ensures npos_code is distinct from all other valid indicies
 
-	/// @brief Returns a proxy to read/write sideband payload bits.
-	sideband_t sideband() noexcept { return sideband_proxy(this); }
+		/// @brief Proxy object exposing sideband read/write while preserving index bits.
+		struct sideband_proxy {
 
-private: // we want these to be accessible through sideband()
-	std::size_t sideband_val() const noexcept {
-		const std::size_t stored = (data_ & sideband_mask) >> index_bits;
-		return stored;
-	}
+			/// @brief sideband_proxy must be bound to a source index object.
+			sideband_proxy() = delete;
 
-	void set_sideband_val(std::size_t val) noexcept {
-		const std::size_t stored = (val << index_bits) & sideband_mask;
-		const std::size_t new_data = (data_ & index_mask) | stored;
-		assert((data_ & index_mask) == (new_data & index_mask));
-		data_ = new_data;
-	}
+			/// @brief Binds this proxy to an encoded-index object.
+			/// @param src Source encoded index storage.
+			sideband_proxy(index_encoded_with_sideband_data* src) noexcept : data_(src) {}
 
-private:
-	std::size_t data_ = npos_code;  // This default value is exposed as std::variant_npos
+			/// @brief Reads the current sideband payload.
+			/// @return Stored sideband value.
+			IndexT val() const noexcept {
+				return data_->sideband_val();
+			}
+
+			/// @brief Updates sideband payload while keeping index bits unchanged.
+			/// @param value New sideband value.
+			void set_val(IndexT value) noexcept {
+				data_->set_sideband_val(value);
+			}
+		private:
+			index_encoded_with_sideband_data* data_;
+		};
+
+		/// @brief Public alias for sideband proxy type.
+		using sideband_t = sideband_proxy;
+
+		/// @brief Constructs encoded index in the valueless state (std::variant_npos).
+		index_encoded_with_sideband_data() noexcept = default;
+
+		/// @brief Returns decoded active index.
+		std::size_t index() const noexcept {
+			const IndexT stored = data_ & index_mask;
+			const std::size_t actual = (stored == npos_code) ? std::variant_npos : static_cast<std::size_t>(stored);
+			assert((actual == std::variant_npos) || (actual < NTypes));
+			return actual;
+		}
+
+		/// @brief Writes encoded active index.
+		/// @param val New index in [0, NTypes) or std::variant_npos.
+		void set_index(std::size_t val) noexcept {
+			assert((val == std::variant_npos) || (val < NTypes));
+			const IndexT stored = (val == std::variant_npos) ? npos_code : (static_cast<IndexT>(val) & index_mask);
+			data_ = (data_ & sideband_mask) | stored;
+			assert(index() == val);
+		}
+
+		/// @brief Returns a proxy to read/write sideband payload bits.
+		sideband_t sideband() noexcept { return sideband_proxy(this); }
+
+	private: // we want these to be accessible through sideband()
+		IndexT sideband_val() const noexcept {
+			const IndexT stored = (data_ & sideband_mask) >> index_bits;
+			return stored;
+		}
+
+		void set_sideband_val(IndexT val) noexcept {
+			assert(val <= (sideband_mask >> index_bits));
+			const IndexT stored = (val << index_bits) & sideband_mask;
+			const IndexT new_data = (data_ & index_mask) | stored;
+			assert((data_ & index_mask) == (new_data & index_mask));
+			data_ = new_data;
+		}
+
+	private:
+		IndexT data_ = npos_code;  // This default value is exposed as std::variant_npos
+	};
 };
+
+template<std::size_t NTypes>
+using simple_encoded_index = for_index_type<std::size_t>::simple_encoded_index<NTypes>;
+
+template<std::size_t NTypes>
+using index_encoded_with_sideband_data = for_index_type<std::size_t>::index_encoded_with_sideband_data<NTypes>;
 
 /// @brief An indexed variant implementation modeled after std::variant (C++20).
 /// @tparam EncodedIndex Reserved index encoding selector (currently unused).
