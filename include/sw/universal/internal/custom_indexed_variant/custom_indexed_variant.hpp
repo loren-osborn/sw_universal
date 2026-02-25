@@ -31,6 +31,7 @@
 #include <type_traits>
 #include <utility>
 #include <variant>
+#include <bit>
 
 namespace sw { namespace universal {
 
@@ -88,16 +89,17 @@ namespace custom_indexed_variant_detail {
 	struct all_move_constructible : std::conjunction<std::is_move_constructible<Ts>...> {};
 
 	template<typename... Ts>
-	struct all_copy_assignable : std::conjunction<std::is_copy_assignable<Ts>...> {};
+	struct all_copy_assignable    : std::conjunction<std::is_copy_assignable<Ts>...> {};
 
 	template<typename... Ts>
-	struct all_move_assignable : std::conjunction<std::is_move_assignable<Ts>...> {};
+	struct all_move_assignable    : std::conjunction<std::is_move_assignable<Ts>...> {};
 
 	template<typename... Ts>
-	struct all_swappable : std::conjunction<std::is_swappable<Ts>...> {};
+	struct all_swappable          : std::conjunction<std::is_swappable<Ts>...> {};
 
 	template<typename... Ts>
-	struct all_nothrow_move_constructible : std::conjunction<std::is_nothrow_move_constructible<Ts>...> {};
+	struct all_nothrow_move_constructible
+	                              : std::conjunction<std::is_nothrow_move_constructible<Ts>...> {};
 
 	template<typename T>
 	struct is_in_place_index : std::false_type {};
@@ -170,16 +172,16 @@ struct for_index_type {
 
 		/// @brief Returns the currently stored active index.
 		std::size_t index() const noexcept {
-			assert((index_ == npos_code) || (index_ < NTypes));
+			assert((index_ == npos_code) || (index_ < NTypes) || !"index_ is a valid value.");
 			return (index_ == npos_code) ? std::variant_npos : static_cast<std::size_t>(index_);
 		}
 
 		/// @brief Sets the active index or std::variant_npos.
 		/// @param val New index value in [0, NTypes) or std::variant_npos.
 		void set_index(std::size_t val) noexcept {
-			assert((val == std::variant_npos) || (val < NTypes));
+			assert((val == std::variant_npos) || (val < NTypes) || !"val is a valid value.");
 			index_ = (val == std::variant_npos) ? npos_code : static_cast<IndexT>(val);
-			assert(index() == val);
+			assert((index() == val) || !"index was set to expected value.");
 		}
 
 	private:
@@ -193,21 +195,10 @@ struct for_index_type {
 		/// @brief Bit width of std::size_t.
 		static constexpr std::size_t width = std::numeric_limits<IndexT>::digits;
 
-		/// @brief Computes ceil(log2(value)) for constexpr bit-allocation.
-		/// @param value Input value.
-		/// @return Number of bits required to encode value - 1.
-		static constexpr std::size_t ceil_log2(std::size_t value) {
-			std::size_t bits = 0;
-			std::size_t v = (value > 0) ? (value - 1) : 0;
-			while (v > 0) {
-				v >>= 1;
-				++bits;
-			}
-			return bits;
-		}
-
 		/// @brief Number of bits reserved for the encoded index.
-		static constexpr std::size_t index_bits = ceil_log2(NTypes + 1);
+		/// We need to encode the values 0 to NTypes-1, plus npos_code,
+		/// so (NTypes - 1) + 1 == NTypes
+		static constexpr std::size_t index_bits = std::bit_width(NTypes);
 		static_assert(index_bits <= width,
 			"IndexT too small to encode NTypes+1 (including npos)");
 		/// @brief Mask selecting index bits.
@@ -255,17 +246,19 @@ struct for_index_type {
 		std::size_t index() const noexcept {
 			const IndexT stored = data_ & index_mask;
 			const std::size_t actual = (stored == npos_code) ? std::variant_npos : static_cast<std::size_t>(stored);
-			assert((actual == std::variant_npos) || (actual < NTypes));
+			assert((actual == std::variant_npos) || (actual < NTypes) || !"index was set to a valid value.");
 			return actual;
 		}
 
 		/// @brief Writes encoded active index.
 		/// @param val New index in [0, NTypes) or std::variant_npos.
 		void set_index(std::size_t val) noexcept {
-			assert((val == std::variant_npos) || (val < NTypes));
+			assert((val == std::variant_npos) || (val < NTypes) || !"val is a valid value.");
 			const IndexT stored = (val == std::variant_npos) ? npos_code : (static_cast<IndexT>(val) & index_mask);
-			data_ = (data_ & sideband_mask) | stored;
-			assert(index() == val);
+			const IndexT new_data = (data_ & sideband_mask) | stored;
+			assert(sideband_val() == ((new_data & sideband_mask) >> index_bits) || !"change will not alter sideband.");
+			data_ = new_data;
+			assert((index() == val) || !"index was set to expected value.");
 		}
 
 		/// @brief Returns a proxy to read/write sideband payload bits.
@@ -278,11 +271,12 @@ struct for_index_type {
 		}
 
 		void set_sideband_val(IndexT val) noexcept {
-			assert(val <= (sideband_mask >> index_bits));
+			assert((val <= (sideband_mask >> index_bits)) || !"val is a valid value.");
 			const IndexT stored = (val << index_bits) & sideband_mask;
 			const IndexT new_data = (data_ & index_mask) | stored;
-			assert((data_ & index_mask) == (new_data & index_mask));
+			assert(((data_ & index_mask) == (new_data & index_mask)) || !"change will not alter index.");
 			data_ = new_data;
+			assert((sideband_val() == val) || !"sideband_val was set to expected value.");
 		}
 
 	private:
@@ -600,6 +594,7 @@ public:
 		}
 
 	/// @brief Access the active alternative by index (const rvalue).
+	/// @note This is kept for std::variant API parity; moving from const usually performs a copy (or is ill-formed).
 	template<std::size_t I>
 		decltype(auto) get() const && {
 			if (index_obj_.index() != I) {
@@ -634,6 +629,7 @@ public:
 	}
 
 	/// @brief Access the active alternative by type (const rvalue).
+	/// @note This is kept for std::variant API parity; moving from const usually performs a copy (or is ill-formed).
 	template<typename T>
 	decltype(auto) get() const && {
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
@@ -697,6 +693,8 @@ private:
 		return storage_.buffer;
 	}
 
+	/// @brief Destroys the active alternative and transitions to valueless.
+	/// @note This function is idempotent: calling it while already valueless is a no-op.
 	void destroy_active() noexcept {
 		const std::size_t active = index_obj_.index();
 		if (active == npos) {
@@ -802,7 +800,7 @@ private:
 		}
 	}
 
-	encoded_index_t index_obj_;
+	[[no_unique_address]] encoded_index_t index_obj_;
 	typename storage_traits::storage_t storage_{};
 };
 
@@ -943,33 +941,40 @@ inline auto get_if(const custom_indexed_variant<EncodedIndex, Types...>* v) noex
 
 namespace custom_indexed_variant_detail {
 
-	/// @brief Builds a reference-variant for the currently active alternative.
-	/// @tparam Variant custom_indexed_variant type.
-	/// @tparam Is Candidate active indices.
-	/// @param v Source variant.
-	/// @return std::variant of std::reference_wrapper to the active alternative.
-	template<typename Variant, std::size_t... Is>
-	auto make_reference_variant_impl(Variant& v, std::index_sequence<Is...>) {
-		using ref_variant = std::variant<std::reference_wrapper<variant_alternative_t<Is, Variant>>...>;
-		if (v.index() == std::variant_npos) {
-			throw std::bad_variant_access{};
+	/// @brief Dispatches one variant by runtime index and forwards the selected alternative to fn.
+	template<std::size_t I = 0, typename Variant, typename Fn>
+	auto dispatch_one(Variant&& variant, Fn&& fn)
+		-> decltype(std::declval<Fn>()(get<0>(std::declval<Variant>()))) {
+		using V = std::remove_reference_t<Variant>;
+		if constexpr (I < variant_size_v<V>) {
+			if (variant.index() == I) {
+				return std::forward<Fn>(fn)(get<I>(std::forward<Variant>(variant)));
+			}
+			return dispatch_one<I + 1>(std::forward<Variant>(variant), std::forward<Fn>(fn));
 		}
-		std::optional<ref_variant> refs;
-		const bool matched = ((v.index() == Is
-			? (refs.emplace(std::in_place_index<Is>, std::ref(v.template get<Is>())), true)
-			: false) || ...);
-		if (!matched) {
-			throw std::bad_variant_access{};
-		}
-		return *refs;
+		throw std::bad_variant_access{};
 	}
 
-	/// @brief Helper that dispatches make_reference_variant_impl with full index sequence.
-	/// @param v Source variant.
-	/// @return std::variant of reference_wrappers for the active alternative.
-	template<typename Variant>
-	auto make_reference_variant(Variant& v) {
-		return make_reference_variant_impl(v, std::make_index_sequence<variant_size_v<Variant>>{});
+	/// @brief Collects active alternatives from all variants and invokes the visitor with preserved value categories.
+	template<typename Visitor, typename Tuple, typename Variant, typename... Rest>
+	decltype(auto) visit_collect(Visitor&& vis, Tuple&& collected, Variant&& variant, Rest&&... rest) {
+		return dispatch_one(std::forward<Variant>(variant), [&](auto&& value) -> decltype(auto) {
+			auto next = std::tuple_cat(
+				std::forward<Tuple>(collected),
+				std::forward_as_tuple(std::forward<decltype(value)>(value)));
+			if constexpr (sizeof...(Rest) == 0) {
+				return std::apply(
+					[&](auto&&... args) -> decltype(auto) {
+						return std::invoke(std::forward<Visitor>(vis), std::forward<decltype(args)>(args)...);
+					},
+					std::move(next));
+			} else {
+				return visit_collect(
+					std::forward<Visitor>(vis),
+					std::move(next),
+					std::forward<Rest>(rest)...);
+			}
+		});
 	}
 
 } // namespace custom_indexed_variant_detail
@@ -977,17 +982,14 @@ namespace custom_indexed_variant_detail {
 /// @brief Visit the active alternative(s) with a callable.
 template<typename Visitor, typename... Variants>
 inline decltype(auto) visit(Visitor&& vis, Variants&&... variants) {
+	static_assert(sizeof...(Variants) > 0, "visit requires at least one variant");
 	if ((variants.valueless_by_exception() || ...)) {
 		throw std::bad_variant_access{};
 	}
-	auto ref_variants = std::make_tuple(custom_indexed_variant_detail::make_reference_variant(variants)...);
-	return std::apply([
-		&](auto&... refs) -> decltype(auto) {
-			auto wrapper = [&](auto&... ref_wrappers) -> decltype(auto) {
-				return std::invoke(std::forward<Visitor>(vis), ref_wrappers.get()...);
-			};
-			return std::visit(wrapper, refs...);
-		}, ref_variants);
+	return custom_indexed_variant_detail::visit_collect(
+		std::forward<Visitor>(vis),
+		std::tuple<>{},
+		std::forward<Variants>(variants)...);
 }
 
 } // namespace internal

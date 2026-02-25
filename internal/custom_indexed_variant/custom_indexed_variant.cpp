@@ -182,6 +182,20 @@ struct StrongGuaranteeExpectations {
 	bool assign_preserves = false;
 };
 
+enum class VisitRefCategory {
+	LValue = 1,
+	ConstLValue = 2,
+	RValue = 3,
+	ConstRValue = 4
+};
+
+struct VisitCategoryVisitor {
+	VisitRefCategory operator()(int&) const { return VisitRefCategory::LValue; }
+	VisitRefCategory operator()(const int&) const { return VisitRefCategory::ConstLValue; }
+	VisitRefCategory operator()(int&&) const { return VisitRefCategory::RValue; }
+	VisitRefCategory operator()(const int&&) const { return VisitRefCategory::ConstRValue; }
+};
+
 StrongGuaranteeExpectations compute_std_expectations() {
 	StrongGuaranteeExpectations expectations{};
 	using StdVariant = std::variant<int, std::string, ThrowingType, LiveCountedType>;
@@ -434,6 +448,28 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		using RefVariant = Variant<int>;
+		RefVariant v(7);
+		const RefVariant cv(9);
+		check(
+			ctx,
+			visit_adapter(VisitCategoryVisitor{}, v) == VisitRefCategory::LValue,
+			"visit forwards lvalue variant as T&");
+		check(
+			ctx,
+			visit_adapter(VisitCategoryVisitor{}, cv) == VisitRefCategory::ConstLValue,
+			"visit forwards const lvalue variant as const T&");
+		check(
+			ctx,
+			visit_adapter(VisitCategoryVisitor{}, std::move(v)) == VisitRefCategory::RValue,
+			"visit forwards rvalue variant as T&&");
+		check(
+			ctx,
+			visit_adapter(VisitCategoryVisitor{}, std::move(cv)) == VisitRefCategory::ConstRValue,
+			"visit forwards const rvalue variant as const T&&");
+	}
+
+	{
 		ThrowingType::reset();
 		VariantT v(123);
 		ThrowingType::throw_on_default = 1;
@@ -555,6 +591,31 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		check(ctx, v.index() == 0, "throw-before-destroy preserves prior index");
 		check(ctx, get<int>(v) == 77, "throw-before-destroy preserves prior value");
 		check(ctx, ThrowBeforeDestroyType::live == 0, "throw-before-destroy does not leak construction");
+	}
+
+	if constexpr (variant_test::is_custom_variant_v<VariantT>) {
+		ThrowingType::reset();
+		LiveCountedType::reset();
+		VariantT source(std::in_place_type<LiveCountedType>, LiveCountedType{44});
+		check(ctx, LiveCountedType::live == 1, "destroy idempotence setup live count");
+		ThrowingType::throw_on_default = 1;
+		expect_throw<std::runtime_error>(ctx, "destroy idempotence force valueless source", [&]() {
+			source.template emplace<ThrowingType>();
+		});
+		check(ctx, source.valueless_by_exception(), "destroy idempotence source valueless");
+		check(ctx, source.index() == std::variant_npos, "destroy idempotence source index is npos");
+		check(ctx, LiveCountedType::live == 0, "destroy idempotence source destruction accounted");
+
+		VariantT target;
+		target = source; // engaged -> valueless (destroy_active work path)
+		check(ctx, target.valueless_by_exception(), "assign from valueless yields valueless target");
+		check(ctx, target.index() == std::variant_npos, "assign from valueless sets npos");
+
+		const int live_before = LiveCountedType::live;
+		target = source; // valueless -> valueless (destroy_active no-op path)
+		check(ctx, target.valueless_by_exception(), "assign valueless to already valueless stays valueless");
+		check(ctx, target.index() == std::variant_npos, "assign valueless to already valueless keeps npos");
+		check(ctx, LiveCountedType::live == live_before, "assign valueless to already valueless does not destroy anything");
 	}
 
 	{
