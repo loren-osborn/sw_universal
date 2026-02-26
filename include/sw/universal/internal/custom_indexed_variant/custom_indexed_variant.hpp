@@ -149,8 +149,9 @@ namespace custom_indexed_variant_detail {
 					return std::variant_npos;
 				}
 			} else {
-				// Selection is intentionally overload-resolution based (std::variant-like):
-				// if there is no unique best non-narrowing implicit candidate, disable.
+				// Portable baseline (intentional): converting ctor/operator= selection is implicit-only and
+				// non-narrowing today because stdlib implementations differ on explicit-only converting behavior.
+				// We intend to converge to the standard libraries' consensus once that behavior is stable/clear.
 				return implicit_index;
 			}
 		}();
@@ -1115,6 +1116,31 @@ inline auto get_if(const custom_indexed_variant<EncodedIndex, Types...>* v) noex
 
 namespace custom_indexed_variant_detail {
 
+	template<typename Visitor, typename CollectedTuple, typename... Variants>
+	struct visit_invocable_impl;
+
+	template<typename Visitor, typename... Collected>
+	struct visit_invocable_impl<Visitor, std::tuple<Collected...>> : std::bool_constant<std::is_invocable_v<Visitor, Collected...>> {};
+
+	template<typename Visitor, typename... Collected, typename Variant, typename... Rest>
+	struct visit_invocable_impl<Visitor, std::tuple<Collected...>, Variant, Rest...> {
+	private:
+		using V = std::remove_reference_t<Variant>;
+
+		template<std::size_t... Is>
+		static consteval bool compute(std::index_sequence<Is...>) {
+			return (visit_invocable_impl<
+				Visitor,
+				std::tuple<Collected..., decltype(get<Is>(std::declval<Variant>()))>,
+				Rest...>::value && ...);
+		}
+	public:
+		static constexpr bool value = compute(std::make_index_sequence<variant_size_v<V>>{});
+	};
+
+	template<typename Visitor, typename... Variants>
+	inline constexpr bool visit_invocable_v = visit_invocable_impl<Visitor, std::tuple<>, Variants...>::value;
+
 	/// @brief Dispatches one variant by runtime index and forwards the selected alternative to fn.
 	template<std::size_t I = 0, typename Variant, typename Fn>
 	auto dispatch_one(Variant&& variant, Fn&& fn)
@@ -1155,8 +1181,8 @@ namespace custom_indexed_variant_detail {
 
 /// @brief Visit the active alternative(s) with a callable.
 template<typename Visitor, typename... Variants>
+	requires (sizeof...(Variants) > 0) && custom_indexed_variant_detail::visit_invocable_v<Visitor&&, Variants&&...>
 inline decltype(auto) visit(Visitor&& vis, Variants&&... variants) {
-	static_assert(sizeof...(Variants) > 0, "visit requires at least one variant");
 	if ((variants.valueless_by_exception() || ...)) {
 		throw std::bad_variant_access{};
 	}
