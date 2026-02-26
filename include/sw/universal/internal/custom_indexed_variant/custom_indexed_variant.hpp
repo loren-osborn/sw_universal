@@ -264,6 +264,8 @@ struct for_index_type {
 		/// @brief Returns a proxy to read/write sideband payload bits.
 		sideband_t sideband() noexcept { return sideband_proxy(this); }
 
+		sideband_t sideband() const noexcept { return sideband_proxy(this); }
+
 	private: // we want these to be accessible through sideband()
 		IndexT sideband_val() const noexcept {
 			const IndexT stored = (data_ & sideband_mask) >> index_bits;
@@ -458,6 +460,11 @@ public:
 	/// @brief Exposes encoded index sideband when the encoded index type supports it.
 	template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_v<EI>>>
 	auto sideband() noexcept(noexcept(std::declval<EI&>().sideband())) {
+		return index_obj_.sideband();
+	}
+
+	template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_v<EI>>>
+	auto sideband() const noexcept(noexcept(std::declval<EI&>().sideband())) {
 		return index_obj_.sideband();
 	}
 
