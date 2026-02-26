@@ -72,27 +72,24 @@ namespace custom_indexed_variant_detail {
 	template<typename T, typename... Ts>
 	inline constexpr std::size_t count_exact_v = (std::size_t{0} + ... + (std::is_same_v<T, Ts> ? std::size_t{1} : std::size_t{0}));
 
-	template<typename Source, typename... Ts>
-	struct unique_constructible_index {
-		static constexpr std::size_t value = []() constexpr {
-			constexpr bool matches[] = { std::is_constructible_v<Ts, Source&&>... };
-			std::size_t found = std::variant_npos;
-			std::size_t count = 0;
-			for (std::size_t i = 0; i < sizeof...(Ts); ++i) {
-				if (matches[i]) {
-					++count;
-					if (count > 1) return std::variant_npos;
-					found = i;
-				}
-			}
-			return count == 1 ? found : std::variant_npos;
-		}();
-	};
+	template<typename To, typename From, typename = void>
+	struct non_narrowing_list_initializable : std::false_type {};
 
-	template<typename Source, typename... Ts>
-	inline constexpr std::size_t unique_constructible_index_v = unique_constructible_index<Source, Ts...>::value;
+	template<typename To, typename From>
+	struct non_narrowing_list_initializable<To, From, std::void_t<decltype(To{std::declval<From>()})>> : std::true_type {};
 
-	template<std::size_t I, typename T, typename Source, bool Enable = std::is_constructible_v<T, Source&&>>
+	template<typename To, typename From>
+	inline constexpr bool non_narrowing_list_initializable_v = non_narrowing_list_initializable<To, From>::value;
+
+	template<typename To, typename From>
+	inline constexpr bool non_narrowing_convertible_v =
+		std::is_convertible_v<From, To> && non_narrowing_list_initializable_v<To, From>;
+
+	template<typename To, typename From>
+	inline constexpr bool non_narrowing_constructible_v =
+		std::is_constructible_v<To, From> && non_narrowing_list_initializable_v<To, From>;
+
+	template<std::size_t I, typename T, typename Source, bool Enable = non_narrowing_convertible_v<T, Source&&>>
 	struct construct_select_overload {
 		void operator()() const = delete;
 	};
@@ -141,7 +138,6 @@ namespace custom_indexed_variant_detail {
 		static constexpr std::size_t exact_count = count_exact_v<U, Ts...>;
 		static constexpr std::size_t exact_index = index_of_exact_v<U, Ts...>;
 		static constexpr std::size_t implicit_index = implicit_best_construct_index_v<Source, Ts...>;
-		static constexpr std::size_t unique_index = unique_constructible_index_v<Source, Ts...>;
 	public:
 		static constexpr std::size_t value = []() constexpr {
 			if constexpr (exact_count > 1) {
@@ -153,11 +149,9 @@ namespace custom_indexed_variant_detail {
 					return std::variant_npos;
 				}
 			} else {
-				if constexpr (implicit_index != std::variant_npos) {
-					return implicit_index;
-				} else {
-					return unique_index;
-				}
+				// Selection is intentionally overload-resolution based (std::variant-like):
+				// if there is no unique best non-narrowing implicit candidate, disable.
+				return implicit_index;
 			}
 		}();
 	};
