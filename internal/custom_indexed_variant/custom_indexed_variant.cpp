@@ -196,6 +196,13 @@ struct VisitCategoryVisitor {
 	VisitRefCategory operator()(const int&&) const { return VisitRefCategory::ConstRValue; }
 };
 
+struct StrictConstRvalueVisitVisitor {
+	bool operator()(const int&&) const { return true; }
+	bool operator()(const std::string&&) const { return true; }
+	template<class T>
+	bool operator()(T&&) const = delete;
+};
+
 struct AmbiguousSource {};
 
 struct AmbiguousA {
@@ -314,6 +321,22 @@ constexpr bool variant_has_sideband() {
 	}
 }
 
+template<typename V>
+constexpr bool custom_visit_const_rvalue_is_strictly_forwarded() {
+	using namespace variant_test;
+	return requires {
+		visit_adapter(StrictConstRvalueVisitVisitor{}, std::declval<const V&&>());
+	};
+}
+
+template<template<class...> class Variant, typename Source, typename... Ts>
+constexpr bool construct_assign_traits_match_std_variant() {
+	using V = Variant<Ts...>;
+	using SV = std::variant<Ts...>;
+	return (std::is_constructible_v<V, Source> == std::is_constructible_v<SV, Source>) &&
+		(std::is_assignable_v<V&, Source> == std::is_assignable_v<SV&, Source>);
+}
+
 template<template<class...> class Variant>
 constexpr bool run_converting_selection_static_checks_common() {
 	{
@@ -338,17 +361,10 @@ constexpr bool run_converting_selection_static_checks_common() {
 		using V = Variant<NoTokenSupport, AssignableFromAssignToken>;
 		static_assert(std::is_assignable_v<V&, AssignToken>);
 	}
-	return true;
-}
-
-template<template<class...> class Variant>
-constexpr bool run_converting_selection_static_checks_custom_only() {
-	{
-		using V = Variant<ExplicitOnlyInt>;
-		static_assert(std::is_constructible_v<V, int>);
-		static_assert(!std::is_convertible_v<int, V>);
-		static_assert(requires { V{1}; });
-	}
+	static_assert(construct_assign_traits_match_std_variant<Variant, int, int>());
+	static_assert(construct_assign_traits_match_std_variant<Variant, double, int>());
+	static_assert(construct_assign_traits_match_std_variant<Variant, double, short, int>());
+	static_assert(construct_assign_traits_match_std_variant<Variant, long long, short, int>());
 	return true;
 }
 
@@ -384,10 +400,10 @@ static_assert(!variant_has_sideband<std::variant<int>>());
 static_assert(run_converting_selection_static_checks_common<CustomVariant>());
 static_assert(run_converting_selection_static_checks_common<SidebandVariant>());
 static_assert(run_converting_selection_static_checks_common<std::variant>());
-static_assert(run_converting_selection_static_checks_custom_only<CustomVariant>());
-static_assert(run_converting_selection_static_checks_custom_only<SidebandVariant>());
 static_assert(const_sideband_readable<SidebandVariant<int>>());
 static_assert(!const_sideband_writable<SidebandVariant<int>>());
+static_assert(custom_visit_const_rvalue_is_strictly_forwarded<CustomVariant<int, std::string>>());
+static_assert(custom_visit_const_rvalue_is_strictly_forwarded<SidebandVariant<int, std::string>>());
 
 #ifdef UNIVERSAL_COMPILE_FAIL_TESTS
 struct ThrowingDestructorType {
@@ -499,6 +515,17 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		UniqueConvertible v = 7;
 		check(ctx, v.index() == 0, "converting ctor unique convertible candidate selected");
 		check(ctx, get<long>(v) == 7L, "converting ctor stores selected long alternative");
+	}
+
+	{
+		using ArithmeticVariant = Variant<int, double>;
+		using StdArithmeticVariant = std::variant<int, double>;
+		ArithmeticVariant v = 3.25;
+		StdArithmeticVariant sv = 3.25;
+		check(ctx, v.index() == sv.index(), "non-narrowing converting ctor index matches std::variant");
+		v = 8.5;
+		sv = 8.5;
+		check(ctx, v.index() == sv.index(), "non-narrowing converting assignment index matches std::variant");
 	}
 
 	{
