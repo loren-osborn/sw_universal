@@ -69,6 +69,136 @@ namespace custom_indexed_variant_detail {
 	template<typename T, typename... Ts>
 	inline constexpr std::size_t index_of_exact_v = index_of_exact<T, Ts...>::value;
 
+	template<typename T, typename... Ts>
+	inline constexpr std::size_t count_exact_v = (std::size_t{0} + ... + (std::is_same_v<T, Ts> ? std::size_t{1} : std::size_t{0}));
+
+	template<typename Source, typename... Ts>
+	struct unique_constructible_index {
+		static constexpr std::size_t value = []() constexpr {
+			constexpr bool matches[] = { std::is_constructible_v<Ts, Source&&>... };
+			std::size_t found = std::variant_npos;
+			std::size_t count = 0;
+			for (std::size_t i = 0; i < sizeof...(Ts); ++i) {
+				if (matches[i]) {
+					++count;
+					if (count > 1) return std::variant_npos;
+					found = i;
+				}
+			}
+			return count == 1 ? found : std::variant_npos;
+		}();
+	};
+
+	template<typename Source, typename... Ts>
+	inline constexpr std::size_t unique_constructible_index_v = unique_constructible_index<Source, Ts...>::value;
+
+	template<std::size_t I, typename T, typename Source, bool Enable = std::is_constructible_v<T, Source&&>>
+	struct construct_select_overload {
+		void operator()() const = delete;
+	};
+
+	template<std::size_t I, typename T, typename Source>
+	struct construct_select_overload<I, T, Source, true> {
+		auto operator()(T) const -> std::integral_constant<std::size_t, I>;
+	};
+
+	template<typename Source, typename Seq, typename... Ts>
+	struct construct_select_overload_set_impl;
+
+	template<typename Source, std::size_t... Is, typename... Ts>
+	struct construct_select_overload_set_impl<Source, std::index_sequence<Is...>, Ts...>
+		: construct_select_overload<Is, Ts, Source>... {
+		using construct_select_overload<Is, Ts, Source>::operator()...;
+	};
+
+	template<typename Source, typename... Ts>
+	using construct_select_overload_set =
+		construct_select_overload_set_impl<Source, std::index_sequence_for<Ts...>, Ts...>;
+
+	template<typename Source, typename... Ts>
+	using construct_select_tag_t = decltype(std::declval<construct_select_overload_set<Source, Ts...>>()(std::declval<Source&&>()));
+
+	template<typename Source, typename... Ts>
+	struct implicit_best_construct_index {
+	private:
+		template<typename S, typename = void>
+		struct impl : std::integral_constant<std::size_t, std::variant_npos> {};
+
+		template<typename S>
+		struct impl<S, std::void_t<construct_select_tag_t<S, Ts...>>>
+			: std::integral_constant<std::size_t, construct_select_tag_t<S, Ts...>::value> {};
+	public:
+		static constexpr std::size_t value = impl<Source>::value;
+	};
+
+	template<typename Source, typename... Ts>
+	inline constexpr std::size_t implicit_best_construct_index_v = implicit_best_construct_index<Source, Ts...>::value;
+
+	template<typename Source, typename... Ts>
+	struct best_construct_index {
+	private:
+		using U = std::remove_cv_t<std::remove_reference_t<Source>>;
+		static constexpr std::size_t exact_count = count_exact_v<U, Ts...>;
+		static constexpr std::size_t exact_index = index_of_exact_v<U, Ts...>;
+		static constexpr std::size_t implicit_index = implicit_best_construct_index_v<Source, Ts...>;
+		static constexpr std::size_t unique_index = unique_constructible_index_v<Source, Ts...>;
+	public:
+		static constexpr std::size_t value = []() constexpr {
+			if constexpr (exact_count > 1) {
+				return std::variant_npos;
+			} else if constexpr (exact_count == 1) {
+				if constexpr (std::is_constructible_v<U, Source&&>) {
+					return exact_index;
+				} else {
+					return std::variant_npos;
+				}
+			} else {
+				if constexpr (implicit_index != std::variant_npos) {
+					return implicit_index;
+				} else {
+					return unique_index;
+				}
+			}
+		}();
+	};
+
+	template<typename Source, typename... Ts>
+	inline constexpr std::size_t best_construct_index_v = best_construct_index<Source, Ts...>::value;
+
+	template<typename Source, typename... Ts>
+	struct best_assign_index {
+	private:
+		static constexpr std::size_t selected_index = best_construct_index_v<Source, Ts...>;
+	public:
+		static constexpr std::size_t value = []() constexpr {
+			if constexpr (selected_index == std::variant_npos) {
+				return std::variant_npos;
+			} else if constexpr (std::is_assignable_v<type_at_t<selected_index, Ts...>&, Source&&>) {
+				return selected_index;
+			} else {
+				return std::variant_npos;
+			}
+		}();
+	};
+
+	template<typename Source, typename... Ts>
+	inline constexpr std::size_t best_assign_index_v = best_assign_index<Source, Ts...>::value;
+
+	template<typename Source, typename... Ts>
+	struct best_construct_is_implicit {
+		static constexpr std::size_t I = best_construct_index_v<Source, Ts...>;
+		static constexpr bool value = []() constexpr {
+			if constexpr (I == std::variant_npos) {
+				return false;
+			} else {
+				return std::is_convertible_v<Source&&, type_at_t<I, Ts...>>;
+			}
+		}();
+	};
+
+	template<typename Source, typename... Ts>
+	inline constexpr bool best_construct_is_implicit_v = best_construct_is_implicit<Source, Ts...>::value;
+
 	template<typename... Ts>
 	struct storage_traits {
 		static constexpr std::size_t max_size = (std::max)({sizeof(Ts)...});
@@ -236,8 +366,21 @@ struct for_index_type {
 			index_encoded_with_sideband_data* data_;
 		};
 
+		/// @brief Proxy object exposing sideband read-only access from const encoded index storage.
+		struct const_sideband_proxy {
+			const_sideband_proxy() = delete;
+			explicit const_sideband_proxy(const index_encoded_with_sideband_data* src) noexcept : data_(src) {}
+
+			IndexT val() const noexcept {
+				return data_->sideband_val();
+			}
+		private:
+			const index_encoded_with_sideband_data* data_;
+		};
+
 		/// @brief Public alias for sideband proxy type.
 		using sideband_t = sideband_proxy;
+		using const_sideband_t = const_sideband_proxy;
 
 		/// @brief Constructs encoded index in the valueless state (std::variant_npos).
 		index_encoded_with_sideband_data() noexcept = default;
@@ -264,7 +407,7 @@ struct for_index_type {
 		/// @brief Returns a proxy to read/write sideband payload bits.
 		sideband_t sideband() noexcept { return sideband_proxy(this); }
 
-		sideband_t sideband() const noexcept { return sideband_proxy(this); }
+		const_sideband_t sideband() const noexcept { return const_sideband_proxy(this); }
 
 	private: // we want these to be accessible through sideband()
 		IndexT sideband_val() const noexcept {
@@ -365,6 +508,7 @@ public:
 	template<typename T, typename... Args>
 	constexpr explicit custom_indexed_variant(std::in_place_type_t<T>, Args&&... args)
 		: index_obj_() {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
 		static_assert(index != npos, "Type not found in custom_indexed_variant");
 		construct<index>(std::forward<Args>(args)...);
@@ -374,22 +518,38 @@ public:
 	template<typename T, typename U, typename... Args>
 	constexpr explicit custom_indexed_variant(std::in_place_type_t<T>, std::initializer_list<U> init, Args&&... args)
 		: index_obj_() {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t index = detail::index_of_exact_v<T, Types...>;
 		static_assert(index != npos, "Type not found in custom_indexed_variant");
 		construct<index>(init, std::forward<Args>(args)...);
 	}
 
-	/// @brief Converting constructor from a value (exact-type match).
+	/// @brief Converting constructor from a value (selected alternative; implicit when conversion is implicit).
 	template<typename T,
 			typename U = detail::remove_cvref_t<T>,
+			std::size_t I = detail::best_construct_index_v<T, Types...>,
 			std::enable_if_t<!std::is_same_v<U, custom_indexed_variant> &&
 							!detail::is_in_place_index_v<U> &&
 							!detail::is_in_place_type_v<U> &&
-							(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
+							(I != npos) &&
+							detail::best_construct_is_implicit_v<T, Types...>, int> = 0>
 	constexpr custom_indexed_variant(T&& value)
 		: index_obj_() {
-		constexpr std::size_t index = detail::index_of_exact_v<U, Types...>;
-		construct<index>(std::forward<T>(value));
+		construct<I>(std::forward<T>(value));
+	}
+
+	/// @brief Converting constructor from a value (selected alternative; explicit when needed).
+	template<typename T,
+			typename U = detail::remove_cvref_t<T>,
+			std::size_t I = detail::best_construct_index_v<T, Types...>,
+			std::enable_if_t<!std::is_same_v<U, custom_indexed_variant> &&
+							!detail::is_in_place_index_v<U> &&
+							!detail::is_in_place_type_v<U> &&
+							(I != npos) &&
+							!detail::best_construct_is_implicit_v<T, Types...>, int> = 0>
+	constexpr explicit custom_indexed_variant(T&& value)
+		: index_obj_() {
+		construct<I>(std::forward<T>(value));
 	}
 
 	/// @brief Destroys the active alternative if engaged.
@@ -425,20 +585,24 @@ public:
 		return *this;
 	}
 
-	/// @brief Assigns from a value (exact-type match).
+	/// @brief Assigns from a value (selected alternative).
 	template<typename T,
 			typename U = detail::remove_cvref_t<T>,
-			std::enable_if_t<(detail::index_of_exact_v<U, Types...> != npos), int> = 0>
+			std::size_t I = detail::best_assign_index_v<T, Types...>,
+			std::enable_if_t<!std::is_same_v<U, custom_indexed_variant> &&
+							!detail::is_in_place_index_v<U> &&
+							!detail::is_in_place_type_v<U> &&
+							(I != npos), int> = 0>
 	custom_indexed_variant& operator=(T&& value) {
-		constexpr std::size_t I = detail::index_of_exact_v<U, Types...>;
+		using Target = detail::type_at_t<I, Types...>;
 		if (index_obj_.index() == I) {
-			*std::launder(reinterpret_cast<U*>(storage_bytes())) = std::forward<T>(value);
+			*std::launder(reinterpret_cast<Target*>(storage_bytes())) = std::forward<T>(value);
 		} else {
-			if constexpr (std::is_nothrow_move_constructible_v<U> || std::is_nothrow_copy_constructible_v<U>) {
-				std::optional<U> temp;
+			if constexpr (std::is_nothrow_move_constructible_v<Target> || std::is_nothrow_copy_constructible_v<Target>) {
+				std::optional<Target> temp;
 				temp.emplace(std::forward<T>(value));
 				destroy_active();
-				if constexpr (std::is_nothrow_move_constructible_v<U>) {
+				if constexpr (std::is_nothrow_move_constructible_v<Target>) {
 					construct<I>(std::move(*temp));
 				} else {
 					construct<I>(*temp);
@@ -464,7 +628,7 @@ public:
 	}
 
 	template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_v<EI>>>
-	auto sideband() const noexcept(noexcept(std::declval<EI&>().sideband())) {
+	auto sideband() const noexcept(noexcept(std::declval<const EI&>().sideband())) {
 		return index_obj_.sideband();
 	}
 
@@ -511,6 +675,7 @@ public:
 	/// @brief Constructs a new alternative in-place by type.
 	template<typename T, typename... Args>
 	decltype(auto) emplace(Args&&... args) {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return emplace<I>(std::forward<Args>(args)...);
@@ -519,6 +684,7 @@ public:
 	/// @brief Constructs a new alternative in-place by type with initializer_list.
 	template<typename T, typename U, typename... Args>
 	decltype(auto) emplace(std::initializer_list<U> init, Args&&... args) {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return emplace<I>(init, std::forward<Args>(args)...);
@@ -614,6 +780,7 @@ public:
 	/// @brief Access the active alternative by type.
 	template<typename T>
 	decltype(auto) get() & {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return get<I>();
@@ -622,6 +789,7 @@ public:
 	/// @brief Access the active alternative by type (const).
 	template<typename T>
 	decltype(auto) get() const & {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return get<I>();
@@ -630,6 +798,7 @@ public:
 	/// @brief Access the active alternative by type (rvalue).
 	template<typename T>
 	decltype(auto) get() && {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return std::move(get<I>());
@@ -639,6 +808,7 @@ public:
 	/// @note This is kept for std::variant API parity; moving from const usually performs a copy (or is ill-formed).
 	template<typename T>
 	decltype(auto) get() const && {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return std::move(get<I>());
@@ -661,6 +831,7 @@ public:
 	/// @brief Pointer access to alternative by type.
 	template<typename T>
 	auto get_if() noexcept {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return get_if<I>();
@@ -669,6 +840,7 @@ public:
 	/// @brief Pointer access to alternative by type (const).
 	template<typename T>
 	auto get_if() const noexcept {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return get_if<I>();
@@ -677,6 +849,7 @@ public:
 	/// @brief Returns true if the active alternative matches T.
 	template<typename T>
 	bool holds_alternative() const noexcept {
+		static_assert(detail::count_exact_v<T, Types...> == 1, "Type must occur exactly once in custom_indexed_variant");
 		constexpr std::size_t I = detail::index_of_exact_v<T, Types...>;
 		static_assert(I != npos, "Type not found in custom_indexed_variant");
 		return index_obj_.index() == I;

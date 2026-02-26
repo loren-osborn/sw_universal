@@ -196,6 +196,49 @@ struct VisitCategoryVisitor {
 	VisitRefCategory operator()(const int&&) const { return VisitRefCategory::ConstRValue; }
 };
 
+struct AmbiguousSource {};
+
+struct AmbiguousA {
+	int value{0};
+	AmbiguousA() = default;
+	AmbiguousA(AmbiguousSource) noexcept : value(1) {}
+	AmbiguousA& operator=(AmbiguousSource) noexcept { value = 11; return *this; }
+};
+
+struct AmbiguousB {
+	int value{0};
+	AmbiguousB() = default;
+	AmbiguousB(AmbiguousSource) noexcept : value(2) {}
+	AmbiguousB& operator=(AmbiguousSource) noexcept { value = 22; return *this; }
+};
+
+struct ExplicitOnlyInt {
+	int value{0};
+	ExplicitOnlyInt() = default;
+	explicit ExplicitOnlyInt(int v) noexcept : value(v) {}
+	ExplicitOnlyInt& operator=(int v) noexcept { value = v; return *this; }
+};
+
+struct AssignToken {};
+
+struct CtorOnlyFromAssignToken {
+	int value{0};
+	CtorOnlyFromAssignToken() = default;
+	CtorOnlyFromAssignToken(AssignToken) noexcept : value(1) {}
+	CtorOnlyFromAssignToken& operator=(AssignToken) = delete;
+};
+
+struct AssignableFromAssignToken {
+	int value{0};
+	AssignableFromAssignToken() = default;
+	AssignableFromAssignToken(AssignToken) noexcept : value(3) {}
+	AssignableFromAssignToken& operator=(AssignToken) noexcept { value = 7; return *this; }
+};
+
+struct NoTokenSupport {
+	int value{0};
+};
+
 StrongGuaranteeExpectations compute_std_expectations() {
 	StrongGuaranteeExpectations expectations{};
 	using StdVariant = std::variant<int, std::string, ThrowingType, LiveCountedType>;
@@ -271,6 +314,54 @@ constexpr bool variant_has_sideband() {
 	}
 }
 
+template<template<class...> class Variant>
+constexpr bool run_converting_selection_static_checks_common() {
+	{
+		using V = Variant<int, std::string>;
+		static_assert(std::is_constructible_v<V, int>);
+	}
+	{
+		using V = Variant<const char*, std::string>;
+		static_assert(std::is_constructible_v<V, const char*>);
+		static_assert(std::is_assignable_v<V&, const char*>);
+	}
+	{
+		using V = Variant<long, std::string>;
+		static_assert(std::is_constructible_v<V, int>);
+	}
+	{
+		using V = Variant<AmbiguousA, AmbiguousB>;
+		static_assert(!std::is_constructible_v<V, AmbiguousSource>);
+		static_assert(!std::is_assignable_v<V&, AmbiguousSource>);
+	}
+	{
+		using V = Variant<NoTokenSupport, AssignableFromAssignToken>;
+		static_assert(std::is_assignable_v<V&, AssignToken>);
+	}
+	return true;
+}
+
+template<template<class...> class Variant>
+constexpr bool run_converting_selection_static_checks_custom_only() {
+	{
+		using V = Variant<ExplicitOnlyInt>;
+		static_assert(std::is_constructible_v<V, int>);
+		static_assert(!std::is_convertible_v<int, V>);
+		static_assert(requires { V{1}; });
+	}
+	return true;
+}
+
+template<typename V>
+constexpr bool const_sideband_readable() {
+	return requires(const V& v) { v.sideband().val(); };
+}
+
+template<typename V>
+constexpr bool const_sideband_writable() {
+	return requires(const V& v) { v.sideband().set_val(1); };
+}
+
 template<std::size_t>
 struct NonNoexceptEncodedIndex {
 	std::size_t index() const { return std::variant_npos; }
@@ -290,6 +381,13 @@ static_assert(sw::universal::internal::custom_indexed_variant_detail::has_sideba
 static_assert(!variant_has_sideband<CustomVariant<int>>());
 static_assert(variant_has_sideband<SidebandVariant<int>>());
 static_assert(!variant_has_sideband<std::variant<int>>());
+static_assert(run_converting_selection_static_checks_common<CustomVariant>());
+static_assert(run_converting_selection_static_checks_common<SidebandVariant>());
+static_assert(run_converting_selection_static_checks_common<std::variant>());
+static_assert(run_converting_selection_static_checks_custom_only<CustomVariant>());
+static_assert(run_converting_selection_static_checks_custom_only<SidebandVariant>());
+static_assert(const_sideband_readable<SidebandVariant<int>>());
+static_assert(!const_sideband_writable<SidebandVariant<int>>());
 
 #ifdef UNIVERSAL_COMPILE_FAIL_TESTS
 struct ThrowingDestructorType {
@@ -379,6 +477,39 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		using ExactNumeric = Variant<int, std::string>;
+		ExactNumeric v = 7;
+		check(ctx, v.index() == 0, "converting ctor exact match wins for int");
+		check(ctx, get<int>(v) == 7, "converting ctor exact match stores int");
+	}
+
+	{
+		using ExactPtr = Variant<const char*, std::string>;
+		ExactPtr v = "hi";
+		check(ctx, v.index() == 0, "converting ctor exact match wins over std::string");
+		check(ctx, std::string(get<const char*>(v)) == "hi", "converting ctor exact match stores const char*");
+		v = std::string("seed");
+		v = "bye";
+		check(ctx, v.index() == 0, "converting assignment exact match wins over std::string");
+		check(ctx, std::string(get<const char*>(v)) == "bye", "converting assignment exact match stores const char*");
+	}
+
+	{
+		using UniqueConvertible = Variant<long, std::string>;
+		UniqueConvertible v = 7;
+		check(ctx, v.index() == 0, "converting ctor unique convertible candidate selected");
+		check(ctx, get<long>(v) == 7L, "converting ctor stores selected long alternative");
+	}
+
+	{
+		using AssignFiltered = Variant<NoTokenSupport, AssignableFromAssignToken>;
+		AssignFiltered v(std::in_place_index<0>);
+		v = AssignToken{};
+		check(ctx, v.index() == 1, "converting assignment selects unique assignable/constructible alternative");
+		check(ctx, get<AssignableFromAssignToken>(v).value == 3, "converting assignment constructs selected alternative");
+	}
+
+	{
 		VariantT v(std::in_place_type<std::string>, "text");
 		check(ctx, get<1>(v) == "text", "get by index");
 		check(ctx, get<std::string>(v) == "text", "get by type");
@@ -405,6 +536,9 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		v.template emplace<0>(42);
 		check(ctx, static_cast<std::size_t>(v.sideband().val()) == 9, "sideband survives index update");
 		check(ctx, v.index() == 0, "emplace updates active index with sideband present");
+		const VariantT& cv = v;
+		auto csb = cv.sideband();
+		check(ctx, static_cast<std::size_t>(csb.val()) == 9, "const sideband proxy reads sideband");
 	}
 
 	{
