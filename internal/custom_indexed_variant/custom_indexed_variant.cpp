@@ -203,6 +203,22 @@ struct StrictConstRvalueVisitVisitor {
 	bool operator()(T&&) const = delete;
 };
 
+struct OnlyConstRvalueOK {
+	bool operator()(const int&&) const { return true; }
+	bool operator()(const std::string&&) const { return true; }
+	template<class T>
+	bool operator()(T&&) const = delete;
+};
+
+struct RejectConstRvalue {
+	bool operator()(int&&) const { return true; }
+	bool operator()(const int&) const { return true; }
+	bool operator()(std::string&&) const { return true; }
+	bool operator()(const std::string&) const { return true; }
+	bool operator()(const int&&) const = delete;
+	bool operator()(const std::string&&) const = delete;
+};
+
 struct AmbiguousSource {};
 
 struct AmbiguousA {
@@ -295,12 +311,21 @@ namespace variant_test {
 	inline constexpr bool is_custom_variant_v = is_custom_variant<std::decay_t<Variant>>::value;
 
 	template<typename Visitor, typename... Variants>
+		requires ((is_custom_variant_v<Variants> || ...)) &&
+			requires {
+				sw::universal::internal::visit(std::declval<Visitor>(), std::declval<Variants>()...);
+			}
 	decltype(auto) visit_adapter(Visitor&& vis, Variants&&... variants) {
-		if constexpr ((is_custom_variant_v<Variants> || ...)) {
-			return sw::universal::internal::visit(std::forward<Visitor>(vis), std::forward<Variants>(variants)...);
-		} else {
-			return std::visit(std::forward<Visitor>(vis), std::forward<Variants>(variants)...);
-		}
+		return sw::universal::internal::visit(std::forward<Visitor>(vis), std::forward<Variants>(variants)...);
+	}
+
+	template<typename Visitor, typename... Variants>
+		requires (!(is_custom_variant_v<Variants> || ...)) &&
+			requires {
+				std::visit(std::declval<Visitor>(), std::declval<Variants>()...);
+			}
+	decltype(auto) visit_adapter(Visitor&& vis, Variants&&... variants) {
+		return std::visit(std::forward<Visitor>(vis), std::forward<Variants>(variants)...);
 	}
 }
 
@@ -329,12 +354,27 @@ constexpr bool custom_visit_const_rvalue_is_strictly_forwarded() {
 	};
 }
 
+template<typename V>
+constexpr bool custom_visit_const_rvalue_accepts_only_const_rvalue_visitor() {
+	return requires {
+		variant_test::visit_adapter(OnlyConstRvalueOK{}, std::declval<const V&&>());
+	};
+}
+
+template<typename V>
+constexpr bool custom_visit_const_rvalue_rejects_wrong_overloads() {
+	return !requires {
+		variant_test::visit_adapter(RejectConstRvalue{}, std::declval<const V&&>());
+	};
+}
+
 template<template<class...> class Variant, typename Source, typename... Ts>
 constexpr bool construct_assign_traits_match_std_variant() {
 	using V = Variant<Ts...>;
 	using SV = std::variant<Ts...>;
 	return (std::is_constructible_v<V, Source> == std::is_constructible_v<SV, Source>) &&
-		(std::is_assignable_v<V&, Source> == std::is_assignable_v<SV&, Source>);
+		(std::is_assignable_v<V&, Source> == std::is_assignable_v<SV&, Source>) &&
+		(std::is_convertible_v<Source, V> == std::is_convertible_v<Source, SV>);
 }
 
 template<template<class...> class Variant>
@@ -366,6 +406,63 @@ constexpr bool run_converting_selection_static_checks_common() {
 	static_assert(construct_assign_traits_match_std_variant<Variant, double, short, int>());
 	static_assert(construct_assign_traits_match_std_variant<Variant, long long, short, int>());
 	return true;
+}
+
+void report_std_variant_explicit_only_conversion_sentinel() {
+	// Sentinel only: standard libraries have disagreed on explicit-only converting variant(T)/operator=(T).
+	// If these values change, stdlib behavior likely changed/converged; consider aligning custom_indexed_variant.
+#if defined(_LIBCPP_VERSION)
+	std::cout << "[sentinel] stdlib/libc++ _LIBCPP_VERSION=" << _LIBCPP_VERSION;
+#elif defined(__GLIBCXX__)
+	std::cout << "[sentinel] stdlib/libstdc++ __GLIBCXX__=" << __GLIBCXX__;
+#else
+	std::cout << "[sentinel] stdlib=unknown";
+#endif
+#if defined(__clang__)
+	std::cout << " compiler=clang-" << __clang_major__ << "." << __clang_minor__;
+#elif defined(__GNUC__)
+	std::cout << " compiler=gcc-" << __GNUC__ << "." << __GNUC_MINOR__;
+#else
+	std::cout << " compiler=unknown";
+#endif
+	std::cout << "\n";
+	using SV1 = std::variant<ExplicitOnlyInt>;
+	using SV2 = std::variant<ExplicitOnlyInt, std::string>;
+	std::cout
+		<< "[sentinel] std::variant explicit-only from int: "
+		<< "SV1{C=" << std::is_constructible_v<SV1, int>
+		<< ",A=" << std::is_assignable_v<SV1&, int>
+		<< ",V=" << std::is_convertible_v<int, SV1>
+		<< "} "
+		<< "SV2{C=" << std::is_constructible_v<SV2, int>
+		<< ",A=" << std::is_assignable_v<SV2&, int>
+		<< ",V=" << std::is_convertible_v<int, SV2>
+		<< "}\n";
+}
+
+void report_custom_variant_explicit_only_conversion_sentinel() {
+	using CV1 = CustomVariant<ExplicitOnlyInt>;
+	using CV2 = CustomVariant<ExplicitOnlyInt, std::string>;
+	using SB1 = SidebandVariant<ExplicitOnlyInt>;
+	using SB2 = SidebandVariant<ExplicitOnlyInt, std::string>;
+	std::cout
+		<< "[sentinel] custom baseline explicit-only from int: "
+		<< "CV1{C=" << std::is_constructible_v<CV1, int>
+		<< ",A=" << std::is_assignable_v<CV1&, int>
+		<< ",V=" << std::is_convertible_v<int, CV1>
+		<< "} "
+		<< "CV2{C=" << std::is_constructible_v<CV2, int>
+		<< ",A=" << std::is_assignable_v<CV2&, int>
+		<< ",V=" << std::is_convertible_v<int, CV2>
+		<< "} "
+		<< "SB1{C=" << std::is_constructible_v<SB1, int>
+		<< ",A=" << std::is_assignable_v<SB1&, int>
+		<< ",V=" << std::is_convertible_v<int, SB1>
+		<< "} "
+		<< "SB2{C=" << std::is_constructible_v<SB2, int>
+		<< ",A=" << std::is_assignable_v<SB2&, int>
+		<< ",V=" << std::is_convertible_v<int, SB2>
+		<< "}\n";
 }
 
 template<typename V>
@@ -404,6 +501,10 @@ static_assert(const_sideband_readable<SidebandVariant<int>>());
 static_assert(!const_sideband_writable<SidebandVariant<int>>());
 static_assert(custom_visit_const_rvalue_is_strictly_forwarded<CustomVariant<int, std::string>>());
 static_assert(custom_visit_const_rvalue_is_strictly_forwarded<SidebandVariant<int, std::string>>());
+static_assert(custom_visit_const_rvalue_accepts_only_const_rvalue_visitor<CustomVariant<int, std::string>>());
+static_assert(custom_visit_const_rvalue_accepts_only_const_rvalue_visitor<SidebandVariant<int, std::string>>());
+static_assert(custom_visit_const_rvalue_rejects_wrong_overloads<CustomVariant<int, std::string>>());
+static_assert(custom_visit_const_rvalue_rejects_wrong_overloads<SidebandVariant<int, std::string>>());
 
 #ifdef UNIVERSAL_COMPILE_FAIL_TESTS
 struct ThrowingDestructorType {
@@ -838,6 +939,8 @@ void run_variant_suite(const char* impl_name, int& failures) {
 
 int main() {
 	int nrOfFailedTestCases = 0;
+	report_std_variant_explicit_only_conversion_sentinel();
+	report_custom_variant_explicit_only_conversion_sentinel();
 	run_encoded_index_tests("encoded_index", nrOfFailedTestCases);
 	run_variant_suite<CustomVariant>("custom_indexed_variant", nrOfFailedTestCases);
 	run_variant_suite<SidebandVariant>("custom_indexed_variant_sideband", nrOfFailedTestCases);
