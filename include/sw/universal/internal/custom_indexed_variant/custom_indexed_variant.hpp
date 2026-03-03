@@ -33,6 +33,8 @@
 #include <variant>
 #include <bit>
 
+#include "universal/internal/bitvector/bitfield_pack.hpp"
+
 namespace sw { namespace universal {
 
 namespace internal {
@@ -315,112 +317,117 @@ struct for_index_type {
 
 	/// @brief Encodes variant index bits with additional sideband payload bits.
 	/// @tparam NTypes Number of variant alternatives.
-	template<std::size_t NTypes>
+	/// @tparam IndexT Unsigned integral storage for the encoded word.
+	template <std::size_t NTypes>
 	struct index_encoded_with_sideband_data {
-		/// @brief Bit width of std::size_t.
+		static_assert(std::unsigned_integral<IndexT>, "IndexT must be an unsigned integral type");
+
+		/// @brief Bit width of IndexT.
 		static constexpr std::size_t width = std::numeric_limits<IndexT>::digits;
 
-		/// @brief Number of bits reserved for the encoded index.
-		/// We need to encode the values 0 to NTypes-1, plus npos_code,
-		/// so (NTypes - 1) + 1 == NTypes
-		static constexpr std::size_t index_bits = std::bit_width(NTypes);
-		static_assert(index_bits <= width,
-			"IndexT too small to encode NTypes+1 (including npos)");
-		/// @brief Mask selecting index bits.
-		static constexpr IndexT index_mask = index_bits == 0 ? 0
-			: (index_bits >= width ? ~IndexT(0) : ((IndexT(1) << index_bits) - 1));
-		/// @brief Mask selecting sideband bits.
-		static constexpr IndexT sideband_mask = ~index_mask;
+		/// @brief Total index states including valueless state.
+		static constexpr std::size_t total_index_states = NTypes + 1;
 
-		/// @brief Encoded representation for std::variant_npos.
-		static constexpr IndexT npos_code = index_mask;
-		static_assert(npos_code >= NTypes); // Ensures npos_code is distinct from all other valid indicies
+		/// @brief Highest required index value (0-based) to represent all required states.
+		/// Since we need values [0..NTypes-1] plus valueless, we need to represent NTypes as well.
+		static constexpr std::size_t max_required_index = total_index_states - 1; // == NTypes
 
-		/// @brief Proxy object exposing sideband read/write while preserving index bits.
+		/// @brief Bits needed to represent max_required_index.
+		static constexpr std::size_t index_bits = std::bit_width(max_required_index);
+
+		static_assert(index_bits <= width, "IndexT too small to encode required index states");
+		static_assert(index_bits < width, "No room left for sideband payload; disallowed");
+
+		/// @brief Underlying layout: [ index_bits | sideband(remainder) ].
+		using bits_t = bitfield_pack<IndexT, bitfield_field_spec<index_bits>, bitfield_remainder>;
+
+	private:
+		enum field_index : std::size_t { INDEX = 0, SIDEBAND = 1 };
+
+	public:
+		/// @brief Encoded representation for std::variant_npos: all ones in the index field.
+		static constexpr IndexT npos_code = bits_t::template field_max_bits<INDEX>();
+		static_assert(npos_code >= NTypes, "npos_code must be distinct from valid indices");
+
+		/// @brief Proxy exposing sideband read/write while preserving index bits.
 		struct sideband_proxy {
-
-			/// @brief sideband_proxy must be bound to a source index object.
 			sideband_proxy() = delete;
+			explicit sideband_proxy(index_encoded_with_sideband_data* src) noexcept : data_(src) {}
 
-			/// @brief Binds this proxy to an encoded-index object.
-			/// @param src Source encoded index storage.
-			sideband_proxy(index_encoded_with_sideband_data* src) noexcept : data_(src) {}
+			IndexT val() const noexcept { return data_->sideband_val(); }
+			void set_val(IndexT v) noexcept { data_->set_sideband_val(v); }
+			void validate_val(IndexT v) noexcept { data_->validate_sideband_val(v); }
 
-			/// @brief Reads the current sideband payload.
-			/// @return Stored sideband value.
-			IndexT val() const noexcept {
-				return data_->sideband_val();
-			}
-
-			/// @brief Updates sideband payload while keeping index bits unchanged.
-			/// @param value New sideband value.
-			void set_val(IndexT value) noexcept {
-				data_->set_sideband_val(value);
-			}
 		private:
 			index_encoded_with_sideband_data* data_;
 		};
 
-		/// @brief Proxy object exposing sideband read-only access from const encoded index storage.
+		/// @brief Proxy exposing sideband read-only access from const storage.
 		struct const_sideband_proxy {
 			const_sideband_proxy() = delete;
 			explicit const_sideband_proxy(const index_encoded_with_sideband_data* src) noexcept : data_(src) {}
-
-			IndexT val() const noexcept {
-				return data_->sideband_val();
-			}
+			IndexT val() const noexcept { return data_->sideband_val(); }
 		private:
 			const index_encoded_with_sideband_data* data_;
 		};
 
-		/// @brief Public alias for sideband proxy type.
 		using sideband_t = sideband_proxy;
 		using const_sideband_t = const_sideband_proxy;
 
-		/// @brief Constructs encoded index in the valueless state (std::variant_npos).
-		index_encoded_with_sideband_data() noexcept = default;
-
-		/// @brief Returns decoded active index.
-		std::size_t index() const noexcept {
-			const IndexT stored = data_ & index_mask;
-			const std::size_t actual = (stored == npos_code) ? std::variant_npos : static_cast<std::size_t>(stored);
-			assert((actual == std::variant_npos) || (actual < NTypes) || !"index was set to a valid value.");
-			return actual;
+		/// @brief Constructs encoded index in the valueless state (std::variant_npos) and sideband zero.
+		constexpr index_encoded_with_sideband_data() noexcept {
+			bits_.set_raw_storage(0);
+			bits_.template set_bits<INDEX>(npos_code);
 		}
 
-		/// @brief Writes encoded active index.
-		/// @param val New index in [0, NTypes) or std::variant_npos.
-		void set_index(std::size_t val) noexcept {
-			assert((val == std::variant_npos) || (val < NTypes) || !"val is a valid value.");
-			const IndexT stored = (val == std::variant_npos) ? npos_code : (static_cast<IndexT>(val) & index_mask);
-			const IndexT new_data = (data_ & sideband_mask) | stored;
-			assert(sideband_val() == ((new_data & sideband_mask) >> index_bits) || !"change will not alter sideband.");
-			data_ = new_data;
-			assert((index() == val) || !"index was set to expected value.");
+		/// @brief Returns decoded active index.
+		constexpr std::size_t index() const BITFIELD_PACK_NOEXCEPT {
+			const IndexT stored = bits_.template get_bits<INDEX>();
+			if (stored == npos_code) return std::variant_npos;
+			// Values in [NTypes .. npos_code-1] are invalid.
+			// As internal machinery, we assert this invariant.
+			BITFIELD_PACK_ASSERT(stored < NTypes);
+			return static_cast<std::size_t>(stored);
+		}
+
+		/// @brief Writes encoded active index while preserving sideband.
+		constexpr void set_index(std::size_t v) BITFIELD_PACK_NOEXCEPT {
+			BITFIELD_PACK_ASSERT((v == std::variant_npos) || (v < NTypes));
+#ifndef BITFIELD_PACK_NDEBUG
+			const IndexT prev_sideband = sideband_val();
+#endif
+
+			const IndexT stored = (v == std::variant_npos) ? npos_code : IndexT(v);
+			bits_.template set_bits<INDEX>(stored);
+
+			BITFIELD_PACK_ASSERT(sideband_val() == prev_sideband);
+			BITFIELD_PACK_ASSERT(index() == v);
 		}
 
 		/// @brief Returns a proxy to read/write sideband payload bits.
-		sideband_t sideband() noexcept { return sideband_proxy(this); }
+		constexpr sideband_t sideband() noexcept { return sideband_t(this); }
+		constexpr const_sideband_t sideband() const noexcept { return const_sideband_t(this); }
 
-		const_sideband_t sideband() const noexcept { return const_sideband_proxy(this); }
-
-	private: // we want these to be accessible through sideband()
-		IndexT sideband_val() const noexcept {
-			const IndexT stored = (data_ & sideband_mask) >> index_bits;
-			return stored;
-		}
-
-		void set_sideband_val(IndexT val) noexcept {
-			assert((val <= (sideband_mask >> index_bits)) || !"val is a valid value.");
-			const IndexT stored = (val << index_bits) & sideband_mask;
-			const IndexT new_data = (data_ & index_mask) | stored;
-			assert(((data_ & index_mask) == (new_data & index_mask)) || !"change will not alter index.");
-			data_ = new_data;
-			assert((sideband_val() == val) || !"sideband_val was set to expected value.");
-		}
+		/// @brief Expose raw encoded word (IndexT).
+		constexpr IndexT raw_storage() const noexcept { return bits_.raw_storage(); }
+		constexpr void set_raw_storage(IndexT v) noexcept { bits_.set_raw_storage(v); }
 
 	private:
-		IndexT data_ = npos_code;  // This default value is exposed as std::variant_npos
+		constexpr IndexT sideband_val() const noexcept { return bits_.template get_bits<SIDEBAND>(); }
+
+		constexpr void set_sideband_val(IndexT v) noexcept {
+			// setter masks; validity is optional
+			bits_.template set_bits<SIDEBAND>(v);
+		}
+
+		constexpr void validate_sideband_val(IndexT v) noexcept {
+			// If you care, validate that v fits in the remainder width.
+			// (This is optional; setter masks anyway.)
+			constexpr IndexT maxv = bits_t::template field_max_bits<SIDEBAND>();
+			BITFIELD_PACK_ASSERT(v <= maxv);
+		}
+
+		bits_t bits_{};
 	};
 };
 
