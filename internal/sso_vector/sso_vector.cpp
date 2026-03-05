@@ -10,6 +10,7 @@
 #include <memory>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <universal/internal/sso_vector/sso_vector.hpp>
@@ -159,7 +160,10 @@ int ThrowingType::throw_on_move_assign = -1;
 template<class V>
 constexpr bool has_using_sso = requires(const V& v) { v.using_sso(); };
 
-static_assert(!has_using_sso<sw::universal::internal::sso_vector<int>>);
+static_assert(!has_using_sso<sw::universal::internal::sso_vector_default<int>>);
+
+template<class T, class Allocator>
+using sso_vector_auto = sw::universal::internal::sso_vector_default<T, Allocator>;
 
 struct AllocState {
 	int alloc_calls = 0;
@@ -244,9 +248,98 @@ void check_invariants(Vec& v, const TestContext& ctx, const char* label) {
 	check(ctx, v.size() <= v.capacity(), label);
 	if (v.size() > 0) {
 		check(ctx, v.data() != nullptr, "data non-null for non-empty");
-		for (std::size_t i = 0; i < v.size(); ++i) {
-			check(ctx, &v[i] == v.data() + i, "contiguous storage");
+		if constexpr (requires(Vec& x) { &(x[0]); }) {
+			for (std::size_t i = 0; i < v.size(); ++i) {
+				check(ctx, &v[i] == v.data() + i, "contiguous storage");
+			}
 		}
+	}
+}
+
+void run_sso_proxy_suite(int& failures) {
+	using Vec = sw::universal::internal::sso_vector_default<int>;
+	TestContext ctx{"sso_vector(proxy)", failures};
+
+	Vec v;
+	v.push_back(11);
+	v.push_back(22);
+	static_assert(!std::is_reference_v<decltype(v[0])>);
+	static_assert(!std::is_reference_v<decltype(*v.begin())>);
+	check(ctx, static_cast<int>(v[0]) == 11, "proxy read conversion");
+	v[1] = 42;
+	check(ctx, static_cast<int>(v[1]) == 42, "proxy write assignment");
+}
+
+void run_sso_cow_suite(int& failures) {
+	using Vec = sw::universal::internal::sso_vector_default<int>;
+	TestContext ctx{"sso_vector(cow)", failures};
+
+	{
+		Vec a;
+		a.reserve(64);
+		for (int i = 0; i < 12; ++i) a.push_back(i);
+		const Vec& ca = a;
+		const int* pa = ca.data();
+
+		Vec b = a;
+		const Vec& cb = b;
+		check(ctx, cb.data() == pa, "copy shares heap when shareable");
+		b[0] = 77; // proxy write detach
+		check(ctx, static_cast<int>(a[0]) == 0, "proxy write does not mutate source");
+		check(ctx, static_cast<int>(b[0]) == 77, "proxy write applies to destination");
+		check(ctx, cb.data() != pa, "proxy write detaches from shared heap");
+	}
+
+	{
+		Vec v;
+		v.reserve(48);
+		for (int i = 0; i < 10; ++i) v.push_back(i);
+		int* p = v.data(); // pins and ensures unique
+		p[2] = 1234;
+		Vec copy = v; // pinned source must deep-copy
+		const Vec& cv = v;
+		const Vec& cc = copy;
+		check(ctx, cv.data() != cc.data(), "copy of pinned source deep-copies");
+		check(ctx, static_cast<int>(copy[2]) == 1234, "deep copy preserves payload");
+		check(ctx, copy.capacity() == v.capacity(), "copied heap preserves capacity");
+	}
+
+	{
+		Vec base;
+		base.reserve(96);
+		for (int i = 0; i < 16; ++i) base.push_back(i);
+		const Vec& cbase = base;
+		const int* pbase = cbase.data();
+		Vec other = base;
+		other.push_back(99); // mutating op should detach
+		const Vec& cother = other;
+		check(ctx, cother.data() != pbase, "push_back detaches shared heap");
+		check(ctx, base.size() == 16, "source size unchanged after detached mutation");
+		check(ctx, other.size() == 17, "destination size reflects mutation");
+	}
+
+	{
+		Vec shared;
+		shared.reserve(64);
+		for (int i = 0; i < 8; ++i) shared.push_back(i * 3);
+
+		std::thread t1([&]() {
+			for (int i = 0; i < 200; ++i) {
+				Vec local = shared;
+				volatile int sink = static_cast<int>(local[0]);
+				(void)sink;
+			}
+		});
+		std::thread t2([&]() {
+			for (int i = 0; i < 200; ++i) {
+				Vec local = shared;
+				volatile int sink = static_cast<int>(local[1]);
+				(void)sink;
+			}
+		});
+		t1.join();
+		t2.join();
+		check(ctx, shared.size() == 8, "concurrency smoke preserves source state");
 	}
 }
 
@@ -348,7 +441,7 @@ void run_vector_suite(const char* impl_name, int& failures) {
 		VecDefaultAlloc<Vec, MoveOnly> v;
 		v.resize(3);
 		check(ctx, v.size() == 3, "resize default size");
-		check(ctx, v[0].value == 123 && v[1].value == 123 && v[2].value == 123, "resize default values");
+		check(ctx, v.data()[0].value == 123 && v.data()[1].value == 123 && v.data()[2].value == 123, "resize default values");
 		check(ctx, MoveOnly::live == 3, "resize default live count");
 		v.resize(1);
 		check(ctx, v.size() == 1, "resize shrink size");
@@ -405,7 +498,7 @@ void run_vector_suite(const char* impl_name, int& failures) {
 			v.push_back(ThrowingType(2));
 		});
 		check(ctx, v.size() == 1, "size unchanged after throw");
-		check(ctx, v[0].value == 1, "value preserved after throw");
+		check(ctx, v.data()[0].value == 1, "value preserved after throw");
 		check(ctx, ThrowingType::live == 1, "no leak after throw");
 		v.clear();
 		check(ctx, ThrowingType::live == 0, "clear destroys elements");
@@ -415,6 +508,7 @@ void run_vector_suite(const char* impl_name, int& failures) {
 		ThrowingType::reset();
 		VecDefaultAlloc<Vec, ThrowingType> v;
 		for (int i = 0; i < 3; ++i) v.emplace_back(i);
+		v.shrink_to_fit(); // normalize to size==capacity so next insert must grow
 		ThrowingType::throw_on_copy = 1;
 		ThrowingType::throw_on_move = 1;
 		expect_throw<std::runtime_error>(ctx, "insert reallocation throws", [&]() {
@@ -435,7 +529,7 @@ void run_vector_suite(const char* impl_name, int& failures) {
 			v.resize(6);
 		});
 		check(ctx, v.size() == 3, "resize throw size unchanged");
-		check(ctx, v[0].value == 0 && v[1].value == 1 && v[2].value == 2, "resize throw values preserved");
+		check(ctx, v.data()[0].value == 0 && v.data()[1].value == 1 && v.data()[2].value == 2, "resize throw values preserved");
 		check(ctx, ThrowingType::live == static_cast<int>(v.size()), "resize throw live count");
 		v.clear();
 		check(ctx, ThrowingType::live == 0, "resize throw clear live count");
@@ -459,11 +553,15 @@ void run_vector_suite(const char* impl_name, int& failures) {
 		using AllocVec = Vec<LiveCountedType, CountingAllocator<LiveCountedType>>;
 		AllocVec v{CountingAllocator<LiveCountedType>(&state)};
 		v.push_back(LiveCountedType(1));
-		state.throw_on_alloc = 2;
+		while (v.size() < v.capacity()) {
+			v.push_back(LiveCountedType(static_cast<int>(v.size() + 1)));
+		}
+		const auto live_before_throw = LiveCountedType::live;
+		state.throw_on_alloc = state.alloc_calls + 1;
 		expect_throw<std::bad_alloc>(ctx, "allocator throws on growth", [&]() {
 			v.push_back(LiveCountedType(2));
 		});
-		check(ctx, LiveCountedType::live == 1, "allocator throw preserves live count");
+		check(ctx, LiveCountedType::live == live_before_throw, "allocator throw preserves live count");
 		v.clear();
 		check(ctx, LiveCountedType::live == 0, "allocator throw clear live count");
 	}
@@ -471,7 +569,9 @@ void run_vector_suite(const char* impl_name, int& failures) {
 
 int main() {
 	int nrOfFailedTestCases = 0;
-	run_vector_suite<sw::universal::internal::sso_vector>("sso_vector", nrOfFailedTestCases);
+	run_sso_proxy_suite(nrOfFailedTestCases);
+	run_sso_cow_suite(nrOfFailedTestCases);
+	run_vector_suite<sso_vector_auto>("sso_vector", nrOfFailedTestCases);
 	run_vector_suite<std::vector>("std::vector", nrOfFailedTestCases);
 
 	sw::universal::ReportTestResult(nrOfFailedTestCases, "sso_vector", "unit test");

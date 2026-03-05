@@ -71,50 +71,56 @@ inline constexpr std::size_t default_inline_elems() noexcept {
 
 // ------------------------ heap control word ------------------------
 
-using control_storage = std::uint64_t;
+/// @brief Atomic header word type used for COW sharing state.
+/// Bit layout (LSB-first):
+/// - field 0: shareable flag, width = 1
+/// - field 1: refcount, width = remainder (all higher bits)
+using header_word = std::uint64_t;
 
-using control_bits = bitfield_pack<
-	control_storage,
-	bitfield_field_spec<1>,   // SHAREABLE
-	bitfield_remainder        // REFCOUNT
+using header_bits = bitfield_pack<
+	header_word,
+	bitfield_field_spec<1>,
+	bitfield_remainder
 >;
 
-enum control_field : std::size_t {
+enum header_field : std::size_t {
 	SHAREABLE = 0,
-	REFCOUNT  = 1,
+	REFCOUNT = 1,
 };
 
-inline control_storage ctrl_pack(bool shareable, std::uint64_t refcount) noexcept {
-	control_bits b{};
+static_assert(header_bits::template field_width<REFCOUNT>() > 0, "sso_vector: header refcount remainder must be non-zero width");
+
+inline constexpr header_word hdr_pack(bool shareable, std::uint64_t rc) noexcept {
+	header_bits b{};
 	b.set_raw_storage(0);
 	b.template set<SHAREABLE>(shareable ? 1u : 0u);
-	b.template set<REFCOUNT>(static_cast<control_storage>(refcount));
+	b.template set<REFCOUNT>(static_cast<header_word>(rc));
 	return b.raw_storage();
 }
 
-inline bool ctrl_shareable(control_storage w) noexcept {
-	control_bits b{};
+inline constexpr bool hdr_shareable(header_word w) noexcept {
+	header_bits b{};
 	b.set_raw_storage(w);
 	return b.template get<SHAREABLE>() != 0;
 }
 
-inline std::uint64_t ctrl_refcount(control_storage w) noexcept {
-	control_bits b{};
+inline constexpr std::uint64_t hdr_refcount(header_word w) noexcept {
+	header_bits b{};
 	b.set_raw_storage(w);
 	return static_cast<std::uint64_t>(b.template get<REFCOUNT>());
 }
 
-inline control_storage ctrl_set_shareable(control_storage w, bool shareable) noexcept {
-	control_bits b{};
+inline constexpr header_word hdr_set_shareable(header_word w, bool shareable) noexcept {
+	header_bits b{};
 	b.set_raw_storage(w);
 	b.template set<SHAREABLE>(shareable ? 1u : 0u);
 	return b.raw_storage();
 }
 
-inline control_storage ctrl_set_refcount(control_storage w, std::uint64_t rc) noexcept {
-	control_bits b{};
+inline constexpr header_word hdr_set_refcount(header_word w, std::uint64_t rc) noexcept {
+	header_bits b{};
 	b.set_raw_storage(w);
-	b.template set<REFCOUNT>(static_cast<control_storage>(rc));
+	b.template set<REFCOUNT>(static_cast<header_word>(rc));
 	return b.raw_storage();
 }
 
@@ -122,9 +128,10 @@ inline control_storage ctrl_set_refcount(control_storage w, std::uint64_t rc) no
 
 template<class T>
 struct heap_block {
-	mutable std::atomic<control_storage> ctrl;
+	static_assert(alignof(T) <= alignof(std::max_align_t), "sso_vector requires T alignment compatible with byte-rebound allocator");
+	mutable std::atomic<header_word> hdr_atomic;
 	std::size_t capacity;
-	alignas(T) std::byte data[1];
+	alignas(T) std::byte data[sizeof(T)];
 };
 
 template<class T>
@@ -143,45 +150,57 @@ inline const T* block_data(const heap_block<T>* b) noexcept {
 
 template<class T>
 inline std::size_t heap_block_bytes(std::size_t capacity) noexcept {
-	if (capacity == 0) capacity = 1;
-	const std::size_t header = offsetof(heap_block<T>, data);
-	return header + capacity * sizeof(T);
+	const std::size_t capped_capacity = (capacity == 0 ? 1 : capacity);
+	const std::size_t header_bytes = sizeof(heap_block<T>);
+	return header_bytes + (capped_capacity - 1) * sizeof(T);
 }
 
-template<class T>
-inline heap_block<T>* allocate_block(std::size_t capacity) {
+template<class T, class Allocator>
+inline heap_block<T>* allocate_block(std::size_t capacity, Allocator& alloc) {
+	using byte_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
+	using byte_traits = std::allocator_traits<byte_alloc>;
+	byte_alloc bytes_alloc(alloc);
 	const std::size_t bytes = heap_block_bytes<T>(capacity);
-	const std::align_val_t al{heap_block_align<T>()};
-
-	void* mem = ::operator new(bytes, al);
+	std::byte* mem = byte_traits::allocate(bytes_alloc, bytes);
 	auto* b = ::new (mem) heap_block<T>{
-		std::atomic<control_storage>(ctrl_pack(true, 1)),
+		std::atomic<header_word>(hdr_pack(true, 1)),
 		capacity,
 		{std::byte{0}}
 	};
 	return b;
 }
 
-template<class T>
-inline void deallocate_block(heap_block<T>* b) noexcept {
+template<class T, class Allocator>
+inline void deallocate_block(heap_block<T>* b, Allocator& alloc) noexcept {
 	if (!b) return;
-	const std::align_val_t al{heap_block_align<T>()};
+	using byte_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
+	using byte_traits = std::allocator_traits<byte_alloc>;
+	byte_alloc bytes_alloc(alloc);
 	const std::size_t bytes = heap_block_bytes<T>(b->capacity);
 	b->~heap_block<T>();
-	::operator delete(static_cast<void*>(b), bytes, al);
+	byte_traits::deallocate(bytes_alloc, reinterpret_cast<std::byte*>(b), bytes);
+}
+
+template<class T>
+inline header_word load_hdr(const heap_block<T>* b, std::memory_order order = std::memory_order_acquire) noexcept {
+	return b->hdr_atomic.load(order);
+}
+
+template<class T>
+inline void store_hdr(heap_block<T>* b, header_word v, std::memory_order order = std::memory_order_release) noexcept {
+	b->hdr_atomic.store(v, order);
 }
 
 template<class T>
 inline bool try_inc_ref_if_shareable(const heap_block<T>* b) noexcept {
-	auto& a = b->ctrl;
-
-	control_storage cur = a.load(std::memory_order_acquire);
+	auto& a = b->hdr_atomic;
+	header_word cur = a.load(std::memory_order_acquire);
 	for (;;) {
-		if (!ctrl_shareable(cur)) return false;
-		const std::uint64_t rc = ctrl_refcount(cur);
+		if (!hdr_shareable(cur)) return false;
+		const std::uint64_t rc = hdr_refcount(cur);
 		assert(rc >= 1);
 		if (rc == std::numeric_limits<std::uint64_t>::max()) return false;
-		control_storage next = ctrl_set_refcount(cur, rc + 1);
+		header_word next = hdr_set_refcount(cur, rc + 1);
 		if (a.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
 			return true;
 		}
@@ -190,14 +209,13 @@ inline bool try_inc_ref_if_shareable(const heap_block<T>* b) noexcept {
 
 template<class T>
 inline bool dec_ref(const heap_block<T>* b) noexcept {
-	auto& a = b->ctrl;
-
-	control_storage cur = a.load(std::memory_order_acquire);
+	auto& a = b->hdr_atomic;
+	header_word cur = a.load(std::memory_order_acquire);
 	for (;;) {
-		const std::uint64_t rc = ctrl_refcount(cur);
+		const std::uint64_t rc = hdr_refcount(cur);
 		assert(rc >= 1);
 		const std::uint64_t next_rc = rc - 1;
-		control_storage next = ctrl_set_refcount(cur, next_rc);
+		header_word next = hdr_set_refcount(cur, next_rc);
 		if (a.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
 			return next_rc == 0;
 		}
@@ -206,11 +224,11 @@ inline bool dec_ref(const heap_block<T>* b) noexcept {
 
 template<class T>
 inline void clear_shareable(heap_block<T>* b) noexcept {
-	auto& a = b->ctrl;
-	control_storage cur = a.load(std::memory_order_acquire);
+	auto& a = b->hdr_atomic;
+	header_word cur = a.load(std::memory_order_acquire);
 	for (;;) {
-		if (!ctrl_shareable(cur)) return;
-		control_storage next = ctrl_set_shareable(cur, false);
+		if (!hdr_shareable(cur)) return;
+		header_word next = hdr_set_shareable(cur, false);
 		if (a.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) return;
 	}
 }
@@ -295,7 +313,7 @@ private:
 			for (size_type i = 0; i < constructed; ++i) {
 				std::allocator_traits<Allocator>::destroy(alloc_, d + i);
 			}
-			sso_vector_detail::deallocate_block(b);
+			sso_vector_detail::deallocate_block(b, alloc_);
 		}
 	}
 
@@ -314,8 +332,8 @@ private:
 		auto& h = hep();
 		if (!h.block) return;
 
-		const auto cur = h.block->ctrl.load(std::memory_order_acquire);
-		const std::uint64_t rc = sso_vector_detail::ctrl_refcount(cur);
+		const auto cur = sso_vector_detail::load_hdr(h.block);
+		const std::uint64_t rc = sso_vector_detail::hdr_refcount(cur);
 		assert(rc >= 1);
 		if (rc == 1) return;
 
@@ -323,18 +341,22 @@ private:
 		auto* old_block = h.block;
 		const size_type cap = old_block->capacity;
 
-		auto* new_block = sso_vector_detail::allocate_block<T>(cap);
+		auto* new_block = sso_vector_detail::allocate_block<T>(cap, alloc_);
 		T* dst = sso_vector_detail::block_data(new_block);
 		const T* src = sso_vector_detail::block_data(old_block);
 
 		size_type constructed = 0;
 		try {
 			for (; constructed < n; ++constructed) {
-				std::allocator_traits<Allocator>::construct(alloc_, dst + constructed, src[constructed]);
+				if constexpr (std::is_copy_constructible_v<T>) {
+					std::allocator_traits<Allocator>::construct(alloc_, dst + constructed, src[constructed]);
+				} else {
+					throw std::logic_error("sso_vector: detaching shared storage requires copy-constructible value_type");
+				}
 			}
 		} catch (...) {
 			destroy_range(dst, dst + constructed);
-			sso_vector_detail::deallocate_block(new_block);
+			sso_vector_detail::deallocate_block(new_block, alloc_);
 			throw;
 		}
 
@@ -346,7 +368,7 @@ private:
 		assert(is_inline());
 		if (new_cap < 1) new_cap = 1;
 
-		auto* b = sso_vector_detail::allocate_block<T>(new_cap);
+		auto* b = sso_vector_detail::allocate_block<T>(new_cap, alloc_);
 		T* dst = sso_vector_detail::block_data(b);
 		T* src = inl().data();
 		const size_type n = size_unsafe();
@@ -354,11 +376,12 @@ private:
 		size_type constructed = 0;
 		try {
 			for (; constructed < n; ++constructed) {
-				std::allocator_traits<Allocator>::construct(alloc_, dst + constructed, src[constructed]);
+				std::allocator_traits<Allocator>::construct(
+					alloc_, dst + constructed, std::move_if_noexcept(src[constructed]));
 			}
 		} catch (...) {
 			destroy_range(dst, dst + constructed);
-			sso_vector_detail::deallocate_block(b);
+			sso_vector_detail::deallocate_block(b, alloc_);
 			throw;
 		}
 
@@ -379,7 +402,7 @@ private:
 		const size_type n = size_unsafe();
 		assert(new_cap >= n);
 
-		auto* new_block = sso_vector_detail::allocate_block<T>(new_cap);
+		auto* new_block = sso_vector_detail::allocate_block<T>(new_cap, alloc_);
 		T* dst = sso_vector_detail::block_data(new_block);
 		T* src = sso_vector_detail::block_data(old_block);
 
@@ -391,12 +414,12 @@ private:
 			}
 		} catch (...) {
 			destroy_range(dst, dst + constructed);
-			sso_vector_detail::deallocate_block(new_block);
+			sso_vector_detail::deallocate_block(new_block, alloc_);
 			throw;
 		}
 
 		destroy_range(src, src + n);
-		sso_vector_detail::deallocate_block(old_block);
+		sso_vector_detail::deallocate_block(old_block, alloc_);
 
 		h.block = new_block;
 	}
@@ -481,6 +504,7 @@ public:
 
 		iterator_proxy() = default;
 		iterator_proxy(sso_vector* owner, size_type index) noexcept : owner_(owner), index_(index) {}
+		size_type index() const noexcept { return index_; }
 
 		reference operator*() const noexcept { return reference(owner_, index_); }
 		reference operator[](difference_type n) const noexcept {
@@ -518,7 +542,6 @@ public:
 
 	// ------------------------ public types ------------------------
 	using reference = reference_proxy;
-	using const_reference = const T&;
 
 	// const iterators are raw pointers (like std::vector)
 	using const_iterator = const T*;
@@ -592,7 +615,7 @@ public:
 		const size_type n = other.size();
 		const size_type cap = b->capacity;
 
-		auto* nb = sso_vector_detail::allocate_block<T>(cap);
+		auto* nb = sso_vector_detail::allocate_block<T>(cap, alloc_);
 		T* dst = sso_vector_detail::block_data(nb);
 		const T* src = sso_vector_detail::block_data(b);
 
@@ -603,7 +626,7 @@ public:
 			}
 		} catch (...) {
 			destroy_range(dst, dst + constructed);
-			sso_vector_detail::deallocate_block(nb);
+			sso_vector_detail::deallocate_block(nb, alloc_);
 			throw;
 		}
 		hep().block = nb;
@@ -667,7 +690,7 @@ public:
 		const size_type n = other.size();
 		const size_type cap = b->capacity;
 
-		auto* nb = sso_vector_detail::allocate_block<T>(cap);
+		auto* nb = sso_vector_detail::allocate_block<T>(cap, alloc_);
 		T* dst = sso_vector_detail::block_data(nb);
 		const T* src = sso_vector_detail::block_data(b);
 
@@ -678,7 +701,7 @@ public:
 			}
 		} catch (...) {
 			destroy_range(dst, dst + constructed);
-			sso_vector_detail::deallocate_block(nb);
+			sso_vector_detail::deallocate_block(nb, alloc_);
 			throw;
 		}
 		hep().block = nb;
@@ -924,12 +947,127 @@ public:
 
 	void assign(std::initializer_list<T> init) { assign(init.begin(), init.end()); }
 
+	/// @brief Insert by emplacement at position @p pos.
+	/// @note For middle insertion this implementation provides the basic exception guarantee.
+	/// If element move/assignment throws during shifting, the container remains valid but the
+	/// exact prior element ordering is not guaranteed to be restored.
+	template<class... Args>
+	iterator emplace(iterator pos, Args&&... args) {
+		const size_type idx = pos.index();
+		const size_type n = size();
+		assert(idx <= n);
+		ensure_capacity(n + 1);
+		if (is_heap()) ensure_unique_heap();
+		T* d = data_mut_no_cow();
+		if (idx == n) {
+			std::allocator_traits<Allocator>::construct(alloc_, d + n, std::forward<Args>(args)...);
+		} else {
+			std::allocator_traits<Allocator>::construct(alloc_, d + n, std::move_if_noexcept(d[n - 1]));
+			try {
+				for (size_type i = n - 1; i > idx; --i) {
+					d[i] = std::move_if_noexcept(d[i - 1]);
+				}
+				T tmp(std::forward<Args>(args)...);
+				d[idx] = std::move(tmp);
+			} catch (...) {
+				std::allocator_traits<Allocator>::destroy(alloc_, d + n);
+				throw;
+			}
+		}
+		set_size_unsafe(n + 1);
+		return iterator(this, idx);
+	}
+
+	iterator insert(iterator pos, const T& value) { return emplace(pos, value); }
+	iterator insert(iterator pos, T&& value) { return emplace(pos, std::move(value)); }
+	iterator insert(iterator pos, size_type count, const T& value) {
+		const size_type idx = pos.index();
+		for (size_type i = 0; i < count; ++i) {
+			(void)insert(iterator(this, idx + i), value);
+		}
+		return iterator(this, idx);
+	}
+
+	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
+	iterator insert(iterator pos, InputIt first, InputIt last) {
+		const size_type idx = pos.index();
+		size_type inserted = 0;
+		for (; first != last; ++first, ++inserted) {
+			(void)insert(iterator(this, idx + inserted), *first);
+		}
+		return iterator(this, idx);
+	}
+	iterator insert(iterator pos, std::initializer_list<T> ilist) {
+		return insert(pos, ilist.begin(), ilist.end());
+	}
+
+	iterator insert(const_iterator pos, const T& value) {
+		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), value);
+	}
+	iterator insert(const_iterator pos, T&& value) {
+		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), std::move(value));
+	}
+	iterator insert(const_iterator pos, size_type count, const T& value) {
+		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), count, value);
+	}
+	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
+	iterator insert(const_iterator pos, InputIt first, InputIt last) {
+		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), first, last);
+	}
+	iterator insert(const_iterator pos, std::initializer_list<T> ilist) {
+		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), ilist);
+	}
+
+	iterator erase(iterator pos) {
+		const size_type idx = pos.index();
+		const size_type n = size();
+		if (idx >= n) return end();
+		if (is_heap()) ensure_unique_heap();
+		T* d = data_mut_no_cow();
+		for (size_type i = idx; i + 1 < n; ++i) {
+			d[i] = std::move_if_noexcept(d[i + 1]);
+		}
+		std::allocator_traits<Allocator>::destroy(alloc_, d + (n - 1));
+		set_size_unsafe(n - 1);
+		return iterator(this, idx);
+	}
+	iterator erase(iterator first, iterator last) {
+		const size_type idx_first = first.index();
+		const size_type idx_last = last.index();
+		const size_type n = size();
+		if (idx_first >= n || idx_first >= idx_last) return iterator(this, idx_first);
+		const size_type count = idx_last > n ? (n - idx_first) : (idx_last - idx_first);
+		if (is_heap()) ensure_unique_heap();
+		T* d = data_mut_no_cow();
+		for (size_type i = idx_first; i + count < n; ++i) {
+			d[i] = std::move_if_noexcept(d[i + count]);
+		}
+		for (size_type i = n - count; i < n; ++i) {
+			std::allocator_traits<Allocator>::destroy(alloc_, d + i);
+		}
+		set_size_unsafe(n - count);
+		return iterator(this, idx_first);
+	}
+	iterator erase(const_iterator pos) {
+		return erase(iterator(this, static_cast<size_type>(pos - cbegin())));
+	}
+	iterator erase(const_iterator first, const_iterator last) {
+		return erase(iterator(this, static_cast<size_type>(first - cbegin())),
+		             iterator(this, static_cast<size_type>(last - cbegin())));
+	}
+
 	void swap(sso_vector& other) noexcept(std::allocator_traits<Allocator>::is_always_equal::value) {
 		if (this == &other) return;
 		if constexpr (std::allocator_traits<Allocator>::propagate_on_container_swap::value) {
 			std::swap(alloc_, other.alloc_);
 		}
+		// TODO(custom_indexed_variant): move this sideband-preservation logic into a shared
+		// variant swap primitive once custom_indexed_variant guarantees sideband swap semantics.
+		const std::size_t this_size_sideband = state_.sideband().val();
+		const std::size_t other_size_sideband = other.state_.sideband().val();
 		std::swap(state_, other.state_);
+		state_.sideband().set_val(other_size_sideband);
+		other.state_.sideband().set_val(this_size_sideband);
 	}
 
 	allocator_type get_allocator() const noexcept { return alloc_; }
