@@ -6,6 +6,7 @@
 // This file is part of the universal numbers project, which is released under an MIT Open Source license.
 #include <cstdlib>
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <iostream>
 #include <string>
@@ -329,6 +330,46 @@ namespace variant_test {
 	}
 }
 
+struct VariantStateSummary {
+	bool valueless = false;
+	std::size_t index = std::variant_npos;
+	std::string held;
+};
+
+template<typename Variant>
+VariantStateSummary summarize_variant_state(const Variant& v) {
+	using namespace variant_test;
+	VariantStateSummary out{};
+	out.valueless = v.valueless_by_exception();
+	out.index = v.index();
+	if (out.valueless) {
+		out.held = "valueless";
+		return out;
+	}
+	out.held = visit_adapter([](const auto& value) -> std::string {
+		using Value = std::decay_t<decltype(value)>;
+		if constexpr (std::is_same_v<Value, int>) {
+			return "int:" + std::to_string(value);
+		} else if constexpr (std::is_same_v<Value, std::string>) {
+			return "string:" + value;
+		} else if constexpr (std::is_same_v<Value, ThrowingType>) {
+			return "throwing:" + std::to_string(value.value);
+		} else {
+			return "live:" + std::to_string(value.value);
+		}
+	}, v);
+	return out;
+}
+
+template<typename Left, typename Right>
+void check_same_variant_state(const TestContext& ctx, const Left& left, const Right& right, const char* label) {
+	const auto lhs = summarize_variant_state(left);
+	const auto rhs = summarize_variant_state(right);
+	check(ctx, lhs.valueless == rhs.valueless, label);
+	check(ctx, lhs.index == rhs.index, label);
+	check(ctx, lhs.held == rhs.held, label);
+}
+
 } // namespace
 
 template<class... Ts>
@@ -561,6 +602,178 @@ void run_encoded_index_tests(const char* impl_name, int& failures) {
 		check(ctx, index.index() == 6, "index_encoded_with_sideband_data(7) stores index");
 		index.sideband().set_val(12);
 		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 12, "index_encoded_with_sideband_data(7) sideband round trip");
+	}
+}
+
+void run_variant_std_parity_tests(int& failures) {
+	TestContext ctx{"custom_indexed_variant(parity)", failures};
+	using namespace variant_test;
+	using Std = std::variant<int, std::string, ThrowingType, LiveCountedType>;
+	using Custom = CustomVariant<int, std::string, ThrowingType, LiveCountedType>;
+
+	{
+		Std sv;
+		Custom cv;
+		check_same_variant_state(ctx, cv, sv, "default construction parity");
+		check(ctx, get<0>(cv) == get<0>(sv), "default get by index parity");
+		check(ctx, get<int>(cv) == get<int>(sv), "default get by type parity");
+		check(ctx, holds_alternative<int>(cv) == std::holds_alternative<int>(sv), "default holds_alternative parity");
+	}
+
+	{
+		Std sv(std::in_place_index<1>, "hello");
+		Custom cv(std::in_place_index<1>, "hello");
+		check_same_variant_state(ctx, cv, sv, "in_place_index parity");
+		check(ctx, get<1>(cv) == std::get<1>(sv), "in_place_index get parity");
+
+		Std st(std::in_place_type<LiveCountedType>, LiveCountedType{7});
+		Custom ct(std::in_place_type<LiveCountedType>, LiveCountedType{7});
+		check_same_variant_state(ctx, ct, st, "in_place_type parity");
+		check(ctx, get<LiveCountedType>(ct).value == std::get<LiveCountedType>(st).value, "in_place_type get parity");
+	}
+
+	{
+		Std sv(std::in_place_type<std::string>, "copy");
+		Custom cv(std::in_place_type<std::string>, "copy");
+		Std sv_copy(sv);
+		Custom cv_copy(cv);
+		check_same_variant_state(ctx, cv_copy, sv_copy, "copy construction parity");
+
+		Std sv_move(std::move(sv_copy));
+		Custom cv_move(std::move(cv_copy));
+		check_same_variant_state(ctx, cv_move, sv_move, "move construction parity");
+	}
+
+	{
+		Std sv(3);
+		Custom cv(3);
+		sv = std::string("assign");
+		cv = std::string("assign");
+		check_same_variant_state(ctx, cv, sv, "assignment to string parity");
+
+		sv = LiveCountedType{9};
+		cv = LiveCountedType{9};
+		check_same_variant_state(ctx, cv, sv, "assignment to LiveCountedType parity");
+
+		Std source_sv(77);
+		Custom source_cv(77);
+		sv = source_sv;
+		cv = source_cv;
+		check_same_variant_state(ctx, cv, sv, "copy assignment parity");
+
+		Std move_source_sv(std::in_place_type<std::string>, "moved");
+		Custom move_source_cv(std::in_place_type<std::string>, "moved");
+		sv = std::move(move_source_sv);
+		cv = std::move(move_source_cv);
+		check_same_variant_state(ctx, cv, sv, "move assignment parity");
+	}
+
+	{
+		Std sv(5);
+		Custom cv(5);
+		std::get<0>(sv) = 6;
+		get<0>(cv) = 6;
+		check_same_variant_state(ctx, cv, sv, "same-alternative assignment parity");
+
+		sv.emplace<1>("emplaced");
+		cv.emplace<1>("emplaced");
+		check_same_variant_state(ctx, cv, sv, "emplace by index parity");
+
+		sv.emplace<LiveCountedType>(LiveCountedType{33});
+		cv.emplace<LiveCountedType>(LiveCountedType{33});
+		check_same_variant_state(ctx, cv, sv, "emplace by type parity");
+	}
+
+	{
+		Std sv(std::in_place_type<std::string>, "access");
+		Custom cv(std::in_place_type<std::string>, "access");
+		const Std& csv = sv;
+		const Custom& ccv = cv;
+
+		check(ctx, std::get<1>(sv) == get<1>(cv), "non-const get by index parity");
+		check(ctx, std::get<std::string>(sv) == get<std::string>(cv), "non-const get by type parity");
+		check(ctx, std::get<1>(csv) == get<1>(ccv), "const get by index parity");
+		check(ctx, std::get<std::string>(csv) == get<std::string>(ccv), "const get by type parity");
+
+		auto* sp = std::get_if<1>(&sv);
+		auto* cp = get_if<1>(&cv);
+		check(ctx, (sp != nullptr) == (cp != nullptr), "get_if by index engagement parity");
+		check(ctx, cp && *cp == *sp, "get_if by index value parity");
+
+		auto* stp = std::get_if<std::string>(&sv);
+		auto* ctp = get_if<std::string>(&cv);
+		check(ctx, (stp != nullptr) == (ctp != nullptr), "get_if by type engagement parity");
+		check(ctx, ctp && *ctp == *stp, "get_if by type value parity");
+
+		check(ctx, static_cast<std::string>(get<1>(std::move(cv))) == std::get<1>(std::move(sv)), "rvalue get by index parity");
+	}
+
+	{
+		Std left_sv(10);
+		Custom left_cv(10);
+		Std right_sv(20);
+		Custom right_cv(20);
+		left_sv.swap(right_sv);
+		left_cv.swap(right_cv);
+		check_same_variant_state(ctx, left_cv, left_sv, "swap same-index left parity");
+		check_same_variant_state(ctx, right_cv, right_sv, "swap same-index right parity");
+
+		Std diff_left_sv(11);
+		Custom diff_left_cv(11);
+		Std diff_right_sv(std::in_place_type<std::string>, "right");
+		Custom diff_right_cv(std::in_place_type<std::string>, "right");
+		diff_left_sv.swap(diff_right_sv);
+		diff_left_cv.swap(diff_right_cv);
+		check_same_variant_state(ctx, diff_left_cv, diff_left_sv, "swap different-index left parity");
+		check_same_variant_state(ctx, diff_right_cv, diff_right_sv, "swap different-index right parity");
+	}
+
+	{
+		Std sv(1);
+		Custom cv(1);
+		std::array<int, 4> seen_std{};
+		std::array<int, 4> seen_custom{};
+		for (int i = 0; i < 4; ++i) {
+			switch (i) {
+			case 0:
+				sv = std::string("seq");
+				cv = std::string("seq");
+				break;
+			case 1:
+				sv = ThrowingType{44};
+				cv = ThrowingType{44};
+				break;
+			case 2:
+				sv.emplace<LiveCountedType>(LiveCountedType{55});
+				cv.emplace<LiveCountedType>(LiveCountedType{55});
+				break;
+			default:
+				sv = 99;
+				cv = 99;
+				break;
+			}
+			seen_std[i] = static_cast<int>(sv.index());
+			seen_custom[i] = static_cast<int>(cv.index());
+			check_same_variant_state(ctx, cv, sv, "transition parity");
+		}
+		check(ctx, seen_custom == seen_std, "transition index sequence parity");
+	}
+
+	{
+		Std sv(std::in_place_type<std::string>, "bad");
+		Custom cv(std::in_place_type<std::string>, "bad");
+		expect_throw<std::bad_variant_access>(ctx, "bad get by index parity std", [&]() {
+			(void)std::get<0>(sv);
+		});
+		expect_throw<std::bad_variant_access>(ctx, "bad get by index parity custom", [&]() {
+			(void)get<0>(cv);
+		});
+		expect_throw<std::bad_variant_access>(ctx, "bad get by type parity std", [&]() {
+			(void)std::get<int>(sv);
+		});
+		expect_throw<std::bad_variant_access>(ctx, "bad get by type parity custom", [&]() {
+			(void)get<int>(cv);
+		});
 	}
 }
 
@@ -942,6 +1155,7 @@ int main() {
 	report_std_variant_explicit_only_conversion_sentinel();
 	report_custom_variant_explicit_only_conversion_sentinel();
 	run_encoded_index_tests("encoded_index", nrOfFailedTestCases);
+	run_variant_std_parity_tests(nrOfFailedTestCases);
 	run_variant_suite<CustomVariant>("custom_indexed_variant", nrOfFailedTestCases);
 	run_variant_suite<SidebandVariant>("custom_indexed_variant_sideband", nrOfFailedTestCases);
 	run_variant_suite<std::variant>("std::variant", nrOfFailedTestCases);
