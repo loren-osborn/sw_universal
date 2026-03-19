@@ -76,26 +76,60 @@ void check_raw_and_fields_numeric(const Pack& pack,
 
 // Custom semantic field spec used to verify encode/decode/value_type plumbing.
 struct offset_binary_field {
-	static constexpr bool is_remainder = false;
-	static constexpr std::size_t width = 4;
+	template<class StorageT>
+	struct for_storage_t {
+		using decoded_type = int;
+		static constexpr bool is_remainder = false;
+		static constexpr std::size_t width = 4;
 
-	template<class StorageUInt>
-	using value_type = int;
+		static constexpr bool is_valid(decoded_type v) noexcept {
+			return v >= -2 && v <= 5;
+		}
 
-	template<class StorageUInt>
-	static constexpr bool is_valid(value_type<StorageUInt> v) noexcept {
-		return v >= -2 && v <= 5;
-	}
+		static constexpr StorageT encode(decoded_type v) noexcept {
+			return StorageT(v + 2);
+		}
 
-	template<class StorageUInt>
-	static constexpr StorageUInt encode(value_type<StorageUInt> v) noexcept {
-		return StorageUInt(v + 2);
-	}
+		static constexpr decoded_type decode(StorageT bits) noexcept {
+			return int(bits) - 2;
+		}
+	};
+};
 
-	template<class StorageUInt>
-	static constexpr value_type<StorageUInt> decode(StorageUInt bits) noexcept {
-		return int(bits) - 2;
-	}
+// Semantic validity is separate from width-fit validity.
+struct even_only_field {
+	template<class StorageT>
+	struct for_storage_t {
+		using decoded_type = std::uint16_t;
+		static constexpr bool is_remainder = false;
+		static constexpr std::size_t width = 3;
+
+		static constexpr StorageT encode(decoded_type v) noexcept {
+			return static_cast<StorageT>(v);
+		}
+
+		static constexpr decoded_type decode(StorageT bits) noexcept {
+			return static_cast<decoded_type>(bits);
+		}
+
+		static constexpr bool is_valid(decoded_type v) noexcept {
+			return (v % 2u) == 0u;
+		}
+	};
+};
+
+template <std::size_t Width, typename DecodedT, DecodedT Bias>
+struct biased_bitfield_field_width {
+	template<typename StorageT>
+	struct for_storage_t : public bitfield_field_width<Width, DecodedT>::template for_storage_t<StorageT> {
+		static constexpr StorageT encode(DecodedT v) noexcept {
+			return static_cast<StorageT>(v + Bias);
+		}
+
+		static constexpr DecodedT decode(StorageT v) noexcept {
+			return static_cast<DecodedT>(v) - Bias;
+		}
+	};
 };
 
 enum class named_field : std::size_t {
@@ -236,6 +270,30 @@ static void test_semantic_field_spec_access() {
 	TEST_TRUE(!P::is_valid<0>(6));
 }
 
+static void test_nested_field_spec_shapes() {
+	using identity_field = bitfield_field_width<5>;
+	using bool_field = bitfield_field_width<1, bool>;
+	using identity_storage = identity_field::for_storage_t<std::uint16_t>;
+	using bool_storage = bool_field::for_storage_t<std::uint16_t>;
+	using remainder_storage = bitfield_remainder::for_storage_t<std::uint16_t>;
+
+	static_assert(std::is_same_v<identity_storage::decoded_type, std::uint16_t>);
+	static_assert(identity_storage::width == 5);
+	static_assert(!identity_storage::is_remainder);
+	static_assert(identity_storage::encode(std::uint16_t{0x1Fu}) == std::uint16_t{0x1Fu});
+	static_assert(identity_storage::decode(std::uint16_t{0x12u}) == std::uint16_t{0x12u});
+	static_assert(identity_storage::is_valid(std::uint16_t{0xFFFFu}));
+
+	static_assert(std::is_same_v<bool_storage::decoded_type, bool>);
+	static_assert(bool_storage::width == 1);
+	static_assert(bool_storage::decode(std::uint16_t{1u}));
+
+	static_assert(std::is_same_v<remainder_storage::decoded_type, std::uint16_t>);
+	static_assert(remainder_storage::is_remainder);
+	static_assert(remainder_storage::width == 0);
+	static_assert(remainder_storage::encode(std::uint16_t{7u}) == std::uint16_t{7u});
+}
+
 static void test_validate_hook() {
 	// Validation is separate from mutation; invalid values are caught only when the hook is used.
 	using P = bitfield_pack_bits<std::uint8_t, 3, 5>;
@@ -247,6 +305,19 @@ static void test_validate_hook() {
 	g_assert_enabled = false;
 	// validate should not throw when asserts are disabled
 	P::validate<0>(std::uint8_t{0b1000});
+}
+
+static void test_width_fit_and_semantic_validity_split() {
+	using FitPack = bitfield_pack<std::uint8_t, std::size_t, bitfield_field_spec<3>>;
+	static_assert(FitPack::is_valid<0>(std::uint8_t{0b111}));
+	static_assert(!FitPack::is_valid<0>(std::uint8_t{0b1000}));
+
+	using SemanticPack = bitfield_pack<std::uint16_t, std::size_t, even_only_field, bitfield_field_spec<5>>;
+	static_assert(SemanticPack::template field_width<0>() == 3);
+
+	TEST_TRUE(SemanticPack::is_valid<0>(std::uint16_t{6}));
+	TEST_TRUE(!SemanticPack::is_valid<0>(std::uint16_t{3}));
+	TEST_TRUE(!SemanticPack::is_valid<0>(std::uint16_t{8}));
 }
 
 static void test_remainder_layout() {
@@ -299,6 +370,25 @@ static void test_custom_descriptor_indexing() {
 	p.template set_bits<sparse_field::exponent>(0xFFu);
 	p.template set_bits<sparse_field::sign>(0u);
 	TEST_TRUE(std::isnan(p.raw()) || std::isinf(p.raw()) == false);
+}
+
+static void test_biased_field_spec() {
+	using P = bitfield_pack<
+		std::uint16_t,
+		std::size_t,
+		biased_bitfield_field_width<8, int, 127>,
+		bitfield_field_spec<8>
+	>;
+
+	P p;
+	p.template set<0>(1);
+	p.template set<1>(0x5Au);
+
+	TEST_EQ(p.template get<0>(), 1);
+	TEST_EQ(p.template get_bits<0>(), std::uint16_t{128});
+	TEST_EQ(p.template get<1>(), std::uint16_t{0x5A});
+	TEST_TRUE(P::is_valid<0>(1));
+	TEST_TRUE(!P::is_valid<0>(129));
 }
 
 static void test_word_spec_float_roundtrip() {
@@ -497,9 +587,12 @@ int main() {
 		test_raw_enum_indexing();
 		test_raw_storage_constructor_and_field_isolation();
 		test_semantic_field_spec_access();
+		test_nested_field_spec_shapes();
 		test_validate_hook();
+		test_width_fit_and_semantic_validity_split();
 		test_remainder_layout();
 		test_custom_descriptor_indexing();
+		test_biased_field_spec();
 		test_word_spec_float_roundtrip();
 		test_backend_sideband_access();
 		test_backend_hook_mutation_semantics();

@@ -54,13 +54,13 @@ namespace sw::universal {
 
 /// @example
 /// @code
-/// // These are field indicies:
+/// // These are field indices:
 /// enum class ieee754_f32_field : std::size_t {
 ///     mantissa       =    0,
 ///     exponent       =    1,
 ///     sign           =    2
 /// };
-/// // These are for interperting exponent:
+/// // These are for interpreting exponent:
 /// enum class ieee754_f32_exponent_detail : signed int {
 ///     exponent__bias =  127,
 ///     // These are only needed to compute...
@@ -72,15 +72,15 @@ namespace sw::universal {
 ///     inf_or_nan     =  prebiased_max - exponent__bias,
 /// };
 ///
-/// template <std::size_t Width, typename ExportT, ExportT Bias>
+/// template <std::size_t Width, typename DecodedT, DecodedT Bias>
 /// struct biased_bitfield_field_width {
 ///    template<typename StorageT>
-///    struct for_storage_t: public bitfield_field_width<Width, ExportT>::template for_storage_t<StorageT> {
-///        static constexpr StorageT encode(ExportT v) noexcept {
+///    struct for_storage_t : public bitfield_field_width<Width, DecodedT>::template for_storage_t<StorageT> {
+///        static constexpr StorageT encode(DecodedT v) noexcept {
 ///            return static_cast<StorageT>(v + Bias);
 ///        }
-///        static constexpr ExportT decode(StorageT v) noexcept {
-///            return (static_cast<ExportT>(v) - Bias);
+///        static constexpr DecodedT decode(StorageT v) noexcept {
+///            return (static_cast<DecodedT>(v) - Bias);
 ///        }
 ///    };
 /// };
@@ -290,80 +290,68 @@ template <class FieldSpec, class StorageUInt>
 concept bitfield_field_spec =
 	std::unsigned_integral<StorageUInt> &&
 	requires {
-		{ FieldSpec::is_remainder } -> std::convertible_to<bool>;
+		typename FieldSpec::template for_storage_t<StorageUInt>;
 	} &&
-	(
-		(FieldSpec::is_remainder) ||
-		requires {
-			{ FieldSpec::width } -> std::convertible_to<std::size_t>;
-		}
-	) &&
-	requires(StorageUInt u) {
-		// Value type for semantic access
-		typename FieldSpec::template value_type<StorageUInt>;
-		// Validate / encode / decode
-		{ FieldSpec::template is_valid<StorageUInt>(typename FieldSpec::template value_type<StorageUInt>{}) } -> std::convertible_to<bool>;
-		{ FieldSpec::template encode<StorageUInt>(typename FieldSpec::template value_type<StorageUInt>{}) } -> std::same_as<StorageUInt>;
-		{ FieldSpec::template decode<StorageUInt>(u) } -> std::same_as<typename FieldSpec::template value_type<StorageUInt>>;
+	requires(StorageUInt u, typename FieldSpec::template for_storage_t<StorageUInt>::decoded_type v) {
+		{ FieldSpec::template for_storage_t<StorageUInt>::is_remainder } -> std::convertible_to<bool>;
+		{ FieldSpec::template for_storage_t<StorageUInt>::width } -> std::convertible_to<std::size_t>;
+		{ FieldSpec::template for_storage_t<StorageUInt>::encode(v) } -> std::same_as<StorageUInt>;
+		{ FieldSpec::template for_storage_t<StorageUInt>::decode(u) } -> std::same_as<typename FieldSpec::template for_storage_t<StorageUInt>::decoded_type>;
+		{ FieldSpec::template for_storage_t<StorageUInt>::is_valid(v) } -> std::convertible_to<bool>;
 	};
 
 /// @brief Fixed-width identity field spec.
 /// @tparam Width Number of bits assigned to the field.
-/// @details The field's semantic value type is `StorageUInt`; encoding and decoding are
-///          identity operations in that domain, and validity checks only whether the value fits.
-template <std::size_t Width>
+/// @tparam DecodedT Decoded semantic value type, or `void` to use the enclosing `StorageT`.
+/// @details Encoding and decoding are identity-style casts, and semantic validity defaults to true.
+///          Width-fit checking belongs to `bitfield_pack`.
+template <std::size_t Width, typename DecodedT = void>
 struct bitfield_field_width {
 	static_assert(Width > 0, "bitfield_field_width<Width>: Width must be > 0");
-	static constexpr bool is_remainder = false;
-	static constexpr std::size_t width = Width;
 
-	template <class StorageUInt>
-	using value_type = StorageUInt;
+	template <class StorageT>
+	struct for_storage_t {
+		static_assert(std::unsigned_integral<StorageT>, "StorageT must be unsigned integral");
 
-	template <class StorageUInt>
-	static constexpr bool is_valid(value_type<StorageUInt> v) noexcept {
-		static_assert(std::unsigned_integral<StorageUInt>, "StorageUInt must be unsigned integral");
-		if constexpr (Width >= std::numeric_limits<StorageUInt>::digits) {
-			return true;
-		} else {
-			const StorageUInt mask = (StorageUInt(1) << Width) - 1;
-			return (StorageUInt(v) & ~mask) == 0;
+		using decoded_type = std::conditional_t<std::is_void_v<DecodedT>, StorageT, DecodedT>;
+
+		static constexpr bool is_remainder = false;
+		static constexpr std::size_t width = Width;
+
+		static constexpr StorageT encode(decoded_type v) noexcept {
+			return static_cast<StorageT>(v);
 		}
-	}
 
-	template <class StorageUInt>
-	static constexpr StorageUInt encode(value_type<StorageUInt> v) noexcept {
-		static_assert(std::unsigned_integral<StorageUInt>, "StorageUInt must be unsigned integral");
-		return StorageUInt(v);
-	}
+		static constexpr decoded_type decode(StorageT bits) noexcept {
+			return static_cast<decoded_type>(bits);
+		}
 
-	template <class StorageUInt>
-	static constexpr value_type<StorageUInt> decode(StorageUInt bits) noexcept {
-		static_assert(std::unsigned_integral<StorageUInt>, "StorageUInt must be unsigned integral");
-		return value_type<StorageUInt>(bits);
-	}
+		static constexpr bool is_valid(decoded_type) noexcept {
+			return true;
+		}
+	};
 };
 
 /// @brief Trailing field spec that consumes all remaining storage bits.
 /// @details The remainder field must be the last field in the pack. Its semantic behavior is
 ///          identity-style; width is derived from the enclosing layout rather than declared here.
 struct bitfield_remainder {
-	static constexpr bool is_remainder = true;
+	template <class StorageT>
+	struct for_storage_t {
+		static_assert(std::unsigned_integral<StorageT>, "StorageT must be unsigned integral");
 
-	template <class StorageUInt>
-	using value_type = StorageUInt;
+		using decoded_type = StorageT;
 
-	template <class StorageUInt>
-	static constexpr bool is_valid(value_type<StorageUInt>) noexcept {
-		// Remainder's "validity" is layout-defined; in practice any value will be masked by the pack.
-		return true;
-	}
+		static constexpr bool is_remainder = true;
+		static constexpr std::size_t width = 0;
 
-	template <class StorageUInt>
-	static constexpr StorageUInt encode(value_type<StorageUInt> v) noexcept { return StorageUInt(v); }
+		static constexpr StorageT encode(decoded_type v) noexcept { return static_cast<StorageT>(v); }
+		static constexpr decoded_type decode(StorageT bits) noexcept { return bits; }
 
-	template <class StorageUInt>
-	static constexpr value_type<StorageUInt> decode(StorageUInt bits) noexcept { return value_type<StorageUInt>(bits); }
+		static constexpr bool is_valid(decoded_type) noexcept {
+			return true;
+		}
+	};
 };
 
 template <class StorageUInt>
@@ -389,7 +377,7 @@ constexpr StorageUInt value_mask_unshifted() noexcept {
 /// @brief Count how many remainder fields appear.
 template <class... Specs>
 consteval std::size_t remainder_count() {
-	return (std::size_t(Specs::is_remainder) + ... + 0u);
+	return (std::size_t(Specs::template for_storage_t<std::uintmax_t>::is_remainder) + ... + 0u);
 }
 
 } // namespace bitfield_pack_detail
@@ -429,14 +417,17 @@ private:
 	using spec_t = internal_utility::pack_element_t<I, FieldSpecs...>;
 
 	template <std::size_t I>
-	static constexpr bool is_remainder_v = spec_t<I>::is_remainder;
+	using instantiated_field_spec_t = typename spec_t<I>::template for_storage_t<storage_t>;
+
+	template <std::size_t I>
+	static constexpr bool is_remainder_v = instantiated_field_spec_t<I>::is_remainder;
 
 	template <std::size_t I>
 	static consteval std::size_t declared_field_width() {
-		if constexpr (is_remainder_v<I>) {
+		if constexpr (instantiated_field_spec_t<I>::is_remainder) {
 			return 0u;
 		} else {
-			return std::size_t(spec_t<I>::width);
+			return std::size_t(instantiated_field_spec_t<I>::width);
 		}
 	}
 
@@ -606,7 +597,7 @@ public:
 
 	/// @brief Semantic value type decoded by a field key.
 	template <field_key_t Field>
-	using value_type = typename spec_t<field_index<Field>()>::template value_type<storage_t>;
+	using value_type = typename instantiated_field_spec_t<field_index<Field>()>::decoded_type;
 
 	/// @brief Extracts the raw bit-pattern stored in a field key.
 	template <field_key_t Field>
@@ -629,7 +620,7 @@ public:
 	/// @brief Decodes and returns the semantic value of a field key.
 	template <field_key_t Field>
 	constexpr value_type<Field> get() const BITFIELD_PACK_NOEXCEPT {
-		return spec_t<field_index<Field>()>::template decode<storage_t>(get_bits<Field>());
+		return instantiated_field_spec_t<field_index<Field>()>::decode(get_bits<Field>());
 	}
 
 	/// @brief Encodes and stores the semantic value of a field key.
@@ -637,14 +628,19 @@ public:
 	/// @warning This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
 	template <field_key_t Field>
 	constexpr void set(value_type<Field> v) BITFIELD_PACK_NOEXCEPT {
-		const storage_t enc = spec_t<field_index<Field>()>::template encode<storage_t>(v);
+		const storage_t enc = instantiated_field_spec_t<field_index<Field>()>::encode(v);
 		set_bits<Field>(enc);
 	}
 
 	/// @brief Checks whether a semantic value is valid for a field key before masking.
 	template <field_key_t Field>
 	static constexpr bool is_valid(value_type<Field> v) noexcept {
-		return spec_t<field_index<Field>()>::template is_valid<storage_t>(v);
+		const storage_t enc = instantiated_field_spec_t<field_index<Field>()>::encode(v);
+		bool width_fits = true;
+		if constexpr (field_width<Field>() < kStorageBits) {
+			width_fits = (enc & ~field_value_mask<Field>()) == 0;
+		}
+		return width_fits && instantiated_field_spec_t<field_index<Field>()>::is_valid(v);
 	}
 
 	/// @brief Validates a semantic value for a field key using `BITFIELD_PACK_ASSERT`.
@@ -710,9 +706,13 @@ using bitfield_pack_bits = bitfield_pack<Word, std::size_t, bitfield_pack_detail
 template <class StorageUInt, class RawIface = StorageUInt>
 using bitfield_word_spec = bitfield_pack_detail::bitfield_word_spec<StorageUInt, RawIface>;
 
-/// @brief Convenience alias for the fixed-width identity field spec.
+/// @brief Convenience alias for the fixed-width field spec with optional decoded type override.
+template <std::size_t Width, typename DecodedT = void>
+using bitfield_field_width = bitfield_pack_detail::bitfield_field_width<Width, DecodedT>;
+
+/// @brief Convenience alias for the widths-only fixed-width identity field spec.
 template <std::size_t Width>
-using bitfield_field_spec = bitfield_pack_detail::bitfield_field_width<Width>;
+using bitfield_field_spec = bitfield_field_width<Width>;
 
 /// @brief Convenience alias for the trailing remainder field marker.
 using bitfield_remainder = bitfield_pack_detail::bitfield_remainder;
