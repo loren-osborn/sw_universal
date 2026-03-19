@@ -13,6 +13,8 @@
 /// - Setters mask and store (silent truncation). Validity is separate:
 ///   * is_valid<I>(value)
 ///   * validate<I>(value) -> assertion hook
+/// - Mutation APIs perform a whole-word load/modify/store through the word spec hooks.
+///   They do not provide conditional publication or CAS-loop semantics.
 /// - Remainder field supported, but if present it MUST be the final field.
 /// - No "biased" codec is shipped as live code here; the spec protocol supports it later.
 
@@ -26,6 +28,8 @@
 #include <type_traits>
 #include <tuple>
 #include <utility>
+
+#include "universal/internal/utility/pack_element.hpp"
 
 #ifndef BITFIELD_PACK_ASSERT
 /// @brief Assertion hook.
@@ -52,12 +56,13 @@ inline constexpr bool always_false_v = false;
 /// @brief A word spec that binds internal storage to an unsigned integer, and raw() to a definite interface type.
 /// @tparam StorageUInt unsigned integral storage word used for shifting/masking
 /// @tparam RawIface trivially copyable type with same size as StorageUInt (e.g. float, double, a register struct)
-template <class StorageUInt, class RawIface = StorageUInt>
+template <class StorageUInt, class RawIface = StorageUInt, class Backend = StorageUInt>
 struct bitfield_word_spec {
 	static_assert(std::unsigned_integral<StorageUInt>, "StorageUInt must be unsigned integral");
 	static_assert(std::is_trivially_copyable_v<RawIface>, "RawIface must be trivially copyable");
 	static_assert(sizeof(RawIface) == sizeof(StorageUInt), "RawIface must have same size as StorageUInt");
 
+	using backend_t = Backend;
 	using storage_t = StorageUInt;
 	using raw_iface_t = RawIface;
 
@@ -76,7 +81,35 @@ struct bitfield_word_spec {
 			return std::bit_cast<raw_iface_t>(v);
 		}
 	}
+
+	static constexpr storage_t load_storage(const backend_t& backend) noexcept {
+		static_assert(std::same_as<backend_t, storage_t>,
+		              "bitfield_word_spec default load_storage requires backend_t == storage_t; provide a custom word spec otherwise");
+		return backend;
+	}
+
+	static constexpr void store_storage(backend_t& backend, storage_t v) noexcept {
+		static_assert(std::same_as<backend_t, storage_t>,
+		              "bitfield_word_spec default store_storage requires backend_t == storage_t; provide a custom word spec otherwise");
+		backend = v;
+	}
 };
+
+template <class Word>
+concept bitfield_word_spec_like =
+	requires(const typename Word::backend_t& cbackend,
+	         typename Word::backend_t& backend,
+	         typename Word::raw_iface_t raw,
+	         typename Word::storage_t storage) {
+		typename Word::backend_t;
+		typename Word::storage_t;
+		typename Word::raw_iface_t;
+		requires std::unsigned_integral<typename Word::storage_t>;
+		{ Word::to_storage(raw) } -> std::same_as<typename Word::storage_t>;
+		{ Word::from_storage(storage) } -> std::same_as<typename Word::raw_iface_t>;
+		{ Word::load_storage(cbackend) } -> std::same_as<typename Word::storage_t>;
+		{ Word::store_storage(backend, storage) } -> std::same_as<void>;
+	};
 
 /// @brief Normalize Word to a canonical word_spec type.
 template <class Word>
@@ -88,9 +121,9 @@ struct normalize_word<Word> {
 	using type = bitfield_word_spec<Word, Word>;
 };
 
-template <class StorageUInt, class RawIface>
-struct normalize_word<bitfield_word_spec<StorageUInt, RawIface>> {
-	using type = bitfield_word_spec<StorageUInt, RawIface>;
+template <bitfield_word_spec_like Word>
+struct normalize_word<Word> {
+	using type = Word;
 };
 
 template <class Word>
@@ -212,6 +245,7 @@ template <class Word, class... FieldSpecs>
 class bitfield_pack {
 private:
 	using word_spec_t = bitfield_pack_detail::normalize_word_t<Word>;
+	using backend_t = typename word_spec_t::backend_t;
 	using storage_t = typename word_spec_t::storage_t;
 
 	static_assert(std::unsigned_integral<storage_t>, "bitfield_pack: storage_t must be unsigned integral");
@@ -226,7 +260,7 @@ private:
 	static constexpr std::size_t kFieldCount = sizeof...(FieldSpecs);
 
 	template <std::size_t I>
-	using spec_t = std::tuple_element_t<I, std::tuple<FieldSpecs...>>;
+	using spec_t = internal_utility::pack_element_t<I, FieldSpecs...>;
 
 	template <std::size_t I>
 	static constexpr bool is_remainder_v = spec_t<I>::is_remainder;
@@ -303,31 +337,50 @@ private:
 
 public:
 	using word_spec = word_spec_t;
+	using backend_type = backend_t;
 	using storage_type = storage_t;
 	using raw_iface_type = typename word_spec_t::raw_iface_t;
+
+	struct from_backend_t {
+		explicit constexpr from_backend_t() = default;
+	};
+
+	static constexpr from_backend_t from_backend{};
+
+	struct sideband_proxy;
+	struct const_sideband_proxy;
 
 	/// @brief Number of fields.
 	static consteval std::size_t size() noexcept { return kFieldCount; }
 
 	/// @brief Construct with all bits zero.
-	constexpr bitfield_pack() BITFIELD_PACK_NOEXCEPT : raw_(0) {}
+	constexpr bitfield_pack() BITFIELD_PACK_NOEXCEPT : backend_{} {
+		store_storage_word(0);
+	}
 
 	/// @brief Construct from raw storage bits.
-	explicit constexpr bitfield_pack(storage_t raw_storage) BITFIELD_PACK_NOEXCEPT : raw_(raw_storage) {}
+	explicit constexpr bitfield_pack(storage_t raw_storage) BITFIELD_PACK_NOEXCEPT : backend_{} {
+		store_storage_word(raw_storage);
+	}
+
+	/// @brief Construct directly from a backend object.
+	/// This bypasses the default-construct-then-store path for backend-backed usage.
+	explicit constexpr bitfield_pack(from_backend_t, backend_t backend) BITFIELD_PACK_NOEXCEPT
+		: backend_(std::move(backend)) {}
 
 	/// @brief Get raw storage bits (always available).
-	constexpr storage_t raw_storage() const BITFIELD_PACK_NOEXCEPT { return raw_; }
+	constexpr storage_t raw_storage() const BITFIELD_PACK_NOEXCEPT { return load_storage_word(); }
 
 	/// @brief Set raw storage bits (always available).
-	constexpr void set_raw_storage(storage_t v) BITFIELD_PACK_NOEXCEPT { raw_ = v; }
+	constexpr void set_raw_storage(storage_t v) BITFIELD_PACK_NOEXCEPT { store_storage_word(v); }
 
 	/// @brief Get raw interface value (Word-dependent).
 	/// For integral Word, this is the same as raw_storage().
-	constexpr raw_iface_type raw() const BITFIELD_PACK_NOEXCEPT { return word_spec_t::from_storage(raw_); }
+	constexpr raw_iface_type raw() const BITFIELD_PACK_NOEXCEPT { return word_spec_t::from_storage(load_storage_word()); }
 
 	/// @brief Set raw interface value (Word-dependent).
 	/// For integral Word, this is the same as set_raw_storage().
-	constexpr void set_raw(raw_iface_type v) BITFIELD_PACK_NOEXCEPT { raw_ = word_spec_t::to_storage(v); }
+	constexpr void set_raw(raw_iface_type v) BITFIELD_PACK_NOEXCEPT { store_storage_word(word_spec_t::to_storage(v)); }
 
 	/// @brief Field bit width at index I.
 	template <std::size_t I>
@@ -374,16 +427,18 @@ public:
 	constexpr storage_t get_bits() const BITFIELD_PACK_NOEXCEPT {
 		static_assert(I < kFieldCount, "get_bits<I>: I out of range");
 		constexpr std::size_t off = field_offset<I>();
-		return storage_t((raw_ >> off) & field_value_mask<I>());
+		return storage_t((load_storage_word() >> off) & field_value_mask<I>());
 	}
 
 	/// @brief Store raw bits into field I (masked to width; silent truncation).
+	/// This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
 	template <std::size_t I>
 	constexpr void set_bits(storage_t bits) BITFIELD_PACK_NOEXCEPT {
 		static_assert(I < kFieldCount, "set_bits<I>: I out of range");
 		constexpr storage_t m = field_mask<I>();
 		constexpr std::size_t off = field_offset<I>();
-		raw_ = storage_t((raw_ & ~m) | ((storage_t(bits) << off) & m));
+		const storage_t raw = load_storage_word();
+		store_storage_word(storage_t((raw & ~m) | ((storage_t(bits) << off) & m)));
 	}
 
 	/// @brief Decode and return semantic value of field I.
@@ -394,6 +449,7 @@ public:
 	}
 
 	/// @brief Encode and store semantic value of field I (masked; silent truncation).
+	/// This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
 	template <std::size_t I>
 	constexpr void set(value_type<I> v) BITFIELD_PACK_NOEXCEPT {
 		static_assert(I < kFieldCount, "set<I>: I out of range");
@@ -414,8 +470,43 @@ public:
 		BITFIELD_PACK_ASSERT(is_valid<I>(v));
 	}
 
+	/// @brief Returns a proxy for backend-aware whole-word access.
+	constexpr sideband_proxy sideband() BITFIELD_PACK_NOEXCEPT { return sideband_proxy(this); }
+	constexpr const_sideband_proxy sideband() const BITFIELD_PACK_NOEXCEPT { return const_sideband_proxy(this); }
+
+	struct sideband_proxy {
+		sideband_proxy() = delete;
+		explicit constexpr sideband_proxy(bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
+
+		constexpr backend_t& backend() BITFIELD_PACK_NOEXCEPT { return data_->backend_; }
+		constexpr storage_t load_storage_word() const BITFIELD_PACK_NOEXCEPT { return data_->load_storage_word(); }
+		constexpr void store_storage_word(storage_t v) BITFIELD_PACK_NOEXCEPT { data_->store_storage_word(v); }
+
+	private:
+		bitfield_pack* data_;
+	};
+
+	struct const_sideband_proxy {
+		const_sideband_proxy() = delete;
+		explicit constexpr const_sideband_proxy(const bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
+
+		constexpr const backend_t& backend() const BITFIELD_PACK_NOEXCEPT { return data_->backend_; }
+		constexpr storage_t load_storage_word() const BITFIELD_PACK_NOEXCEPT { return data_->load_storage_word(); }
+
+	private:
+		const bitfield_pack* data_;
+	};
+
 private:
-	storage_t raw_;
+	constexpr storage_t load_storage_word() const BITFIELD_PACK_NOEXCEPT {
+		return word_spec_t::load_storage(backend_);
+	}
+
+	constexpr void store_storage_word(storage_t v) BITFIELD_PACK_NOEXCEPT {
+		word_spec_t::store_storage(backend_, v);
+	}
+
+	backend_t backend_{};
 };
 
 /// @brief Ergonomic alias: widths-only pack. Each width becomes an identity bitfield_field_width<W>.

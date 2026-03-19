@@ -34,6 +34,7 @@
 #include <bit>
 
 #include "universal/internal/bitvector/bitfield_pack.hpp"
+#include "universal/internal/utility/pack_element.hpp"
 
 namespace sw { namespace universal {
 
@@ -42,16 +43,7 @@ namespace internal {
 namespace custom_indexed_variant_detail {
 
 	template<std::size_t I, typename... Ts>
-	struct type_at;
-
-	template<std::size_t I, typename T, typename... Ts>
-	struct type_at<I, T, Ts...> : type_at<I - 1, Ts...> {};
-
-	template<typename T, typename... Ts>
-	struct type_at<0, T, Ts...> { using type = T; };
-
-	template<std::size_t I, typename... Ts>
-	using type_at_t = typename type_at<I, Ts...>::type;
+	using type_at_t = internal_utility::pack_element_t<I, Ts...>;
 
 	template<typename T, typename... Ts>
 	struct index_of_exact;

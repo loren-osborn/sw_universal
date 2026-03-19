@@ -1032,6 +1032,8 @@ endif(UNIVERSAL_BUILD_APP_ENVIRONMENT)
 # Build the tests for the underlying storage classes
 if(UNIVERSAL_BUILD_NUMBER_INTERNALS)
 add_subdirectory("internal/bitblock")
+add_subdirectory("internal/bitvector")
+add_subdirectory("internal/utility")
 add_subdirectory("internal/custom_indexed_variant")
 add_subdirectory("internal/value")
 add_subdirectory("internal/sso_vector")

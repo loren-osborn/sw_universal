@@ -138,6 +138,43 @@ static void test_word_spec_float_roundtrip() {
 	TEST_TRUE(std::isnan(nanish) || std::isinf(nanish) == false); // likely NaN; platform may vary on payload handling
 }
 
+static void test_backend_sideband_access() {
+	struct backend_word {
+		std::uint32_t word = 0;
+	};
+
+	struct backend_spec {
+		using backend_t = backend_word;
+		using storage_t = std::uint32_t;
+		using raw_iface_t = std::uint32_t;
+
+		static constexpr storage_t to_storage(raw_iface_t v) noexcept { return v; }
+		static constexpr raw_iface_t from_storage(storage_t v) noexcept { return v; }
+		static constexpr storage_t load_storage(const backend_t& backend) noexcept { return backend.word; }
+		static constexpr void store_storage(backend_t& backend, storage_t v) noexcept { backend.word = v; }
+	};
+
+	using P = bitfield_pack<backend_spec, bitfield_field_spec<4>, bitfield_remainder>;
+	static_assert(std::is_same_v<P::backend_type, backend_word>);
+
+	P p(P::from_backend, backend_word{0x4321u});
+	auto sb = p.sideband();
+	TEST_EQ(sb.load_storage_word(), std::uint32_t{0x4321u});
+	TEST_EQ(sb.backend().word, std::uint32_t{0x4321u});
+
+	sb.store_storage_word(0x1234u);
+	TEST_EQ(p.raw_storage(), std::uint32_t{0x1234u});
+	TEST_EQ(sb.backend().word, std::uint32_t{0x1234u});
+
+	p.template set_bits<0>(0xFu);
+	TEST_EQ(sb.load_storage_word(), std::uint32_t{0x123Fu});
+
+	const P& cp = p;
+	auto csb = cp.sideband();
+	TEST_EQ(csb.load_storage_word(), std::uint32_t{0x123Fu});
+	TEST_EQ(csb.backend().word, std::uint32_t{0x123Fu});
+}
+
 static void test_index_encoded_sideband() {
 	using E = sw::universal::internal::index_encoded_with_sideband_data<10>;
 	E e;
@@ -162,6 +199,7 @@ int main() {
 		test_validate_hook();
 		test_remainder_layout();
 		test_word_spec_float_roundtrip();
+		test_backend_sideband_access();
 		test_index_encoded_sideband();
 	} catch (const std::exception& e) {
 		std::cerr << "UNCAUGHT EXCEPTION: " << e.what() << "\n";
