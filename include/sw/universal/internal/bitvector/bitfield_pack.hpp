@@ -5,11 +5,15 @@
 ///
 /// Design notes (locked down):
 /// - Two entry points:
-///   * bitfield_pack<Word, FieldSpecs...> : "power" form (spec types)
+///   * bitfield_pack<Word, IndexingSpec, FieldSpecs...> : "power" form (spec types)
 ///   * bitfield_pack_bits<Word, Widths...> : ergonomic alias (pure widths)
 /// - "Word" can be:
 ///   * an unsigned integral type (shorthand; raw() returns the same type)
 ///   * bitfield_word_spec<StorageUInt, RawIface> (raw() returns RawIface, storage is StorageUInt)
+/// - "IndexingSpec" can be:
+///   * `std::size_t` for plain numeric field keys
+///   * a raw enum type for named contiguous fields
+///   * a custom descriptor with `field_key` and `to_index()` for sparse/reordered field naming
 /// - Setters mask and store (silent truncation). Validity is separate:
 ///   * is_valid<I>(value)
 ///   * validate<I>(value) -> assertion hook
@@ -50,12 +54,17 @@ namespace sw::universal {
 
 namespace bitfield_pack_detail {
 
+/// @brief Convenience false value for dependent static_assert branches.
 template <class T>
 inline constexpr bool always_false_v = false;
 
-/// @brief A word spec that binds internal storage to an unsigned integer, and raw() to a definite interface type.
-/// @tparam StorageUInt unsigned integral storage word used for shifting/masking
-/// @tparam RawIface trivially copyable type with same size as StorageUInt (e.g. float, double, a register struct)
+/// @brief Canonical description of how a bitfield word is stored, exposed, and loaded.
+/// @tparam StorageUInt Unsigned integral word used for all masking, shifting, and layout math.
+/// @tparam RawIface Whole-word API type exposed by `raw()` / `set_raw()`.
+/// @tparam Backend Actual contained backend object type stored by `bitfield_pack`.
+/// @details `storage_t` is always the canonical unsigned representation used for bitfield math.
+///          `raw_iface_t` is the public whole-word type. `backend_t` is the owned representation
+///          inside the pack and may differ from both when callers want custom load/store hooks.
 template <class StorageUInt, class RawIface = StorageUInt, class Backend = StorageUInt>
 struct bitfield_word_spec {
 	static_assert(std::unsigned_integral<StorageUInt>, "StorageUInt must be unsigned integral");
@@ -66,6 +75,7 @@ struct bitfield_word_spec {
 	using storage_t = StorageUInt;
 	using raw_iface_t = RawIface;
 
+	/// @brief Converts a public whole-word value into canonical storage bits.
 	static constexpr storage_t to_storage(raw_iface_t v) noexcept {
 		if constexpr (std::is_same_v<raw_iface_t, storage_t>) {
 			return v;
@@ -74,6 +84,7 @@ struct bitfield_word_spec {
 		}
 	}
 
+	/// @brief Converts canonical storage bits into the public whole-word type.
 	static constexpr raw_iface_t from_storage(storage_t v) noexcept {
 		if constexpr (std::is_same_v<raw_iface_t, storage_t>) {
 			return v;
@@ -82,12 +93,16 @@ struct bitfield_word_spec {
 		}
 	}
 
+	/// @brief Loads canonical storage bits from a backend object.
+	/// @note The default implementation is direct when `backend_t == storage_t`.
 	static constexpr storage_t load_storage(const backend_t& backend) noexcept {
 		static_assert(std::same_as<backend_t, storage_t>,
 		              "bitfield_word_spec default load_storage requires backend_t == storage_t; provide a custom word spec otherwise");
 		return backend;
 	}
 
+	/// @brief Stores canonical storage bits back into a backend object.
+	/// @note The default implementation is direct when `backend_t == storage_t`.
 	static constexpr void store_storage(backend_t& backend, storage_t v) noexcept {
 		static_assert(std::same_as<backend_t, storage_t>,
 		              "bitfield_word_spec default store_storage requires backend_t == storage_t; provide a custom word spec otherwise");
@@ -95,6 +110,13 @@ struct bitfield_word_spec {
 	}
 };
 
+/// @brief Concept describing the minimal "word spec" protocol accepted by `bitfield_pack`.
+/// @details A word spec supplies:
+/// - `backend_t`: owned representation type
+/// - `storage_t`: canonical unsigned word used for bit math
+/// - `raw_iface_t`: public whole-word API type
+/// - load/store hooks between `backend_t` and `storage_t`
+/// - raw whole-word conversions between `raw_iface_t` and `storage_t`
 template <class Word>
 concept bitfield_word_spec_like =
 	requires(const typename Word::backend_t& cbackend,
@@ -111,7 +133,7 @@ concept bitfield_word_spec_like =
 		{ Word::store_storage(backend, storage) } -> std::same_as<void>;
 	};
 
-/// @brief Normalize Word to a canonical word_spec type.
+/// @brief Normalizes a shorthand word type into a full word-spec type.
 template <class Word>
 struct normalize_word;
 
@@ -129,8 +151,69 @@ struct normalize_word<Word> {
 template <class Word>
 using normalize_word_t = typename normalize_word<Word>::type;
 
-/// @brief Field spec concept: provides width (or remainder marker), and encode/decode/is_valid.
-/// encode/decode/is_valid are in terms of the word's storage_t.
+/// @brief Identity indexing descriptor for the generic numeric-keyed case.
+struct bitfield_index_by_position {
+	using field_key = std::size_t;
+
+	static consteval std::size_t to_index(field_key key) noexcept { return key; }
+};
+
+/// @brief Identity indexing descriptor for the common raw-enum case.
+/// @tparam Enum Field enum whose values already match the field-spec slot order.
+template <class Enum>
+	requires std::is_enum_v<Enum>
+struct bitfield_index_by_enum {
+	using field_key = Enum;
+
+	static consteval std::size_t to_index(field_key key) noexcept {
+		return static_cast<std::size_t>(key);
+	}
+};
+
+/// @brief Concept describing the canonical indexing descriptor protocol used by `bitfield_pack`.
+/// @details Indexing descriptors only map a field key to a zero-based field-spec slot index.
+///          They do not participate in widths, offsets, masks, or storage policy.
+template <class IndexingSpec>
+concept bitfield_indexing_descriptor =
+	requires(typename IndexingSpec::field_key key) {
+		typename IndexingSpec::field_key;
+		{ IndexingSpec::to_index(key) } -> std::same_as<std::size_t>;
+	};
+
+/// @brief Normalizes an indexing spec into the canonical descriptor protocol.
+/// @details Supported inputs are:
+/// - `std::size_t` for generic numeric indexing
+/// - a raw enum type, which maps by `static_cast<std::size_t>(key)`
+/// - a descriptor that already provides `field_key` and `to_index()`
+template <class IndexingSpec>
+struct normalize_indexing;
+
+template <>
+struct normalize_indexing<std::size_t> {
+	using type = bitfield_index_by_position;
+};
+
+template <class IndexingSpec>
+	requires std::is_enum_v<IndexingSpec>
+struct normalize_indexing<IndexingSpec> {
+	using type = bitfield_index_by_enum<IndexingSpec>;
+};
+
+template <bitfield_indexing_descriptor IndexingSpec>
+struct normalize_indexing<IndexingSpec> {
+	using type = IndexingSpec;
+};
+
+template <class IndexingSpec>
+using normalize_indexing_t = typename normalize_indexing<IndexingSpec>::type;
+
+/// @brief Concept describing one field's width and semantic encoding protocol.
+/// @tparam FieldSpec Field descriptor type.
+/// @tparam StorageUInt Canonical storage word type for the enclosing pack.
+/// @details Field specs describe either:
+/// - a fixed-width field with `width`, `encode`, `decode`, and `is_valid`, or
+/// - the trailing `bitfield_remainder` marker.
+/// Semantic encode/decode is always expressed in terms of the enclosing pack's `storage_t`.
 template <class FieldSpec, class StorageUInt>
 concept bitfield_field_spec =
 	std::unsigned_integral<StorageUInt> &&
@@ -152,11 +235,10 @@ concept bitfield_field_spec =
 		{ FieldSpec::template decode<StorageUInt>(u) } -> std::same_as<typename FieldSpec::template value_type<StorageUInt>>;
 	};
 
-/// @brief Identity-width field spec.
-/// - width bits wide
-/// - value_type defaults to StorageUInt
-/// - encode/decode are identity (with cast)
-/// - is_valid checks that the value fits in width bits (in the StorageUInt domain)
+/// @brief Fixed-width identity field spec.
+/// @tparam Width Number of bits assigned to the field.
+/// @details The field's semantic value type is `StorageUInt`; encoding and decoding are
+///          identity operations in that domain, and validity checks only whether the value fits.
 template <std::size_t Width>
 struct bitfield_field_width {
 	static_assert(Width > 0, "bitfield_field_width<Width>: Width must be > 0");
@@ -190,9 +272,9 @@ struct bitfield_field_width {
 	}
 };
 
-/// @brief Remainder field spec: width is computed as "storage_bits - sum(fixed widths)".
-/// Remainder MUST be the final field.
-/// encode/decode/is_valid behave like identity on the remainder bits.
+/// @brief Trailing field spec that consumes all remaining storage bits.
+/// @details The remainder field must be the last field in the pack. Its semantic behavior is
+///          identity-style; width is derived from the enclosing layout rather than declared here.
 struct bitfield_remainder {
 	static constexpr bool is_remainder = true;
 
@@ -215,9 +297,11 @@ struct bitfield_remainder {
 template <class StorageUInt>
 constexpr std::size_t storage_bits_v = std::numeric_limits<StorageUInt>::digits;
 
+/// @brief All-ones value in the canonical storage domain.
 template <class StorageUInt>
 constexpr StorageUInt all_ones_v = ~StorageUInt(0);
 
+/// @brief Unshifted mask for a `W`-bit field in `StorageUInt`.
 template <std::size_t W, class StorageUInt>
 constexpr StorageUInt value_mask_unshifted() noexcept {
 	static_assert(std::unsigned_integral<StorageUInt>);
@@ -238,19 +322,29 @@ consteval std::size_t remainder_count() {
 
 } // namespace bitfield_pack_detail
 
-/// @brief Primary bitfield pack.
-/// @tparam Word unsigned integral word OR bitfield_word_spec<StorageUInt, RawIface>
-/// @tparam FieldSpecs field specifier types (bitfield_field_width<W>, bitfield_remainder, or future codecs)
-template <class Word, class... FieldSpecs>
+/// @brief Packs multiple logical fields into one canonical storage word.
+/// @tparam Word Unsigned integral word shorthand or a full word spec.
+/// @tparam IndexingSpec Field-indexing specification. Use `std::size_t` for generic numeric keys,
+///         a raw enum for the preferred named-field case, or a custom descriptor for sparse/reordered mapping.
+/// @tparam FieldSpecs Field descriptors evaluated in least-significant-bit first order.
+/// @details `bitfield_pack` owns a `backend_t`, performs all field math in `storage_t`,
+///          and exposes whole-word conversion through `raw_iface_t`. Ordinary mutation APIs
+///          are whole-word load/modify/store operations through the word-spec hooks; retry/CAS
+///          policy, if desired, belongs to the caller using sideband access.
+template <class Word, class IndexingSpec, class... FieldSpecs>
 class bitfield_pack {
 private:
 	using word_spec_t = bitfield_pack_detail::normalize_word_t<Word>;
+	using indexing_spec_t = bitfield_pack_detail::normalize_indexing_t<IndexingSpec>;
 	using backend_t = typename word_spec_t::backend_t;
 	using storage_t = typename word_spec_t::storage_t;
+	using field_key_t = typename indexing_spec_t::field_key;
 
 	static_assert(std::unsigned_integral<storage_t>, "bitfield_pack: storage_t must be unsigned integral");
 	static_assert(sizeof...(FieldSpecs) > 0, "bitfield_pack: must define at least one field");
 	static_assert(bitfield_pack_detail::remainder_count<FieldSpecs...>() <= 1, "bitfield_pack: at most one remainder field is allowed");
+	static_assert(bitfield_pack_detail::bitfield_indexing_descriptor<indexing_spec_t>,
+	              "bitfield_pack: IndexingSpec must normalize to a descriptor with field_key and to_index()");
 
 	// Validate that each FieldSpec conforms.
 	static_assert((bitfield_pack_detail::bitfield_field_spec<FieldSpecs, storage_t> && ...),
@@ -274,7 +368,7 @@ private:
 		}
 	}
 
-	// Build widths[] and offsets[] at compile time.
+	// Compile-time layout computation.
 	static consteval auto make_widths() {
 		std::array<std::size_t, kFieldCount> w{};
 		[&]<std::size_t... Is>(std::index_sequence<Is...>) {
@@ -335,19 +429,40 @@ private:
 
 	static constexpr auto kLayout = resolve_widths_and_offsets();
 
-public:
-	using word_spec = word_spec_t;
-	using backend_type = backend_t;
-	using storage_type = storage_t;
-	using raw_iface_type = typename word_spec_t::raw_iface_t;
+	template <field_key_t Field>
+	static consteval std::size_t field_index() noexcept {
+		constexpr std::size_t index = indexing_spec_t::to_index(Field);
+		static_assert(index < kFieldCount, "bitfield_pack: field key maps outside the defined field-spec range");
+		return index;
+	}
 
+public:
+	/// @brief Canonical normalized word spec used by this pack.
+	using word_spec = word_spec_t;
+	/// @brief Canonical normalized indexing descriptor used by this pack.
+	using indexing_spec = indexing_spec_t;
+	/// @brief Backend object type owned by this pack instance.
+	using backend_type = backend_t;
+	/// @brief Canonical unsigned storage word used for masks, shifts, and layout.
+	using storage_type = storage_t;
+	/// @brief Whole-word API type returned by `raw()` and accepted by `set_raw()`.
+	using raw_iface_type = typename word_spec_t::raw_iface_t;
+	/// @brief Field-key type accepted by field-oriented APIs.
+	using field_key_type = field_key_t;
+
+	/// @brief Tag type selecting direct backend construction.
+	/// @details This allows callers with a pre-built `backend_t` to bypass the
+	///          default-construct-then-store path used by the storage constructor.
 	struct from_backend_t {
 		explicit constexpr from_backend_t() = default;
 	};
 
+	/// @brief Tag constant used with the backend constructor.
 	static constexpr from_backend_t from_backend{};
 
+	/// @brief Mutable advanced-access proxy for backend-aware whole-word operations.
 	struct sideband_proxy;
+	/// @brief Const advanced-access proxy for backend-aware whole-word observation.
 	struct const_sideband_proxy;
 
 	/// @brief Number of fields.
@@ -374,123 +489,128 @@ public:
 	/// @brief Set raw storage bits (always available).
 	constexpr void set_raw_storage(storage_t v) BITFIELD_PACK_NOEXCEPT { store_storage_word(v); }
 
-	/// @brief Get raw interface value (Word-dependent).
-	/// For integral Word, this is the same as raw_storage().
+	/// @brief Get the whole-word public interface value.
+	/// @note For integral shorthand words this is the same as `raw_storage()`.
 	constexpr raw_iface_type raw() const BITFIELD_PACK_NOEXCEPT { return word_spec_t::from_storage(load_storage_word()); }
 
-	/// @brief Set raw interface value (Word-dependent).
-	/// For integral Word, this is the same as set_raw_storage().
+	/// @brief Store the whole-word public interface value.
+	/// @note For integral shorthand words this is the same as `set_raw_storage()`.
 	constexpr void set_raw(raw_iface_type v) BITFIELD_PACK_NOEXCEPT { store_storage_word(word_spec_t::to_storage(v)); }
 
-	/// @brief Field bit width at index I.
-	template <std::size_t I>
+	/// @brief Returns the compile-time bit width of a field key.
+	template <field_key_t Field>
 	static consteval std::size_t field_width() noexcept {
-		static_assert(I < kFieldCount, "field_width<I>: I out of range");
-		return kLayout.widths[I];
+		return kLayout.widths[field_index<Field>()];
 	}
 
-	/// @brief Field bit offset at index I (LSB-first packing).
-	template <std::size_t I>
+	/// @brief Returns the compile-time starting bit offset of a field key.
+	/// @details Offsets are computed in least-significant-bit first packing order.
+	template <field_key_t Field>
 	static consteval std::size_t field_offset() noexcept {
-		static_assert(I < kFieldCount, "field_offset<I>: I out of range");
-		return kLayout.offsets[I];
+		return kLayout.offsets[field_index<Field>()];
 	}
 
-	/// @brief Unshifted value mask (width bits).
-	template <std::size_t I>
+	/// @brief Returns the unshifted mask covering a field key's value bits.
+	template <field_key_t Field>
 	static consteval storage_t field_value_mask() noexcept {
-		return bitfield_pack_detail::value_mask_unshifted<field_width<I>(), storage_t>();
+		return bitfield_pack_detail::value_mask_unshifted<field_width<Field>(), storage_t>();
 	}
 
-	/// @brief Shifted bit mask for the field within storage word.
-	template <std::size_t I>
+	/// @brief Returns the shifted mask for a field key within the full storage word.
+	template <field_key_t Field>
 	static consteval storage_t field_mask() noexcept {
-		constexpr std::size_t off = field_offset<I>();
-		constexpr std::size_t w = field_width<I>();
+		constexpr std::size_t off = field_offset<Field>();
+		constexpr std::size_t w = field_width<Field>();
 		if constexpr (w == 0) return storage_t(0);
 		if constexpr (w >= kStorageBits) return bitfield_pack_detail::all_ones_v<storage_t>;
-		return storage_t(field_value_mask<I>() << off);
+		return storage_t(field_value_mask<Field>() << off);
 	}
 
-	/// @brief Field's maximum encodable raw value (unshifted mask).
-	template <std::size_t I>
+	/// @brief Returns the maximum raw bit-pattern representable by a field key.
+	template <field_key_t Field>
 	static consteval storage_t field_max_bits() noexcept {
-		return field_value_mask<I>();
+		return field_value_mask<Field>();
 	}
 
-	/// @brief Field spec's semantic value type.
-	template <std::size_t I>
-	using value_type = typename spec_t<I>::template value_type<storage_t>;
+	/// @brief Semantic value type decoded by a field key.
+	template <field_key_t Field>
+	using value_type = typename spec_t<field_index<Field>()>::template value_type<storage_t>;
 
-	/// @brief Extract raw bits (un-decoded) from field I.
-	template <std::size_t I>
+	/// @brief Extracts the raw bit-pattern stored in a field key.
+	template <field_key_t Field>
 	constexpr storage_t get_bits() const BITFIELD_PACK_NOEXCEPT {
-		static_assert(I < kFieldCount, "get_bits<I>: I out of range");
-		constexpr std::size_t off = field_offset<I>();
-		return storage_t((load_storage_word() >> off) & field_value_mask<I>());
+		constexpr std::size_t off = field_offset<Field>();
+		return storage_t((load_storage_word() >> off) & field_value_mask<Field>());
 	}
 
-	/// @brief Store raw bits into field I (masked to width; silent truncation).
-	/// This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
-	template <std::size_t I>
+	/// @brief Stores a raw bit-pattern into a field key.
+	/// @note Oversized values are masked to the field width.
+	/// @warning This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
+	template <field_key_t Field>
 	constexpr void set_bits(storage_t bits) BITFIELD_PACK_NOEXCEPT {
-		static_assert(I < kFieldCount, "set_bits<I>: I out of range");
-		constexpr storage_t m = field_mask<I>();
-		constexpr std::size_t off = field_offset<I>();
+		constexpr storage_t m = field_mask<Field>();
+		constexpr std::size_t off = field_offset<Field>();
 		const storage_t raw = load_storage_word();
 		store_storage_word(storage_t((raw & ~m) | ((storage_t(bits) << off) & m)));
 	}
 
-	/// @brief Decode and return semantic value of field I.
-	template <std::size_t I>
-	constexpr value_type<I> get() const BITFIELD_PACK_NOEXCEPT {
-		static_assert(I < kFieldCount, "get<I>: I out of range");
-		return spec_t<I>::template decode<storage_t>(get_bits<I>());
+	/// @brief Decodes and returns the semantic value of a field key.
+	template <field_key_t Field>
+	constexpr value_type<Field> get() const BITFIELD_PACK_NOEXCEPT {
+		return spec_t<field_index<Field>()>::template decode<storage_t>(get_bits<Field>());
 	}
 
-	/// @brief Encode and store semantic value of field I (masked; silent truncation).
-	/// This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
-	template <std::size_t I>
-	constexpr void set(value_type<I> v) BITFIELD_PACK_NOEXCEPT {
-		static_assert(I < kFieldCount, "set<I>: I out of range");
-		const storage_t enc = spec_t<I>::template encode<storage_t>(v);
-		set_bits<I>(enc);
+	/// @brief Encodes and stores the semantic value of a field key.
+	/// @note The encoded bits are still masked to the field width after encoding.
+	/// @warning This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
+	template <field_key_t Field>
+	constexpr void set(value_type<Field> v) BITFIELD_PACK_NOEXCEPT {
+		const storage_t enc = spec_t<field_index<Field>()>::template encode<storage_t>(v);
+		set_bits<Field>(enc);
 	}
 
-	/// @brief Check validity of semantic value for field I (does not consider masking).
-	template <std::size_t I>
-	static constexpr bool is_valid(value_type<I> v) noexcept {
-		static_assert(I < kFieldCount, "is_valid<I>: I out of range");
-		return spec_t<I>::template is_valid<storage_t>(v);
+	/// @brief Checks whether a semantic value is valid for a field key before masking.
+	template <field_key_t Field>
+	static constexpr bool is_valid(value_type<Field> v) noexcept {
+		return spec_t<field_index<Field>()>::template is_valid<storage_t>(v);
 	}
 
-	/// @brief Validate semantic value for field I using assertion hook.
-	template <std::size_t I>
-	static constexpr void validate(value_type<I> v) BITFIELD_PACK_NOEXCEPT {
-		BITFIELD_PACK_ASSERT(is_valid<I>(v));
+	/// @brief Validates a semantic value for a field key using `BITFIELD_PACK_ASSERT`.
+	template <field_key_t Field>
+	static constexpr void validate(value_type<Field> v) BITFIELD_PACK_NOEXCEPT {
+		BITFIELD_PACK_ASSERT(is_valid<Field>(v));
 	}
 
-	/// @brief Returns a proxy for backend-aware whole-word access.
+	/// @brief Returns an explicit advanced-access proxy for backend-aware operations.
+	/// @details The main API stays backend-agnostic; callers that need backend access,
+	///          manual synchronization, or explicit whole-word load/store can opt in here.
 	constexpr sideband_proxy sideband() BITFIELD_PACK_NOEXCEPT { return sideband_proxy(this); }
 	constexpr const_sideband_proxy sideband() const BITFIELD_PACK_NOEXCEPT { return const_sideband_proxy(this); }
 
+	/// @brief Mutable proxy exposing backend-aware whole-word operations.
 	struct sideband_proxy {
 		sideband_proxy() = delete;
 		explicit constexpr sideband_proxy(bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
 
+		/// @brief Returns the owned backend object by reference.
 		constexpr backend_t& backend() BITFIELD_PACK_NOEXCEPT { return data_->backend_; }
+		/// @brief Loads the canonical storage word through the word-spec hook.
 		constexpr storage_t load_storage_word() const BITFIELD_PACK_NOEXCEPT { return data_->load_storage_word(); }
+		/// @brief Stores the canonical storage word through the word-spec hook.
 		constexpr void store_storage_word(storage_t v) BITFIELD_PACK_NOEXCEPT { data_->store_storage_word(v); }
 
 	private:
 		bitfield_pack* data_;
 	};
 
+	/// @brief Const proxy exposing backend-aware whole-word observation.
 	struct const_sideband_proxy {
 		const_sideband_proxy() = delete;
 		explicit constexpr const_sideband_proxy(const bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
 
+		/// @brief Returns the owned backend object by const reference.
 		constexpr const backend_t& backend() const BITFIELD_PACK_NOEXCEPT { return data_->backend_; }
+		/// @brief Loads the canonical storage word through the word-spec hook.
 		constexpr storage_t load_storage_word() const BITFIELD_PACK_NOEXCEPT { return data_->load_storage_word(); }
 
 	private:
@@ -498,6 +618,7 @@ public:
 	};
 
 private:
+	// Backend hook access.
 	constexpr storage_t load_storage_word() const BITFIELD_PACK_NOEXCEPT {
 		return word_spec_t::load_storage(backend_);
 	}
@@ -509,17 +630,19 @@ private:
 	backend_t backend_{};
 };
 
-/// @brief Ergonomic alias: widths-only pack. Each width becomes an identity bitfield_field_width<W>.
+/// @brief Widths-only convenience alias for identity field specs.
 template <class Word, std::size_t... Widths>
-using bitfield_pack_bits = bitfield_pack<Word, bitfield_pack_detail::bitfield_field_width<Widths>...>;
+using bitfield_pack_bits = bitfield_pack<Word, std::size_t, bitfield_pack_detail::bitfield_field_width<Widths>...>;
 
-/// Convenience aliases for users of the "power" form.
+/// @brief Convenience alias for the explicit word-spec form.
 template <class StorageUInt, class RawIface = StorageUInt>
 using bitfield_word_spec = bitfield_pack_detail::bitfield_word_spec<StorageUInt, RawIface>;
 
+/// @brief Convenience alias for the fixed-width identity field spec.
 template <std::size_t Width>
 using bitfield_field_spec = bitfield_pack_detail::bitfield_field_width<Width>;
 
+/// @brief Convenience alias for the trailing remainder field marker.
 using bitfield_remainder = bitfield_pack_detail::bitfield_remainder;
 
 } // namespace sw::universal

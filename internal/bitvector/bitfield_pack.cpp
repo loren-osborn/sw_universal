@@ -1,6 +1,7 @@
 // test_bitfield_pack.cpp
 #include <cmath>
 #include <bit>
+#include <cstddef>
 #include <cstdint>
 #include <exception>
 #include <iostream>
@@ -49,6 +50,7 @@ struct test_assert_failure : std::exception {
 
 using namespace sw::universal;
 
+// Helper for assembling an expected raw word by hand in the canonical storage domain.
 template<typename Storage>
 constexpr Storage insert_field(Storage raw, Storage value, std::size_t width, std::size_t offset) {
 	const Storage all_ones = ~Storage(0);
@@ -58,18 +60,21 @@ constexpr Storage insert_field(Storage raw, Storage value, std::size_t width, st
 	return Storage((raw & ~(mask << offset)) | ((value & mask) << offset));
 }
 
+// Shared assertion helper for tests that reason about both raw storage and decoded field slices.
 template<typename Pack>
-void check_raw_and_fields(const Pack& pack,
-                          typename Pack::storage_type expected_raw,
-                          typename Pack::storage_type f0,
-                          typename Pack::storage_type f1,
-                          typename Pack::storage_type f2) {
+void check_raw_and_fields_numeric(const Pack& pack,
+                                  typename Pack::storage_type expected_raw,
+                                  typename Pack::storage_type f0,
+                                  typename Pack::storage_type f1,
+                                  typename Pack::storage_type f2) {
+	static_assert(std::is_same_v<typename Pack::field_key_type, std::size_t>);
 	TEST_EQ(pack.raw_storage(), expected_raw);
 	TEST_EQ(pack.template get_bits<0>(), f0);
 	TEST_EQ(pack.template get_bits<1>(), f1);
 	TEST_EQ(pack.template get_bits<2>(), f2);
 }
 
+// Custom semantic field spec used to verify encode/decode/value_type plumbing.
 struct offset_binary_field {
 	static constexpr bool is_remainder = false;
 	static constexpr std::size_t width = 4;
@@ -93,12 +98,40 @@ struct offset_binary_field {
 	}
 };
 
+enum class named_field : std::size_t {
+	low = 0,
+	mid = 1,
+	high = 2,
+};
+
+enum class sparse_field : std::uint32_t {
+	mantissa = 99,
+	sign = 7,
+	exponent = 42,
+};
+
+struct sparse_ieee_indexing {
+	using field_key = sparse_field;
+
+	static consteval std::size_t to_index(field_key key) noexcept {
+		switch (key) {
+		case sparse_field::mantissa: return 0;
+		case sparse_field::exponent: return 1;
+		case sparse_field::sign: return 2;
+		}
+		return static_cast<std::size_t>(-1);
+	}
+};
+
 static void test_bits_alias_basic() {
+	// Basic widths-only usage exercises normalization from an unsigned storage word
+	// and the generic std::size_t indexing fallback.
 	using P = bitfield_pack_bits<std::uint16_t, 3, 5, 8>;
 	static_assert(P::size() == 3);
 	static_assert(std::is_same_v<P::backend_type, std::uint16_t>);
 	static_assert(std::is_same_v<P::storage_type, std::uint16_t>);
 	static_assert(std::is_same_v<P::raw_iface_type, std::uint16_t>);
+	static_assert(std::is_same_v<P::field_key_type, std::size_t>);
 	static_assert(P::template field_mask<0>() == std::uint16_t{0x0007});
 	static_assert(P::template field_mask<1>() == std::uint16_t{0x00F8});
 	static_assert(P::template field_mask<2>() == std::uint16_t{0xFF00});
@@ -128,7 +161,7 @@ static void test_bits_alias_basic() {
 	TEST_EQ(p.template get_bits<1>(), std::uint16_t{0b00101});
 
 	p.template set_bits<2>(0xAB);
-	check_raw_and_fields(
+	check_raw_and_fields_numeric(
 		p,
 		insert_field(insert_field(insert_field(std::uint16_t{0}, std::uint16_t{0b111}, 3, 0), std::uint16_t{0b00101}, 5, 3), std::uint16_t{0xAB}, 8, 8),
 		std::uint16_t{0b111},
@@ -148,10 +181,31 @@ static void test_bits_alias_basic() {
 	TEST_TRUE(!P::is_valid<0>(std::uint16_t{0b1000}));
 }
 
+static void test_raw_enum_indexing() {
+	using P = bitfield_pack<std::uint16_t, named_field, bitfield_field_spec<3>, bitfield_field_spec<5>, bitfield_field_spec<8>>;
+	static_assert(std::is_same_v<P::field_key_type, named_field>);
+	static_assert(std::is_same_v<P::indexing_spec, sw::universal::bitfield_pack_detail::bitfield_index_by_enum<named_field>>);
+	static_assert(P::template field_width<named_field::low>() == 3);
+	static_assert(P::template field_offset<named_field::mid>() == 3);
+	static_assert(P::template field_mask<named_field::high>() == std::uint16_t{0xFF00});
+
+	P p;
+	p.template set_bits<named_field::low>(0b1111);
+	p.template set_bits<named_field::mid>(0b100101);
+	p.template set_bits<named_field::high>(0xAB);
+
+	TEST_EQ(p.raw_storage(),
+	        insert_field(insert_field(insert_field(std::uint16_t{0}, std::uint16_t{0b111}, 3, 0), std::uint16_t{0b00101}, 5, 3), std::uint16_t{0xAB}, 8, 8));
+	TEST_EQ(p.template get_bits<named_field::low>(), std::uint16_t{0b111});
+	TEST_EQ(p.template get_bits<named_field::mid>(), std::uint16_t{0b00101});
+	TEST_EQ(p.template get_bits<named_field::high>(), std::uint16_t{0xAB});
+}
+
 static void test_raw_storage_constructor_and_field_isolation() {
+	// Starting from a raw word lets us verify field extraction and neighboring-field isolation.
 	using P = bitfield_pack_bits<std::uint16_t, 4, 4, 8>;
 	P p(std::uint16_t{0xABCD});
-	check_raw_and_fields(p, std::uint16_t{0xABCD}, std::uint16_t{0xD}, std::uint16_t{0xC}, std::uint16_t{0xAB});
+	check_raw_and_fields_numeric(p, std::uint16_t{0xABCD}, std::uint16_t{0xD}, std::uint16_t{0xC}, std::uint16_t{0xAB});
 
 	const auto before = p.raw_storage();
 	p.template set_bits<1>(0x2);
@@ -163,7 +217,8 @@ static void test_raw_storage_constructor_and_field_isolation() {
 }
 
 static void test_semantic_field_spec_access() {
-	using P = bitfield_pack<std::uint16_t, offset_binary_field, bitfield_field_spec<4>, bitfield_field_spec<8>>;
+	// Semantic fields should encode/decode independently of the raw bit layout.
+	using P = bitfield_pack<std::uint16_t, std::size_t, offset_binary_field, bitfield_field_spec<4>, bitfield_field_spec<8>>;
 	static_assert(std::is_same_v<P::template value_type<0>, int>);
 	static_assert(P::template field_width<0>() == 4);
 
@@ -182,6 +237,7 @@ static void test_semantic_field_spec_access() {
 }
 
 static void test_validate_hook() {
+	// Validation is separate from mutation; invalid values are caught only when the hook is used.
 	using P = bitfield_pack_bits<std::uint8_t, 3, 5>;
 	static_assert(P::field_max_bits<0>() == 0b111);
 
@@ -194,8 +250,9 @@ static void test_validate_hook() {
 }
 
 static void test_remainder_layout() {
+	// The trailing remainder consumes whatever bits are left after the fixed-width prefix.
 	// [4 bits][remainder]
-	using P = bitfield_pack<std::uint16_t, bitfield_field_spec<4>, bitfield_remainder>;
+	using P = bitfield_pack<std::uint16_t, std::size_t, bitfield_field_spec<4>, bitfield_remainder>;
 	static_assert(P::size() == 2);
 	static_assert(P::field_width<0>() == 4);
 	static_assert(P::field_offset<0>() == 0);
@@ -221,7 +278,32 @@ static void test_remainder_layout() {
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{0x4});
 }
 
+static void test_custom_descriptor_indexing() {
+	using Word = bitfield_word_spec<std::uint32_t, float>;
+	using P = bitfield_pack<Word, sparse_ieee_indexing, bitfield_field_spec<23>, bitfield_field_spec<8>, bitfield_field_spec<1>>;
+	static_assert(std::is_same_v<P::field_key_type, sparse_field>);
+	static_assert(std::is_same_v<P::indexing_spec, sparse_ieee_indexing>);
+	static_assert(P::template field_width<sparse_field::mantissa>() == 23);
+	static_assert(P::template field_offset<sparse_field::exponent>() == 23);
+	static_assert(P::template field_offset<sparse_field::sign>() == 31);
+	static_assert(P::template field_mask<sparse_field::sign>() == std::uint32_t{0x80000000u});
+
+	P p;
+	p.template set<sparse_field::mantissa>(0u);
+	p.template set<sparse_field::exponent>(127u);
+	p.template set<sparse_field::sign>(0u);
+	TEST_EQ(p.raw(), 1.0f);
+	TEST_EQ(p.raw_storage(), std::bit_cast<std::uint32_t>(1.0f));
+
+	p.template set_bits<sparse_field::mantissa>(0x400000u);
+	p.template set_bits<sparse_field::exponent>(0xFFu);
+	p.template set_bits<sparse_field::sign>(0u);
+	TEST_TRUE(std::isnan(p.raw()) || std::isinf(p.raw()) == false);
+}
+
 static void test_word_spec_float_roundtrip() {
+	// Raw-interface tests verify that `raw()` / `set_raw()` can expose a non-integral whole-word type
+	// while still doing all field math in the canonical unsigned storage domain.
 	// Bind raw() to float, but still pack bits in uint32_t
 	using Word = bitfield_word_spec<std::uint32_t, float>;
 	using F = bitfield_pack_bits<Word, 1, 8, 23>;
@@ -262,6 +344,8 @@ static void test_word_spec_float_roundtrip() {
 }
 
 static void test_backend_sideband_access() {
+	// Sideband access exposes the backend and whole-word hooks explicitly without teaching the pack
+	// about synchronization policy such as CAS loops.
 	struct backend_word {
 		std::uint32_t word = 0;
 	};
@@ -277,7 +361,7 @@ static void test_backend_sideband_access() {
 		static constexpr void store_storage(backend_t& backend, storage_t v) noexcept { backend.word = v; }
 	};
 
-	using P = bitfield_pack<backend_spec, bitfield_field_spec<4>, bitfield_remainder>;
+	using P = bitfield_pack<backend_spec, std::size_t, bitfield_field_spec<4>, bitfield_remainder>;
 	static_assert(std::is_same_v<P::backend_type, backend_word>);
 
 	P p(P::from_backend, backend_word{0x4321u});
@@ -299,6 +383,8 @@ static void test_backend_sideband_access() {
 }
 
 static void test_backend_hook_mutation_semantics() {
+	// This backend counts load/store hook traffic so ordinary mutation can be verified as
+	// whole-word load/modify/store through the spec rather than direct member access.
 	struct counting_backend {
 		std::uint16_t word = 0;
 		int* loads = nullptr;
@@ -322,7 +408,7 @@ static void test_backend_hook_mutation_semantics() {
 		}
 	};
 
-	using P = bitfield_pack<counting_spec, bitfield_field_spec<4>, bitfield_field_spec<4>, bitfield_field_spec<8>>;
+	using P = bitfield_pack<counting_spec, std::size_t, bitfield_field_spec<4>, bitfield_field_spec<4>, bitfield_field_spec<8>>;
 
 	int loads = 0;
 	int stores = 0;
@@ -352,6 +438,7 @@ static void test_backend_hook_mutation_semantics() {
 }
 
 static void test_word_spec_normalization() {
+	// These static assertions keep the shorthand/inferred word-spec normalization readable.
 	using IntegralPack = bitfield_pack_bits<std::uint32_t, 8, 8, 16>;
 	using FloatWord = bitfield_word_spec<std::uint32_t, float>;
 	using FloatPack = bitfield_pack_bits<FloatWord, 23, 8, 1>;
@@ -373,6 +460,7 @@ static void test_word_spec_normalization() {
 	static_assert(std::is_same_v<IntegralPack::backend_type, std::uint32_t>);
 	static_assert(std::is_same_v<IntegralPack::storage_type, std::uint32_t>);
 	static_assert(std::is_same_v<IntegralPack::raw_iface_type, std::uint32_t>);
+	static_assert(std::is_same_v<IntegralPack::indexing_spec, sw::universal::bitfield_pack_detail::bitfield_index_by_position>);
 
 	static_assert(std::is_same_v<FloatPack::backend_type, std::uint32_t>);
 	static_assert(std::is_same_v<FloatPack::storage_type, std::uint32_t>);
@@ -384,6 +472,8 @@ static void test_word_spec_normalization() {
 }
 
 static void test_index_encoded_sideband() {
+	// Keep one cross-component smoke test here because custom_indexed_variant's encoded index relies
+	// on bitfield_pack's sideband-friendly remainder layout.
 	using E = sw::universal::internal::index_encoded_with_sideband_data<10>;
 	E e;
 	TEST_EQ(e.index(), std::variant_npos);
@@ -404,10 +494,12 @@ static void test_index_encoded_sideband() {
 int main() {
 	try {
 		test_bits_alias_basic();
+		test_raw_enum_indexing();
 		test_raw_storage_constructor_and_field_isolation();
 		test_semantic_field_spec_access();
 		test_validate_hook();
 		test_remainder_layout();
+		test_custom_descriptor_indexing();
 		test_word_spec_float_roundtrip();
 		test_backend_sideband_access();
 		test_backend_hook_mutation_semantics();

@@ -42,9 +42,11 @@ namespace internal {
 
 namespace custom_indexed_variant_detail {
 
+	/// @brief Selects the Ith alternative type from a variant parameter pack.
 	template<std::size_t I, typename... Ts>
 	using type_at_t = internal_utility::pack_element_t<I, Ts...>;
 
+	/// @brief Finds the unique exact-match index of `T` in `Ts...`, or `std::variant_npos`.
 	template<typename T, typename... Ts>
 	struct index_of_exact;
 
@@ -63,9 +65,11 @@ namespace custom_indexed_variant_detail {
 	template<typename T, typename... Ts>
 	inline constexpr std::size_t index_of_exact_v = index_of_exact<T, Ts...>::value;
 
+	/// @brief Counts how many times `T` appears exactly in `Ts...`.
 	template<typename T, typename... Ts>
 	inline constexpr std::size_t count_exact_v = (std::size_t{0} + ... + (std::is_same_v<T, Ts> ? std::size_t{1} : std::size_t{0}));
 
+	/// @brief True when `To{From}` is well-formed, excluding narrowing list-initialization.
 	template<typename To, typename From, typename = void>
 	struct non_narrowing_list_initializable : std::false_type {};
 
@@ -83,6 +87,9 @@ namespace custom_indexed_variant_detail {
 	inline constexpr bool non_narrowing_constructible_v =
 		std::is_constructible_v<To, From> && non_narrowing_list_initializable_v<To, From>;
 
+	/// @brief Overload-set element used to ask "which alternative would overload resolution choose?".
+	/// @details This is part of the converting-constructor/assignment ranking model. If `Source`
+	///          can be converted to `T` without narrowing, this overload contributes alternative `I`.
 	template<std::size_t I, typename T, typename Source, bool Enable = non_narrowing_convertible_v<T, Source&&>>
 	struct construct_select_overload {
 		void operator()() const = delete;
@@ -93,6 +100,7 @@ namespace custom_indexed_variant_detail {
 		auto operator()(T) const -> std::integral_constant<std::size_t, I>;
 	};
 
+	/// @brief Aggregates one viable overload candidate per alternative type.
 	template<typename Source, typename Seq, typename... Ts>
 	struct construct_select_overload_set_impl;
 
@@ -102,13 +110,18 @@ namespace custom_indexed_variant_detail {
 		using construct_select_overload<Is, Ts, Source>::operator()...;
 	};
 
+	/// @brief Overload set modeling converting-constructor candidate selection for `Source`.
 	template<typename Source, typename... Ts>
 	using construct_select_overload_set =
 		construct_select_overload_set_impl<Source, std::index_sequence_for<Ts...>, Ts...>;
 
+	/// @brief Result tag naming the alternative chosen by overload resolution for converting construction.
 	template<typename Source, typename... Ts>
 	using construct_select_tag_t = decltype(std::declval<construct_select_overload_set<Source, Ts...>>()(std::declval<Source&&>()));
 
+	/// @brief Selects the alternative index preferred by implicit overload resolution for constructing from `Source`.
+	/// @details "Best" here means the alternative whose overload wins normal overload resolution
+	///          among the viable non-narrowing implicit conversion candidates.
 	template<typename Source, typename... Ts>
 	struct implicit_best_construct_index {
 	private:
@@ -125,6 +138,11 @@ namespace custom_indexed_variant_detail {
 	template<typename Source, typename... Ts>
 	inline constexpr std::size_t implicit_best_construct_index_v = implicit_best_construct_index<Source, Ts...>::value;
 
+	/// @brief Selects the alternative index used by the converting constructor from `Source`.
+	/// @details "Best" here means:
+	/// - prefer the unique exact type match when one exists and is constructible
+	/// - otherwise fall back to the implicit non-narrowing overload-resolution winner
+	/// - otherwise report `std::variant_npos`
 	template<typename Source, typename... Ts>
 	struct best_construct_index {
 	private:
@@ -154,6 +172,9 @@ namespace custom_indexed_variant_detail {
 	template<typename Source, typename... Ts>
 	inline constexpr std::size_t best_construct_index_v = best_construct_index<Source, Ts...>::value;
 
+	/// @brief Selects the alternative index used by converting assignment from `Source`.
+	/// @details "Best" here means the converting-construction winner, filtered further by whether
+	///          the selected alternative is actually assignable from `Source`.
 	template<typename Source, typename... Ts>
 	struct best_assign_index {
 	private:
@@ -173,6 +194,9 @@ namespace custom_indexed_variant_detail {
 	template<typename Source, typename... Ts>
 	inline constexpr std::size_t best_assign_index_v = best_assign_index<Source, Ts...>::value;
 
+	/// @brief Reports whether the selected converting-construction path should be implicit.
+	/// @details This answers "is the best converting-constructor candidate implicitly convertible?",
+	///          which is used to split implicit vs explicit converting constructors.
 	template<typename Source, typename... Ts>
 	struct best_construct_is_implicit {
 		static constexpr std::size_t I = best_construct_index_v<Source, Ts...>;
@@ -188,6 +212,7 @@ namespace custom_indexed_variant_detail {
 	template<typename Source, typename... Ts>
 	inline constexpr bool best_construct_is_implicit_v = best_construct_is_implicit<Source, Ts...>::value;
 
+	/// @brief Computes the aligned raw storage block large enough for all alternatives.
 	template<typename... Ts>
 	struct storage_traits {
 		static constexpr std::size_t max_size = (std::max)({sizeof(Ts)...});
@@ -201,6 +226,7 @@ namespace custom_indexed_variant_detail {
 	template<typename T>
 	using remove_cvref_t = std::remove_cv_t<std::remove_reference_t<T>>;
 
+	/// @brief True when every alternative is copy-constructible.
 	template<typename... Ts>
 	struct all_copy_constructible : std::conjunction<std::is_copy_constructible<Ts>...> {};
 
@@ -238,6 +264,7 @@ namespace custom_indexed_variant_detail {
 	template<typename T>
 	inline constexpr bool is_in_place_type_v = is_in_place_type<T>::value;
 
+	/// @brief Detects whether an encoded-index type exposes sideband access.
 	template<typename T, typename = void>
 	struct has_sideband : std::false_type {};
 
@@ -247,6 +274,7 @@ namespace custom_indexed_variant_detail {
 	template<typename T>
 	inline constexpr bool has_sideband_v = has_sideband<T>::value;
 
+	/// @brief Concept for encoded-index storage with the noexcept API required by the variant core.
 	template<typename EncodedIndex>
 	concept encoded_index_noexcept_api =
 		std::default_initializable<EncodedIndex> &&
@@ -263,8 +291,8 @@ namespace custom_indexed_variant_detail {
 
 namespace detail = custom_indexed_variant_detail;
 
-/// @brief Wrapper template allows different size index.
-/// @tparam IndexT type to use for storing index.
+/// @brief Encoded-index policy family parameterized by the integer type used for the encoded word.
+/// @tparam IndexT Unsigned integral word used to store the active index and optional sideband bits.
 template<typename IndexT = std::size_t>
 struct for_index_type {
 
@@ -277,7 +305,7 @@ struct for_index_type {
 	static_assert(std::numeric_limits<IndexT>::radix == 2,
 			"IndexT must be base-2 (binary) integral");
 
-	/// @brief Minimal index storage policy with std::variant_npos support.
+	/// @brief Minimal encoded-index policy storing only the active alternative index.
 	/// @tparam NTypes Number of variant alternatives.
 	template<std::size_t NTypes>
 	struct simple_encoded_index {
@@ -307,9 +335,10 @@ struct for_index_type {
 		IndexT index_ = npos_code;
 	};
 
-	/// @brief Encodes variant index bits with additional sideband payload bits.
+	/// @brief Encoded-index policy that stores both the active index and extra caller-managed sideband bits.
 	/// @tparam NTypes Number of variant alternatives.
-	/// @tparam IndexT Unsigned integral storage for the encoded word.
+	/// @details The low bits encode the variant index and valueless state; the remaining bits are
+	///          preserved sideband payload that the variant core itself does not interpret.
 	template <std::size_t NTypes>
 	struct index_encoded_with_sideband_data {
 		static_assert(std::unsigned_integral<IndexT>, "IndexT must be an unsigned integral type");
@@ -330,31 +359,34 @@ struct for_index_type {
 		static_assert(index_bits <= width, "IndexT too small to encode required index states");
 		static_assert(index_bits < width, "No room left for sideband payload; disallowed");
 
-		/// @brief Underlying layout: [ index_bits | sideband(remainder) ].
-		using bits_t = bitfield_pack<IndexT, bitfield_field_spec<index_bits>, bitfield_remainder>;
-
 	private:
 		enum field_index : std::size_t { INDEX = 0, SIDEBAND = 1 };
 
 	public:
+		/// @brief Underlying layout: [ index_bits | sideband(remainder) ].
+		using bits_t = bitfield_pack<IndexT, field_index, bitfield_field_spec<index_bits>, bitfield_remainder>;
+
 		/// @brief Encoded representation for std::variant_npos: all ones in the index field.
 		static constexpr IndexT npos_code = bits_t::template field_max_bits<INDEX>();
 		static_assert(npos_code >= NTypes, "npos_code must be distinct from valid indices");
 
-		/// @brief Proxy exposing sideband read/write while preserving index bits.
+		/// @brief Mutable proxy for reading or updating sideband bits without exposing index internals.
 		struct sideband_proxy {
 			sideband_proxy() = delete;
 			explicit sideband_proxy(index_encoded_with_sideband_data* src) noexcept : data_(src) {}
 
+			/// @brief Returns the current sideband payload bits.
 			IndexT val() const noexcept { return data_->sideband_val(); }
+			/// @brief Stores a sideband payload value, preserving the encoded index bits.
 			void set_val(IndexT v) noexcept { data_->set_sideband_val(v); }
+			/// @brief Validates that a sideband value fits before masking.
 			void validate_val(IndexT v) noexcept { data_->validate_sideband_val(v); }
 
 		private:
 			index_encoded_with_sideband_data* data_;
 		};
 
-		/// @brief Proxy exposing sideband read-only access from const storage.
+		/// @brief Const proxy for observing sideband bits while preserving constness.
 		struct const_sideband_proxy {
 			const_sideband_proxy() = delete;
 			explicit const_sideband_proxy(const index_encoded_with_sideband_data* src) noexcept : data_(src) {}
@@ -366,7 +398,7 @@ struct for_index_type {
 		using sideband_t = sideband_proxy;
 		using const_sideband_t = const_sideband_proxy;
 
-		/// @brief Constructs encoded index in the valueless state (std::variant_npos) and sideband zero.
+		/// @brief Constructs encoded state with `std::variant_npos` and zero sideband payload.
 		constexpr index_encoded_with_sideband_data() noexcept {
 			bits_.set_raw_storage(0);
 			bits_.template set_bits<INDEX>(npos_code);
@@ -396,11 +428,11 @@ struct for_index_type {
 			BITFIELD_PACK_ASSERT(index() == v);
 		}
 
-		/// @brief Returns a proxy to read/write sideband payload bits.
+		/// @brief Returns an explicit sideband proxy.
 		constexpr sideband_t sideband() noexcept { return sideband_t(this); }
 		constexpr const_sideband_t sideband() const noexcept { return const_sideband_t(this); }
 
-		/// @brief Expose raw encoded word (IndexT).
+		/// @brief Exposes the complete encoded word for tests and low-level adapters.
 		constexpr IndexT raw_storage() const noexcept { return bits_.raw_storage(); }
 		constexpr void set_raw_storage(IndexT v) noexcept { bits_.set_raw_storage(v); }
 
@@ -429,10 +461,14 @@ using simple_encoded_index = for_index_type<std::size_t>::simple_encoded_index<N
 template<std::size_t NTypes>
 using index_encoded_with_sideband_data = for_index_type<std::size_t>::index_encoded_with_sideband_data<NTypes>;
 
-/// @brief An indexed variant implementation modeled after std::variant (C++20).
-/// @tparam EncodedIndex Reserved index encoding selector (currently unused).
+/// @brief Variant-like discriminated union with pluggable encoded-index storage.
+/// @tparam EncodedIndex Template that chooses how the active index is encoded.
 /// @tparam Types Alternative types stored in the variant.
-/// @note This implementation prefers exact-type construction when using converting constructors.
+/// @details The active alternative lives in raw aligned storage and is tracked by `encoded_index_t`.
+///          Depending on the encoded-index policy, the index word may also carry sideband bits that
+///          are preserved across ordinary variant operations.
+/// @note This implementation intentionally prefers a unique exact-type match before falling back to
+///       the implicit non-narrowing overload-resolution winner for converting construction/assignment.
 template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
 	requires detail::encoded_index_template_noexcept_api<EncodedIndex, sizeof...(Types)>
 class custom_indexed_variant {
@@ -447,7 +483,7 @@ public:
 	using encoded_index_t = EncodedIndex<ntypes>;
 	static_assert(detail::encoded_index_noexcept_api<encoded_index_t>,
 		"EncodedIndex<NTypes> must provide noexcept default ctor, noexcept index() -> size_t, and noexcept set_index(size_t).");
-	/// @brief Sentinel value indicating valueless state.
+	/// @brief Sentinel value indicating the valueless state.
 	static constexpr std::size_t npos = std::variant_npos;
 
 	/// @brief Public index type used by index().
@@ -572,13 +608,14 @@ public:
 		return *this;
 	}
 
-	/// @brief Checks if the variant has no active alternative.
+	/// @brief Reports whether the variant currently has no active alternative.
 	bool valueless_by_exception() const noexcept { return is_valueless_impl(); }
 
-	/// @brief Returns the index of the active alternative.
+	/// @brief Returns the active alternative index or `std::variant_npos`.
 	std::size_t index() const noexcept { return current_index_impl(); }
 
-	/// @brief Exposes encoded index sideband when the encoded index type supports it.
+	/// @brief Exposes encoded-index sideband when the selected policy provides it.
+	/// @details This is intentionally absent for index policies that do not carry sideband bits.
 	template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_v<EI>>>
 	auto sideband() noexcept(noexcept(std::declval<EI&>().sideband())) {
 		return sideband_impl();
@@ -729,10 +766,13 @@ public:
 	}
 
 private:
-	// Representation inspection
+	// Representation inspection.
+	/// @brief Returns the encoded active index as interpreted by the index policy.
 	std::size_t current_index_impl() const noexcept { return index_obj_.index(); }
+	/// @brief Returns true when no alternative is currently engaged.
 	bool is_valueless_impl() const noexcept { return current_index_impl() == npos; }
 
+	/// @brief Forwards explicit sideband access to the encoded-index policy.
 	template<typename Self>
 	static decltype(auto) sideband_impl(Self&& self) noexcept(noexcept(std::forward<Self>(self).index_obj_.sideband())) {
 		return std::forward<Self>(self).index_obj_.sideband();
@@ -746,10 +786,12 @@ private:
 		return sideband_impl(*this);
 	}
 
-	// Storage access
+	// Storage access.
+	/// @brief Returns the raw storage buffer used for the active alternative.
 	std::byte* storage_bytes_impl() noexcept { return storage_.buffer; }
 	const std::byte* storage_bytes_impl() const noexcept { return storage_.buffer; }
 
+	/// @brief Placement-constructs alternative `I` into raw storage and publishes its index.
 	template<std::size_t I, typename... Args>
 	void construct_active_impl(Args&&... args) {
 		assert(is_valueless_impl() && "construct requires valueless state");
@@ -773,6 +815,7 @@ private:
 		assert(is_valueless_impl() && "destroy_active must transition to npos");
 	}
 
+	/// @brief Returns a typed pointer to alternative `I` within a variant's raw storage.
 	template<std::size_t I, typename Variant>
 	static auto active_ptr_impl(Variant& variant) noexcept {
 		using VariantNoRef = std::remove_reference_t<Variant>;
@@ -782,6 +825,8 @@ private:
 		return std::launder(reinterpret_cast<CvVolBase*>(variant.storage_.buffer));
 	}
 
+	// Active-alternative dispatch.
+	/// @brief Invokes `fn(index_tag, value)` for the currently active alternative.
 	template<typename Variant, typename Fn>
 	static void visit_active_impl(Variant&& variant, Fn&& fn) {
 		visit_active_case_impl<0>(std::forward<Variant>(variant), std::forward<Fn>(fn));
@@ -801,6 +846,7 @@ private:
 		}
 	}
 
+	/// @brief Destroys whichever alternative matches the runtime active index.
 	template<std::size_t I>
 	void destroy_active_case_impl(std::size_t active) noexcept {
 		if constexpr (I < sizeof...(Types)) {
@@ -817,6 +863,7 @@ private:
 		}
 	}
 
+	/// @brief Returns the active alternative by reference, throwing on index mismatch.
 	template<std::size_t I, typename Variant>
 	static decltype(auto) get_ref_impl(Variant&& variant) {
 		if (variant.current_index_impl() != I) {
@@ -825,12 +872,14 @@ private:
 		return *active_ptr_impl<I>(variant);
 	}
 
+	/// @brief Returns a pointer to alternative `I` when active, otherwise `nullptr`.
 	template<std::size_t I, typename Variant>
 	static auto get_if_impl(Variant& variant) noexcept {
 		return (variant.current_index_impl() == I) ? active_ptr_impl<I>(variant) : nullptr;
 	}
 
-	// Transition helpers
+	// Transition helpers.
+	/// @brief Replaces the active alternative with `I`, preserving strong behavior where construction permits.
 	template<std::size_t I, typename... Args>
 	void emplace_impl(Args&&... args) {
 		using T = detail::type_at_t<I, Types...>;
@@ -849,6 +898,7 @@ private:
 		}
 	}
 
+	/// @brief Assigns from a non-variant value using the preselected target alternative `I`.
 	template<std::size_t I, typename Value>
 	void assign_value_impl(Value&& value) {
 		using Target = detail::type_at_t<I, Types...>;
@@ -871,6 +921,7 @@ private:
 		}
 	}
 
+	/// @brief Copy-constructs from another engaged variant, preserving valueless state otherwise.
 	void copy_construct_from_impl(const custom_indexed_variant& other) {
 		if (!other.valueless_by_exception()) {
 			visit_active_impl(other, [&](auto index_tag, const auto& value) {
@@ -880,6 +931,7 @@ private:
 		}
 	}
 
+	/// @brief Move-constructs from another engaged variant, preserving valueless state otherwise.
 	void move_construct_from_impl(custom_indexed_variant& other) {
 		if (!other.valueless_by_exception()) {
 			visit_active_impl(other, [&](auto index_tag, auto& value) {
@@ -889,6 +941,7 @@ private:
 		}
 	}
 
+	/// @brief Assigns from another variant, either reusing the current alternative or replacing it.
 	template<typename Other>
 	custom_indexed_variant& assign_from_variant_impl(Other&& other) {
 		if (other.valueless_by_exception()) {
@@ -909,6 +962,7 @@ private:
 		return *this;
 	}
 
+	/// @brief Swaps payloads when both variants hold the same alternative index.
 	void swap_same_index_impl(custom_indexed_variant& other) {
 		visit_active_impl(*this, [&](auto index_tag, auto& value) {
 			using std::swap;
@@ -916,6 +970,9 @@ private:
 		});
 	}
 
+	/// @brief Swaps payloads when the variants hold different alternatives.
+	/// @details This route stages both values in temporaries so the raw storage can be torn down
+	///          and reconstructed with the opposite active alternatives.
 	template<std::size_t L, std::size_t R>
 	void swap_different_index_impl(custom_indexed_variant& other) {
 		using Left = detail::type_at_t<L, Types...>;
@@ -943,6 +1000,7 @@ private:
 		}
 	}
 
+	/// @brief Top-level swap state machine handling valueless, same-index, and different-index cases.
 	void swap_impl(custom_indexed_variant& other)
 		requires detail::all_swappable<Types...>::value && detail::all_move_constructible<Types...>::value {
 		if (this == &other) {
