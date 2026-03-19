@@ -5,6 +5,7 @@
 //
 // This file is part of the universal numbers project, which is released under an MIT Open Source license.
 #include <cstdlib>
+#include <array>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -253,6 +254,214 @@ void check_invariants(Vec& v, const TestContext& ctx, const char* label) {
 				check(ctx, &v[i] == v.data() + i, "contiguous storage");
 			}
 		}
+	}
+}
+
+template<typename Vec>
+std::vector<typename Vec::value_type> materialize(const Vec& v) {
+	return std::vector<typename Vec::value_type>(v.begin(), v.end());
+}
+
+template<typename LeftVec, typename RightVec>
+void check_same_vector_state(const TestContext& ctx, const LeftVec& left, const RightVec& right, const char* label) {
+	check(ctx, left.empty() == right.empty(), label);
+	check(ctx, left.size() == right.size(), label);
+	check(ctx, left.capacity() >= left.size(), label);
+	check(ctx, right.capacity() >= right.size(), label);
+	check(ctx, materialize(left) == materialize(right), label);
+	if (!left.empty() && !right.empty()) {
+		check(ctx, left.front() == right.front(), label);
+		check(ctx, left.back() == right.back(), label);
+	}
+}
+
+void run_vector_std_parity_suite(int& failures) {
+	TestContext ctx{"sso_vector(parity)", failures};
+	using CustomVec = sw::universal::internal::sso_vector_default<int>;
+	using StdVec = std::vector<int>;
+
+	{
+		CustomVec custom;
+		StdVec standard;
+		check_same_vector_state(ctx, custom, standard, "default construction parity");
+	}
+
+	{
+		CustomVec custom(4);
+		StdVec standard(4);
+		check_same_vector_state(ctx, custom, standard, "count construction parity");
+
+		CustomVec custom_fill(5, 9);
+		StdVec standard_fill(5, 9);
+		check_same_vector_state(ctx, custom_fill, standard_fill, "count-value construction parity");
+	}
+
+	{
+		const std::array<int, 5> values{1, 2, 3, 4, 5};
+		CustomVec custom_range(values.begin(), values.end());
+		StdVec standard_range(values.begin(), values.end());
+		check_same_vector_state(ctx, custom_range, standard_range, "range construction parity");
+
+		CustomVec custom_init{7, 8, 9};
+		StdVec standard_init{7, 8, 9};
+		check_same_vector_state(ctx, custom_init, standard_init, "initializer-list construction parity");
+	}
+
+	{
+		CustomVec custom;
+		StdVec standard;
+		for (int i = 0; i < 6; ++i) {
+			custom.push_back(i);
+			standard.push_back(i);
+		}
+		CustomVec custom_copy(custom);
+		StdVec standard_copy(standard);
+		check_same_vector_state(ctx, custom_copy, standard_copy, "copy construction parity");
+
+		CustomVec custom_move(std::move(custom_copy));
+		StdVec standard_move(std::move(standard_copy));
+		check_same_vector_state(ctx, custom_move, standard_move, "move construction parity");
+	}
+
+	{
+		CustomVec custom;
+		StdVec standard;
+		custom.assign(3, 4);
+		standard.assign(3, 4);
+		check_same_vector_state(ctx, custom, standard, "assign count-value parity");
+
+		const std::array<int, 4> values{8, 6, 7, 5};
+		custom.assign(values.begin(), values.end());
+		standard.assign(values.begin(), values.end());
+		check_same_vector_state(ctx, custom, standard, "assign range parity");
+	}
+
+	{
+		CustomVec custom;
+		StdVec standard;
+		custom.reserve(20);
+		standard.reserve(20);
+		check_same_vector_state(ctx, custom, standard, "reserve empty parity");
+
+		for (int i = 0; i < 10; ++i) {
+			custom.push_back(i);
+			standard.push_back(i);
+		}
+		custom.shrink_to_fit();
+		standard.shrink_to_fit();
+		check_same_vector_state(ctx, custom, standard, "shrink_to_fit parity");
+	}
+
+	{
+		CustomVec custom;
+		StdVec standard;
+		int value = 1;
+		custom.push_back(value);
+		standard.push_back(value);
+		custom.push_back(2);
+		standard.push_back(2);
+		custom.emplace_back(3);
+		standard.emplace_back(3);
+		check_same_vector_state(ctx, custom, standard, "push_back and emplace_back parity");
+
+		custom.pop_back();
+		standard.pop_back();
+		check_same_vector_state(ctx, custom, standard, "pop_back parity");
+	}
+
+	{
+		CustomVec custom{1, 2, 3};
+		StdVec standard{1, 2, 3};
+		custom.resize(6);
+		standard.resize(6);
+		check_same_vector_state(ctx, custom, standard, "resize(count) parity");
+		custom.resize(8, 9);
+		standard.resize(8, 9);
+		check_same_vector_state(ctx, custom, standard, "resize(count, value) parity");
+		custom.resize(4);
+		standard.resize(4);
+		check_same_vector_state(ctx, custom, standard, "resize shrink parity");
+	}
+
+	{
+		CustomVec custom{3, 1, 4, 1, 5};
+		StdVec standard{3, 1, 4, 1, 5};
+		check(ctx, custom[2] == standard[2], "operator[] read parity");
+		custom[2] = 9;
+		standard[2] = 9;
+		check_same_vector_state(ctx, custom, standard, "operator[] write parity");
+		check(ctx, custom.at(2) == standard.at(2), "at() parity");
+		expect_throw<std::out_of_range>(ctx, "custom at throws parity", [&]() { (void)custom.at(99); });
+		expect_throw<std::out_of_range>(ctx, "std at throws parity", [&]() { (void)standard.at(99); });
+		int* cp = custom.data();
+		int* sp = standard.data();
+		cp[0] = 8;
+		sp[0] = 8;
+		check_same_vector_state(ctx, custom, standard, "data() mutation parity");
+	}
+
+	{
+		CustomVec custom{0, 1, 2, 3};
+		StdVec standard{0, 1, 2, 3};
+		custom.insert(custom.begin() + 2, 99);
+		standard.insert(standard.begin() + 2, 99);
+		check_same_vector_state(ctx, custom, standard, "insert single parity");
+
+		custom.insert(custom.begin() + 1, 2, 7);
+		standard.insert(standard.begin() + 1, 2, 7);
+		check_same_vector_state(ctx, custom, standard, "insert count parity");
+
+		const std::array<int, 3> extra{4, 5, 6};
+		custom.insert(custom.begin() + 3, extra.begin(), extra.end());
+		standard.insert(standard.begin() + 3, extra.begin(), extra.end());
+		check_same_vector_state(ctx, custom, standard, "insert range parity");
+
+		custom.emplace(custom.begin() + 2, 123);
+		standard.emplace(standard.begin() + 2, 123);
+		check_same_vector_state(ctx, custom, standard, "emplace middle parity");
+	}
+
+	{
+		CustomVec custom{0, 1, 2, 3, 4, 5, 6};
+		StdVec standard{0, 1, 2, 3, 4, 5, 6};
+		custom.erase(custom.begin() + 2);
+		standard.erase(standard.begin() + 2);
+		check_same_vector_state(ctx, custom, standard, "erase one parity");
+
+		custom.erase(custom.begin() + 1, custom.begin() + 4);
+		standard.erase(standard.begin() + 1, standard.begin() + 4);
+		check_same_vector_state(ctx, custom, standard, "erase range parity");
+	}
+
+	{
+		CustomVec custom_a{1, 2, 3};
+		CustomVec custom_b{8, 9};
+		StdVec standard_a{1, 2, 3};
+		StdVec standard_b{8, 9};
+		custom_a.swap(custom_b);
+		standard_a.swap(standard_b);
+		check_same_vector_state(ctx, custom_a, standard_a, "swap left parity");
+		check_same_vector_state(ctx, custom_b, standard_b, "swap right parity");
+	}
+
+	{
+		CustomVec custom;
+		StdVec standard;
+		for (int i = 0; i < 5; ++i) {
+			custom.push_back(i);
+			standard.push_back(i);
+		}
+		custom.insert(custom.begin() + 1, 42);
+		standard.insert(standard.begin() + 1, 42);
+		custom.erase(custom.begin() + 3);
+		standard.erase(standard.begin() + 3);
+		custom.resize(8, 7);
+		standard.resize(8, 7);
+		custom.pop_back();
+		standard.pop_back();
+		custom.clear();
+		standard.clear();
+		check_same_vector_state(ctx, custom, standard, "mixed modifier sequence parity");
 	}
 }
 
@@ -571,6 +780,7 @@ int main() {
 	int nrOfFailedTestCases = 0;
 	run_sso_proxy_suite(nrOfFailedTestCases);
 	run_sso_cow_suite(nrOfFailedTestCases);
+	run_vector_std_parity_suite(nrOfFailedTestCases);
 	run_vector_suite<sso_vector_auto>("sso_vector", nrOfFailedTestCases);
 	run_vector_suite<std::vector>("std::vector", nrOfFailedTestCases);
 
