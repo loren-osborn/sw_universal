@@ -32,6 +32,7 @@ void check(const TestContext& ctx, bool condition, const char* label) {
 	}
 }
 
+// Lightweight throw checker used throughout the parity and custom-only suites.
 template<typename Exception, typename Fn>
 bool expect_throw(const TestContext& ctx, const char* label, Fn&& fn) {
 	try {
@@ -295,6 +296,7 @@ StrongGuaranteeExpectations compute_std_expectations() {
 }
 
 namespace variant_test {
+	// These adapters let the same parity tests target std::variant and custom_indexed_variant.
 	using std::get;
 	using std::get_if;
 	using std::holds_alternative;
@@ -336,6 +338,7 @@ struct VariantStateSummary {
 	std::string held;
 };
 
+// Summarize the observable variant state so parity tests can compare std/custom behavior directly.
 template<typename Variant>
 VariantStateSummary summarize_variant_state(const Variant& v) {
 	using namespace variant_test;
@@ -559,6 +562,7 @@ void run_encoded_index_tests(const char* impl_name, int& failures) {
 	TestContext ctx{impl_name, failures};
 
 		{
+			// Simple encoded-index policy: only the active index / valueless sentinel.
 			sw::universal::internal::simple_encoded_index<3> index{};
 			check(ctx, index.index() == std::variant_npos, "simple_encoded_index default index is std::variant_npos");
 		index.set_index(2);
@@ -568,6 +572,7 @@ void run_encoded_index_tests(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Sideband-carrying encoded index: index updates must preserve the sideband payload and vice versa.
 		using Index = sw::universal::internal::index_encoded_with_sideband_data<3>;
 		Index index{};
 		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data default index is std::variant_npos");
@@ -595,6 +600,7 @@ void run_encoded_index_tests(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Repeat at a different arity so the bit-width computation is exercised again.
 		using Index = sw::universal::internal::index_encoded_with_sideband_data<7>;
 		Index index{};
 		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data(7) default index is std::variant_npos");
@@ -612,6 +618,7 @@ void run_variant_std_parity_tests(int& failures) {
 	using Custom = CustomVariant<int, std::string, ThrowingType, LiveCountedType>;
 
 	{
+		// Default construction should match std::variant's first-alternative semantics.
 		Std sv;
 		Custom cv;
 		check_same_variant_state(ctx, cv, sv, "default construction parity");
@@ -621,6 +628,7 @@ void run_variant_std_parity_tests(int& failures) {
 	}
 
 	{
+		// In-place construction by both index and type should agree with std::variant.
 		Std sv(std::in_place_index<1>, "hello");
 		Custom cv(std::in_place_index<1>, "hello");
 		check_same_variant_state(ctx, cv, sv, "in_place_index parity");
@@ -633,6 +641,7 @@ void run_variant_std_parity_tests(int& failures) {
 	}
 
 	{
+		// Copy/move constructors should preserve the same observable active state.
 		Std sv(std::in_place_type<std::string>, "copy");
 		Custom cv(std::in_place_type<std::string>, "copy");
 		Std sv_copy(sv);
@@ -645,6 +654,7 @@ void run_variant_std_parity_tests(int& failures) {
 	}
 
 	{
+		// Assignments across alternatives are one of the easiest places for refactors to drift.
 		Std sv(3);
 		Custom cv(3);
 		sv = std::string("assign");
@@ -669,6 +679,7 @@ void run_variant_std_parity_tests(int& failures) {
 	}
 
 	{
+		// `emplace` is checked separately because it exercises destroy/reconstruct transitions.
 		Std sv(5);
 		Custom cv(5);
 		std::get<0>(sv) = 6;
@@ -685,6 +696,7 @@ void run_variant_std_parity_tests(int& failures) {
 	}
 
 	{
+		// Accessor parity covers const, non-const, pointer, and rvalue paths.
 		Std sv(std::in_place_type<std::string>, "access");
 		Custom cv(std::in_place_type<std::string>, "access");
 		const Std& csv = sv;
@@ -709,6 +721,7 @@ void run_variant_std_parity_tests(int& failures) {
 	}
 
 	{
+		// Swapping same-index and different-index alternatives exercises the active-state machine.
 		Std left_sv(10);
 		Custom left_cv(10);
 		Std right_sv(20);
@@ -729,6 +742,7 @@ void run_variant_std_parity_tests(int& failures) {
 	}
 
 	{
+		// This scenario deliberately churns through different alternatives to compare index transitions.
 		Std sv(1);
 		Custom cv(1);
 		std::array<int, 4> seen_std{};
@@ -760,6 +774,7 @@ void run_variant_std_parity_tests(int& failures) {
 	}
 
 	{
+		// Invalid-access behavior should surface as std::bad_variant_access in both implementations.
 		Std sv(std::in_place_type<std::string>, "bad");
 		Custom cv(std::in_place_type<std::string>, "bad");
 		expect_throw<std::bad_variant_access>(ctx, "bad get by index parity std", [&]() {
@@ -868,6 +883,7 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	if constexpr (requires(VariantT& v) { v.sideband(); }) {
+		// Custom-only behavior: sideband bits must survive ordinary alternative transitions.
 		VariantT v(std::in_place_type<std::string>, "sb");
 		auto sa = v.sideband();
 		auto sb = v.sideband();
@@ -1055,6 +1071,7 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	if constexpr (variant_test::is_custom_variant_v<VariantT>) {
+		// Custom-only behavior: construction failure before destruction should preserve the old state.
 		using ThrowBeforeDestroyVariant = Variant<int, ThrowBeforeDestroyType, std::string, LiveCountedType>;
 		ThrowBeforeDestroyType::reset();
 		ThrowBeforeDestroyVariant v(77);
@@ -1069,6 +1086,7 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	if constexpr (variant_test::is_custom_variant_v<VariantT>) {
+		// Custom-only behavior: assigning a valueless source exercises both destroy-active and no-op destroy paths.
 		ThrowingType::reset();
 		LiveCountedType::reset();
 		VariantT source(std::in_place_type<LiveCountedType>, LiveCountedType{44});
@@ -1131,6 +1149,7 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	if constexpr (variant_test::is_custom_variant_v<VariantT>) {
+		// Custom-only behavior: this path checks the "throw before either side is destroyed" swap case.
 		ThrowingType::reset();
 		VariantT left(11);
 		VariantT right(std::in_place_type<ThrowingType>, ThrowingType{5});

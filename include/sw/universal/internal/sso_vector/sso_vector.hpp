@@ -77,16 +77,17 @@ inline constexpr std::size_t default_inline_elems() noexcept {
 /// - field 1: refcount, width = remainder (all higher bits)
 using header_word = std::uint64_t;
 
-using header_bits = bitfield_pack<
-	header_word,
-	bitfield_field_spec<1>,
-	bitfield_remainder
->;
-
 enum header_field : std::size_t {
 	SHAREABLE = 0,
 	REFCOUNT = 1,
 };
+
+using header_bits = bitfield_pack<
+	header_word,
+	header_field,
+	bitfield_field_spec<1>,
+	bitfield_remainder
+>;
 
 static_assert(header_bits::template field_width<REFCOUNT>() > 0, "sso_vector: header refcount remainder must be non-zero width");
 
@@ -238,7 +239,7 @@ inline void clear_shareable(heap_block<T>* b) noexcept {
 template<typename T, std::size_t N, typename Allocator = std::allocator<T>>
 class sso_vector;
 
-// N==0 specialization: degrade to std::vector.
+/// @brief `N == 0` specialization that falls back directly to `std::vector`.
 template<typename T, typename Allocator>
 class sso_vector<T, 0, Allocator> : public std::vector<T, Allocator> {
 	using base = std::vector<T, Allocator>;
@@ -246,6 +247,17 @@ public:
 	using base::base;
 };
 
+/// @brief Vector-like container with inline storage plus copy-on-write heap storage.
+/// @tparam T Element type.
+/// @tparam N Number of elements that fit in the inline buffer before heap promotion.
+/// @tparam Allocator Allocator used for heap storage.
+/// @details The representation is a two-alternative `custom_indexed_variant`:
+/// - alternative 0: inline storage for up to `N` elements
+/// - alternative 1: heap block with a shared reference-counted header
+///
+/// Non-const element access uses proxy references/iterators so ordinary indexing does not
+/// immediately force a mutable raw pointer. Mutable `data()` explicitly clears shareability and
+/// ensures unique ownership before returning `T*`.
 template<typename T, std::size_t N, typename Allocator>
 class sso_vector {
 public:
@@ -263,12 +275,14 @@ public:
 	class iterator_proxy;
 
 private:
+	/// @brief Inline storage alternative used while `size() <= N`.
 	struct inline_storage {
 		alignas(T) std::byte buf[sizeof(T) * N]{};
 		T* data() noexcept { return std::launder(reinterpret_cast<T*>(buf)); }
 		const T* data() const noexcept { return std::launder(reinterpret_cast<const T*>(buf)); }
 	};
 
+	/// @brief Heap storage alternative pointing at the shared heap block.
 	struct heap_storage {
 		sso_vector_detail::heap_block<T>* block = nullptr;
 		T* data() noexcept { return sso_vector_detail::block_data(block); }
@@ -276,28 +290,38 @@ private:
 		size_type capacity() const noexcept { return block ? block->capacity : 0; }
 	};
 
+	/// @brief Representation variant: inline storage plus sideband size, or heap storage plus sideband size.
 	using variant_t = custom_indexed_variant<index_encoded_with_sideband_data, inline_storage, heap_storage>;
 
+	/// @brief Converts encoded sideband bits into the public `size_type`.
 	static size_type sideband_to_size(std::size_t v) noexcept { return static_cast<size_type>(v); }
+	/// @brief Converts public `size_type` into encoded sideband bits.
 	static std::size_t size_to_sideband(size_type v) noexcept { return static_cast<std::size_t>(v); }
 
 	// ------------------------ representation inspection ------------------------
 
+	/// @brief Reads the logical size stored in the variant sideband.
 	size_type size_impl() const noexcept {
 		return sideband_to_size(static_cast<std::size_t>(state_.sideband().val()));
 	}
+	/// @brief Writes the logical size into the variant sideband.
 	void set_size_impl(size_type n) noexcept {
 		state_.sideband().set_val(size_to_sideband(n));
 	}
 
+	/// @brief Returns true when the active representation is inline storage.
 	bool is_inline_impl() const noexcept { return state_.index() == 0; }
+	/// @brief Returns true when the active representation is heap storage.
 	bool is_heap_impl() const noexcept { return state_.index() == 1; }
 
+	/// @brief Accesses the inline-storage representation.
 	inline_storage& inline_storage_impl() noexcept { return state_.template get<0>(); }
 	const inline_storage& inline_storage_impl() const noexcept { return state_.template get<0>(); }
+	/// @brief Accesses the heap-storage representation.
 	heap_storage& heap_storage_impl() noexcept { return state_.template get<1>(); }
 	const heap_storage& heap_storage_impl() const noexcept { return state_.template get<1>(); }
 
+	/// @brief Returns the active heap block pointer, or `nullptr` when not on the heap.
 	sso_vector_detail::heap_block<T>* heap_block_impl() noexcept {
 		return is_heap_impl() ? heap_storage_impl().block : nullptr;
 	}
@@ -305,25 +329,31 @@ private:
 		return is_heap_impl() ? heap_storage_impl().block : nullptr;
 	}
 
+	/// @brief Returns the current capacity exposed by the active representation.
 	size_type capacity_impl() const noexcept {
 		return is_inline_impl() ? N : heap_storage_impl().capacity();
 	}
 
+	/// @brief Returns the raw element pointer without forcing uniqueness.
 	const T* data_const_impl() const noexcept {
 		return is_inline_impl() ? inline_storage_impl().data() : heap_storage_impl().data();
 	}
+	/// @brief Returns the mutable raw element pointer without clearing shareability or detaching.
+	/// @warning Callers must already have enforced any required uniqueness policy.
 	T* data_mut_no_cow_impl() noexcept {
 		return is_inline_impl() ? inline_storage_impl().data() : heap_storage_impl().data();
 	}
 
 	// ------------------------ lifetime helpers ------------------------
 
+	/// @brief Destroys a half-open element range `[first, last)`.
 	void destroy_range_impl(T* first, T* last) noexcept {
 		for (; first != last; ++first) {
 			std::allocator_traits<Allocator>::destroy(alloc_, first);
 		}
 	}
 
+	/// @brief Copy-constructs `n` elements into uninitialized storage.
 	void copy_construct_range_impl(T* dst, const T* src, size_type n) {
 		size_type constructed = 0;
 		try {
@@ -336,6 +366,7 @@ private:
 		}
 	}
 
+	/// @brief Move-constructs `n` elements into uninitialized storage using `move_if_noexcept`.
 	void move_construct_range_impl(T* dst, T* src, size_type n) {
 		size_type constructed = 0;
 		try {
@@ -349,6 +380,7 @@ private:
 		}
 	}
 
+	/// @brief Default-constructs appended elements in the half-open range `[from, to)`.
 	void default_construct_appended_impl(T* d, size_type from, size_type to) {
 		size_type constructed = 0;
 		try {
@@ -363,6 +395,7 @@ private:
 		}
 	}
 
+	/// @brief Copy-constructs appended elements initialized from `value` in `[from, to)`.
 	void fill_construct_appended_impl(T* d, size_type from, size_type to, const T& value) {
 		size_type constructed = 0;
 		try {
@@ -379,6 +412,7 @@ private:
 
 	// ------------------------ heap/state transitions ------------------------
 
+	/// @brief Releases one reference to a heap block, destroying elements and deallocating if it becomes unique-to-zero.
 	void release_heap_block_impl(sso_vector_detail::heap_block<T>* b, size_type constructed) noexcept {
 		if (!b) return;
 		if (sso_vector_detail::dec_ref(b)) {
@@ -390,6 +424,7 @@ private:
 		}
 	}
 
+	/// @brief Releases the active heap representation, if any.
 	void release_heap_impl() noexcept {
 		if (!is_heap_impl()) return;
 		auto& h = heap_storage_impl();
@@ -399,7 +434,9 @@ private:
 		h.block = nullptr;
 	}
 
-	// Detach if shared (refcount>1). Shareable only controls share-on-copy; it does not prevent detach.
+	/// @brief Detaches from shared heap storage when the active block has `refcount > 1`.
+	/// @details Shareability controls whether future copies may share; it does not prevent detaching
+	///          for mutation. This helper allocates a fresh heap block and copies the active payload.
 	void ensure_unique_heap_impl() {
 		if (!is_heap_impl()) return;
 		auto& h = heap_storage_impl();
@@ -433,6 +470,7 @@ private:
 		release_heap_block_impl(old_block, n);
 	}
 
+	/// @brief Promotes inline storage to a fresh heap block with capacity `new_cap`.
 	void promote_inline_to_heap_impl(size_type new_cap) {
 		assert(is_inline_impl());
 		if (new_cap < 1) new_cap = 1;
@@ -455,6 +493,7 @@ private:
 		state_.template emplace<1>(h);
 	}
 
+	/// @brief Reallocates the active heap representation into a fresh block with capacity `new_cap`.
 	void reallocate_heap_impl(size_type new_cap) {
 		assert(is_heap_impl());
 		auto& h = heap_storage_impl();
@@ -481,11 +520,13 @@ private:
 		h.block = new_block;
 	}
 
+	/// @brief Computes conceptual geometric growth capacity for heap transitions.
 	static size_type growth_capacity(size_type desired, size_type current) noexcept {
 		const size_type doubled = current ? current * 2 : 1;
 		return (std::max)(desired, doubled);
 	}
 
+	/// @brief Ensures capacity for `desired` elements, promoting or reallocating as needed.
 	void ensure_capacity_impl(size_type desired) {
 		const size_type cap = capacity_impl();
 		if (desired <= cap) return;
@@ -502,21 +543,25 @@ private:
 		reallocate_heap_impl(growth_capacity(desired, cap));
 	}
 
+	/// @brief Ensures the active heap block is uniquely owned before mutation.
 	void ensure_mutable_heap_impl() {
 		if (is_heap_impl()) ensure_unique_heap_impl();
 	}
 
+	/// @brief Destroys active elements and releases heap ownership, leaving storage reset.
 	void reset_storage_impl() noexcept {
 		clear_impl();
 		release_heap_impl();
 	}
 
+	/// @brief Resets the container to an empty inline-storage state.
 	void reset_to_inline_empty_impl() noexcept {
 		reset_storage_impl();
 		state_.template emplace<0>();
 		set_size_impl(0);
 	}
 
+	/// @brief Copies the observable contents/state from another vector, sharing heap storage only when allowed.
 	void copy_from_impl(const sso_vector& other) {
 		set_size_impl(other.size());
 		if (other.is_inline_impl()) {
@@ -553,6 +598,7 @@ private:
 		heap_storage_impl().block = nb;
 	}
 
+	/// @brief Destroys all active elements while preserving the current representation shell.
 	void clear_impl() noexcept {
 		const size_type n = size_impl();
 		if (n == 0) {
@@ -571,6 +617,9 @@ private:
 		set_size_impl(0);
 	}
 
+	/// @brief Clears heap shareability and detaches before returning mutable raw access.
+	/// @details This is the policy behind non-const `data()`: once a raw `T*` escapes, future copies
+	///          must not share the block because uncontrolled external mutation is now possible.
 	void clear_shareable_and_ensure_unique_impl() {
 		if (auto* block = heap_block_impl()) {
 			sso_vector_detail::clear_shareable(block);
@@ -578,6 +627,8 @@ private:
 		}
 	}
 
+	// Modifier primitives.
+	/// @brief Appends one element at the end and returns a proxy reference to it.
 	template<class... Args>
 	reference_proxy emplace_back_impl(Args&&... args) {
 		const size_type n = size_impl();
@@ -589,6 +640,7 @@ private:
 		return reference(this, n);
 	}
 
+	/// @brief Removes the last element when present.
 	void pop_back_impl() {
 		const size_type n = size_impl();
 		if (n == 0) return;
@@ -598,6 +650,7 @@ private:
 		set_size_impl(n - 1);
 	}
 
+	/// @brief Resizes with value-initialized appended elements when growing.
 	void resize_impl(size_type count) {
 		const size_type n = size_impl();
 		if (count == n) return;
@@ -618,6 +671,7 @@ private:
 		set_size_impl(count);
 	}
 
+	/// @brief Resizes with copies of `value` when growing.
 	void resize_impl(size_type count, const T& value) {
 		const size_type n = size_impl();
 		if (count == n) return;
@@ -638,6 +692,7 @@ private:
 		set_size_impl(count);
 	}
 
+	/// @brief Replaces the contents with `count` copies of `value`.
 	void assign_fill_impl(size_type count, const T& value) {
 		clear_impl();
 		ensure_capacity_impl(count);
@@ -656,6 +711,8 @@ private:
 		set_size_impl(count);
 	}
 
+	/// @brief Attempts to discard excess capacity while preserving contents.
+	/// @details For small sizes this may demote heap storage back into the inline buffer.
 	void shrink_to_fit_impl() {
 		const size_type n = size_impl();
 		if (n == 0) {
@@ -680,6 +737,8 @@ private:
 		reallocate_heap_impl(n);
 	}
 
+	/// @brief Inserts one element at index `idx`, shifting the tail as required.
+	/// @note Middle insertion preserves the existing basic-exception-safety behavior.
 	template<class... Args>
 	iterator_proxy emplace_at_impl(size_type idx, Args&&... args) {
 		const size_type n = size_impl();
@@ -706,6 +765,7 @@ private:
 		return iterator(this, idx);
 	}
 
+	/// @brief Erases one element at index `idx`, preserving order of the remaining elements.
 	iterator_proxy erase_one_impl(size_type idx) {
 		const size_type n = size_impl();
 		if (idx >= n) return end();
@@ -719,6 +779,7 @@ private:
 		return iterator(this, idx);
 	}
 
+	/// @brief Erases a half-open index range `[idx_first, idx_last)`, preserving order.
 	iterator_proxy erase_range_impl(size_type idx_first, size_type idx_last) {
 		const size_type n = size_impl();
 		if (idx_first >= n || idx_first >= idx_last) return iterator(this, idx_first);
@@ -735,6 +796,9 @@ private:
 		return iterator(this, idx_first);
 	}
 
+	/// @brief Swaps the representation variant while manually preserving the sideband size payload.
+	/// @warning This exists because the underlying `custom_indexed_variant` swap does not yet offer
+	///          a dedicated "swap payload plus sideband" primitive.
 	void swap_state_impl(sso_vector& other) noexcept {
 		// TODO(custom_indexed_variant): move this sideband-preservation logic into a shared
 		// variant swap primitive once custom_indexed_variant guarantees sideband swap semantics.
@@ -763,9 +827,10 @@ public:
 			: owner_(owner), index_(index) {}
 
 		// Read access (no detach)
+		/// @brief Reads the referenced element by value without detaching shared storage.
 		operator T() const { return owner_->data_const_impl()[index_]; }
 
-		// Write access (detach if needed, then write)
+		// Write access detaches shared heap storage first, but does not clear shareability on its own.
 		reference_proxy& operator=(const T& v) {
 			owner_->ensure_mutable_heap_impl();
 			owner_->data_mut_no_cow_impl()[index_] = v;
@@ -804,6 +869,7 @@ public:
 
 		iterator_proxy() = default;
 		iterator_proxy(sso_vector* owner, size_type index) noexcept : owner_(owner), index_(index) {}
+		/// @brief Returns the current logical element index within the owning vector.
 		size_type index() const noexcept { return index_; }
 
 		reference operator*() const noexcept { return reference(owner_, index_); }
@@ -853,52 +919,62 @@ public:
 
 	// ------------------------ ctors/dtor ------------------------
 
+	/// @brief Constructs an empty vector using a default-constructed allocator.
 	sso_vector() noexcept(noexcept(Allocator()))
 		: sso_vector(Allocator()) {}
 
+	/// @brief Constructs an empty vector with the supplied allocator.
 	explicit sso_vector(const Allocator& alloc) noexcept
 		: alloc_(alloc), state_(std::in_place_index<0>) {
 		set_size_impl(0);
 	}
 
+	/// @brief Constructs `count` value-initialized elements.
 	sso_vector(size_type count, const Allocator& alloc = Allocator())
 		: sso_vector(alloc) {
 		resize(count);
 	}
 
+	/// @brief Constructs `count` copies of `value`.
 	sso_vector(size_type count, const T& value, const Allocator& alloc = Allocator())
 		: sso_vector(alloc) {
 		assign(count, value);
 	}
 
+	/// @brief Range constructor for non-integral iterator types.
 	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	sso_vector(InputIt first, InputIt last, const Allocator& alloc = Allocator())
 		: sso_vector(alloc) {
 		assign(first, last);
 	}
 
+	/// @brief Initializer-list constructor.
 	sso_vector(std::initializer_list<T> init, const Allocator& alloc = Allocator())
 		: sso_vector(init.begin(), init.end(), alloc) {}
 
-	// Copy: share heap iff shareable==1; else deep clone.
+	/// @brief Copy constructor.
+	/// @details Heap storage is shared only when the source block is still marked shareable.
 	sso_vector(const sso_vector& other)
 		: alloc_(std::allocator_traits<Allocator>::select_on_container_copy_construction(other.alloc_))
 		, state_(std::in_place_index<0>) {
 		copy_from_impl(other);
 	}
 
+	/// @brief Move constructor implemented in terms of `swap`.
 	sso_vector(sso_vector&& other) noexcept
 		: alloc_(std::move(other.alloc_)), state_(std::in_place_index<0>) {
 		set_size_impl(0);
 		swap(other);
 	}
 
+	/// @brief Destroys all elements and releases heap ownership.
 	~sso_vector() {
 		reset_storage_impl();
 	}
 
 	// ------------------------ assignment ------------------------
 
+	/// @brief Copy assignment with allocator propagation behavior matching allocator traits.
 	sso_vector& operator=(const sso_vector& other) {
 		if (this == &other) return *this;
 
@@ -914,6 +990,7 @@ public:
 		return *this;
 	}
 
+	/// @brief Move assignment with allocator propagation behavior matching allocator traits.
 	sso_vector& operator=(sso_vector&& other) noexcept(std::allocator_traits<Allocator>::is_always_equal::value) {
 		if (this == &other) return *this;
 
@@ -936,7 +1013,8 @@ public:
 		return (*this)[pos];
 	}
 
-	// Non-const operator[] returns proxy (no detach on read; detach on write).
+	/// @brief Proxy-based subscript for mutable access.
+	/// @details Reading through the proxy does not detach. Writing through it detaches shared heap storage.
 	reference operator[](size_type pos) noexcept { return reference(this, pos); }
 	const_reference operator[](size_type pos) const noexcept { return data_const_impl()[pos]; }
 
@@ -948,7 +1026,8 @@ public:
 
 	const_pointer data() const noexcept { return data_const_impl(); }
 
-	// Non-const data(): hands out raw mutable pointer -> clear SHAREABLE, then ensure unique.
+	/// @brief Returns mutable contiguous storage.
+	/// @warning This explicitly clears shareability and ensures uniqueness before handing out `T*`.
 	pointer data() {
 		clear_shareable_and_ensure_unique_impl();
 		return data_mut_no_cow_impl();
@@ -976,35 +1055,46 @@ public:
 
 	size_type capacity() const noexcept { return capacity_impl(); }
 
+	/// @brief Ensures capacity for at least `new_cap` elements.
 	void reserve(size_type new_cap) {
 		if (new_cap <= capacity()) return;
 		ensure_capacity_impl(new_cap);
 	}
 
+	/// @brief Requests capacity reduction while preserving contents.
 	void shrink_to_fit() {
 		shrink_to_fit_impl();
 	}
 
 	// ------------------------ modifiers ------------------------
 
+	/// @brief Destroys all elements while retaining the representation shell.
 	void clear() noexcept { clear_impl(); }
 
+	/// @brief Appends one copy of `value`.
 	void push_back(const T& value) { emplace_back(value); }
+	/// @brief Appends one moved-from `value`.
 	void push_back(T&& value) { emplace_back(std::move(value)); }
 
+	/// @brief Appends one element constructed in place.
 	template<class... Args>
 	reference emplace_back(Args&&... args) {
 		return emplace_back_impl(std::forward<Args>(args)...);
 	}
 
+	/// @brief Removes the final element if present.
 	void pop_back() { pop_back_impl(); }
 
+	/// @brief Resizes using value-initialization when growing.
 	void resize(size_type count) { resize_impl(count); }
 
+	/// @brief Resizes using copies of `value` when growing.
 	void resize(size_type count, const T& value) { resize_impl(count, value); }
 
+	/// @brief Replaces the contents with `count` copies of `value`.
 	void assign(size_type count, const T& value) { assign_fill_impl(count, value); }
 
+	/// @brief Replaces the contents from an input range.
 	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	void assign(InputIt first, InputIt last) {
 		clear_impl();

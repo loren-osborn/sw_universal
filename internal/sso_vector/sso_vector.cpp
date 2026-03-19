@@ -31,6 +31,7 @@ void check(const TestContext& ctx, bool condition, const char* label) {
 	}
 }
 
+// Shared helper for exception-path checks in both parity and custom-only tests.
 template<typename Exception, typename Fn>
 bool expect_throw(const TestContext& ctx, const char* label, Fn&& fn) {
 	try {
@@ -257,11 +258,13 @@ void check_invariants(Vec& v, const TestContext& ctx, const char* label) {
 	}
 }
 
+// Convert any vector-like object into plain std::vector contents for parity comparison.
 template<typename Vec>
 std::vector<typename Vec::value_type> materialize(const Vec& v) {
 	return std::vector<typename Vec::value_type>(v.begin(), v.end());
 }
 
+// Parity tests compare observable container state and contents, not exact growth policy.
 template<typename LeftVec, typename RightVec>
 void check_same_vector_state(const TestContext& ctx, const LeftVec& left, const RightVec& right, const char* label) {
 	check(ctx, left.empty() == right.empty(), label);
@@ -281,12 +284,14 @@ void run_vector_std_parity_suite(int& failures) {
 	using StdVec = std::vector<int>;
 
 	{
+		// Default state parity.
 		CustomVec custom;
 		StdVec standard;
 		check_same_vector_state(ctx, custom, standard, "default construction parity");
 	}
 
 	{
+		// Constructor parity for count and count+value forms.
 		CustomVec custom(4);
 		StdVec standard(4);
 		check_same_vector_state(ctx, custom, standard, "count construction parity");
@@ -297,6 +302,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Range and initializer-list construction parity.
 		const std::array<int, 5> values{1, 2, 3, 4, 5};
 		CustomVec custom_range(values.begin(), values.end());
 		StdVec standard_range(values.begin(), values.end());
@@ -308,6 +314,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Copy and move construction should preserve the same contents/order.
 		CustomVec custom;
 		StdVec standard;
 		for (int i = 0; i < 6; ++i) {
@@ -324,6 +331,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Assignment scenarios cover both fill and range replacement.
 		CustomVec custom;
 		StdVec standard;
 		custom.assign(3, 4);
@@ -337,6 +345,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Capacity tests stay conservative: semantic parity plus capacity >= size invariants.
 		CustomVec custom;
 		StdVec standard;
 		custom.reserve(20);
@@ -353,6 +362,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Append/remove paths exercise end growth without assuming matching growth factors.
 		CustomVec custom;
 		StdVec standard;
 		int value = 1;
@@ -370,6 +380,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Resize parity covers both growth and shrink paths.
 		CustomVec custom{1, 2, 3};
 		StdVec standard{1, 2, 3};
 		custom.resize(6);
@@ -384,6 +395,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Element-access parity checks observable semantics, including mutable data().
 		CustomVec custom{3, 1, 4, 1, 5};
 		StdVec standard{3, 1, 4, 1, 5};
 		check(ctx, custom[2] == standard[2], "operator[] read parity");
@@ -401,6 +413,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Insert/emplace parity covers both end and middle operations.
 		CustomVec custom{0, 1, 2, 3};
 		StdVec standard{0, 1, 2, 3};
 		custom.insert(custom.begin() + 2, 99);
@@ -422,6 +435,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Erase parity checks order preservation after one-element and range erasure.
 		CustomVec custom{0, 1, 2, 3, 4, 5, 6};
 		StdVec standard{0, 1, 2, 3, 4, 5, 6};
 		custom.erase(custom.begin() + 2);
@@ -434,6 +448,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Swap parity covers both content exchange and size/capacity invariants.
 		CustomVec custom_a{1, 2, 3};
 		CustomVec custom_b{8, 9};
 		StdVec standard_a{1, 2, 3};
@@ -445,6 +460,7 @@ void run_vector_std_parity_suite(int& failures) {
 	}
 
 	{
+		// Mixed modifier sequence acts as a small scenario test over several public APIs.
 		CustomVec custom;
 		StdVec standard;
 		for (int i = 0; i < 5; ++i) {
@@ -469,6 +485,7 @@ void run_sso_proxy_suite(int& failures) {
 	using Vec = sw::universal::internal::sso_vector_default<int>;
 	TestContext ctx{"sso_vector(proxy)", failures};
 
+	// Custom-only behavior: non-const indexing/iteration uses proxy objects instead of raw references.
 	Vec v;
 	v.push_back(11);
 	v.push_back(22);
@@ -484,6 +501,7 @@ void run_sso_cow_suite(int& failures) {
 	TestContext ctx{"sso_vector(cow)", failures};
 
 	{
+		// Copy-on-write: copying a shareable heap block should share until a write detaches it.
 		Vec a;
 		a.reserve(64);
 		for (int i = 0; i < 12; ++i) a.push_back(i);
@@ -500,6 +518,7 @@ void run_sso_cow_suite(int& failures) {
 	}
 
 	{
+		// Mutable data() explicitly clears shareability so future copies deep-copy instead of sharing.
 		Vec v;
 		v.reserve(48);
 		for (int i = 0; i < 10; ++i) v.push_back(i);
@@ -514,6 +533,7 @@ void run_sso_cow_suite(int& failures) {
 	}
 
 	{
+		// Mutating operations on a shared heap block should detach before modifying observable contents.
 		Vec base;
 		base.reserve(96);
 		for (int i = 0; i < 16; ++i) base.push_back(i);
@@ -528,6 +548,7 @@ void run_sso_cow_suite(int& failures) {
 	}
 
 	{
+		// Concurrency smoke test: repeated share-only copies should leave the source vector unchanged.
 		Vec shared;
 		shared.reserve(64);
 		for (int i = 0; i < 8; ++i) shared.push_back(i * 3);
