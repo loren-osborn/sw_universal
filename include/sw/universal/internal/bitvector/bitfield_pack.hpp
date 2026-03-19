@@ -52,6 +52,78 @@
 
 namespace sw::universal {
 
+/// @example
+/// @code
+/// // These are field indicies:
+/// enum class ieee754_f32_field : std::size_t {
+///     mantissa       =    0,
+///     exponent       =    1,
+///     sign           =    2
+/// };
+/// // These are for interperting exponent:
+/// enum class ieee754_f32_exponent_detail : signed int {
+///     exponent__bias =  127,
+///     // These are only needed to compute...
+///     exponent__bits =    8,
+///     prebiased_min  =    0,
+///     prebiased_max  =  (1 << exponent__bits) - 1,
+///     // ...these:
+///     subnormal      =  prebiased_min - exponent__bias,
+///     inf_or_nan     =  prebiased_max - exponent__bias,
+/// };
+///
+/// template <std::size_t Width, typename ExportT, ExportT Bias>
+/// struct biased_bitfield_field_width {
+///    template<typename StorageT>
+///    struct for_storage_t: public bitfield_field_width<Width, ExportT>::template for_storage_t<StorageT> {
+///        static constexpr StorageT encode(ExportT v) noexcept {
+///            return static_cast<StorageT>(v + Bias);
+///        }
+///        static constexpr ExportT decode(StorageT v) noexcept {
+///            return (static_cast<ExportT>(v) - Bias);
+///        }
+///    };
+/// };
+///
+/// using ieee754_f32_bits = bitfield_pack<
+///     bitfield_word_spec<std::uint32_t, float>,
+///     ieee754_f32_field,
+///     bitfield_remainder,            // mantissa (remainder == (32 - (8+1)) == 23)
+///     biased_bitfield_field_width<
+///         // The next line would normally just be explicitly `8,` except we
+///         // already defined it and want a single source of truth:
+///         static_cast<std::size_t>(ieee754_f32_exponent_detail::exponent__bits),
+///         signed int,
+///         static_cast<signed int>(ieee754_f32_exponent_detail::exponent__bias)
+///     >,                             // exponent
+///     bitfield_field_width<1, bool>  // sign
+/// >;
+///
+/// ieee754_f32_bits bits;
+/// bits.set_raw(1.0f);
+///
+/// auto mantissa = bits.template get_bits<ieee754_f32_field::mantissa>();
+/// auto exponent = bits.template get_bits<ieee754_f32_field::exponent>();
+/// auto sign = bits.template get<ieee754_f32_field::sign>();
+///
+/// // for 1.0f:
+/// // (0 ? -1 : 1) * (1.0 + (0 / 2^23)) * 2^0
+/// //  ^ sign                ^ mantissa     ^ exponent
+/// assert(mantissa == 0);
+/// assert(exponent == 0);
+/// assert(sign     == 0);
+///
+/// // for 3.1415927f:
+/// // (0 ? -1 : 1) * (1.0 + (4788187 / 2^23)) * 2^1
+/// //  ^ sign                ^ mantissa           ^ exponent
+/// bits.template set<ieee754_f32_field::mantissa>(4788187);
+/// bits.template set<ieee754_f32_field::exponent>(1);
+/// bits.template set<ieee754_f32_field::sign>(0);
+///
+/// float round_trip = bits.raw();
+/// assert(std::abs(round_trip - 3.1415927f) < 0.000001);
+/// @endcode
+
 namespace bitfield_pack_detail {
 
 /// @brief Convenience false value for dependent static_assert branches.
