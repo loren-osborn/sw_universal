@@ -6,6 +6,7 @@
 // This file is part of the universal numbers project, which is released under an MIT Open Source license.
 #include <cstdlib>
 #include <array>
+#include <initializer_list>
 #include <iostream>
 #include <iterator>
 #include <memory>
@@ -159,6 +160,180 @@ int ThrowingType::throw_on_move = -1;
 int ThrowingType::throw_on_copy_assign = -1;
 int ThrowingType::throw_on_move_assign = -1;
 
+struct LifetimeTrackedStats {
+	int default_ctor = 0;
+	int value_ctor = 0;
+	int copy_ctor = 0;
+	int move_ctor = 0;
+	int copy_assign = 0;
+	int move_assign = 0;
+	int dtor = 0;
+	int live = 0;
+	int next_serial = 0;
+};
+
+struct LifetimeTracked {
+	inline static LifetimeTrackedStats stats{};
+
+	int value = 0;
+	int serial = 0;
+
+	static void reset() {
+		stats = {};
+	}
+
+	static LifetimeTrackedStats snapshot() {
+		return stats;
+	}
+
+	LifetimeTracked() : value(0), serial(++stats.next_serial) {
+		++stats.default_ctor;
+		++stats.live;
+	}
+
+	explicit LifetimeTracked(int v) : value(v), serial(++stats.next_serial) {
+		++stats.value_ctor;
+		++stats.live;
+	}
+
+	LifetimeTracked(const LifetimeTracked& other) : value(other.value), serial(++stats.next_serial) {
+		++stats.copy_ctor;
+		++stats.live;
+	}
+
+	LifetimeTracked(LifetimeTracked&& other) noexcept : value(other.value), serial(++stats.next_serial) {
+		other.value = -1;
+		++stats.move_ctor;
+		++stats.live;
+	}
+
+	LifetimeTracked& operator=(const LifetimeTracked& other) {
+		value = other.value;
+		++stats.copy_assign;
+		return *this;
+	}
+
+	LifetimeTracked& operator=(LifetimeTracked&& other) noexcept {
+		value = other.value;
+		other.value = -1;
+		++stats.move_assign;
+		return *this;
+	}
+
+	~LifetimeTracked() {
+		++stats.dtor;
+		--stats.live;
+	}
+};
+
+struct LifetimeThrowingTracked {
+	inline static int live = 0;
+	inline static int default_ctor_count = 0;
+	inline static int copy_ctor_count = 0;
+	inline static int move_ctor_count = 0;
+	inline static int copy_assign_count = 0;
+	inline static int move_assign_count = 0;
+	inline static int transfer_count = 0;
+	inline static int dtor_count = 0;
+	inline static int next_serial = 0;
+	inline static int throw_on_default_ctor = -1;
+	inline static int throw_on_copy_ctor = -1;
+	inline static int throw_on_move_ctor = -1;
+	inline static int throw_on_copy_assign = -1;
+	inline static int throw_on_move_assign = -1;
+	inline static int throw_on_transfer = -1;
+
+	int value = 0;
+	int serial = 0;
+
+	static void reset() {
+		live = 0;
+		default_ctor_count = 0;
+		copy_ctor_count = 0;
+		move_ctor_count = 0;
+		copy_assign_count = 0;
+		move_assign_count = 0;
+		transfer_count = 0;
+		dtor_count = 0;
+		next_serial = 0;
+		throw_on_default_ctor = -1;
+		throw_on_copy_ctor = -1;
+		throw_on_move_ctor = -1;
+		throw_on_copy_assign = -1;
+		throw_on_move_assign = -1;
+		throw_on_transfer = -1;
+	}
+
+	LifetimeThrowingTracked() : value(0), serial(++next_serial) {
+		++default_ctor_count;
+		if (throw_on_default_ctor >= 0 && default_ctor_count == throw_on_default_ctor) {
+			throw std::runtime_error("LifetimeThrowingTracked default construction");
+		}
+		++live;
+	}
+
+	explicit LifetimeThrowingTracked(int v) : value(v), serial(++next_serial) {
+		++live;
+	}
+
+	LifetimeThrowingTracked(const LifetimeThrowingTracked& other) : value(other.value), serial(++next_serial) {
+		++copy_ctor_count;
+		++transfer_count;
+		if (throw_on_copy_ctor >= 0 && copy_ctor_count == throw_on_copy_ctor) {
+			throw std::runtime_error("LifetimeThrowingTracked copy construction");
+		}
+		if (throw_on_transfer >= 0 && transfer_count == throw_on_transfer) {
+			throw std::runtime_error("LifetimeThrowingTracked transfer");
+		}
+		++live;
+	}
+
+	LifetimeThrowingTracked(LifetimeThrowingTracked&& other) : value(other.value), serial(++next_serial) {
+		other.value = -1;
+		++move_ctor_count;
+		++transfer_count;
+		if (throw_on_move_ctor >= 0 && move_ctor_count == throw_on_move_ctor) {
+			throw std::runtime_error("LifetimeThrowingTracked move construction");
+		}
+		if (throw_on_transfer >= 0 && transfer_count == throw_on_transfer) {
+			throw std::runtime_error("LifetimeThrowingTracked transfer");
+		}
+		++live;
+	}
+
+	LifetimeThrowingTracked& operator=(const LifetimeThrowingTracked& other) {
+		++copy_assign_count;
+		++transfer_count;
+		if (throw_on_copy_assign >= 0 && copy_assign_count == throw_on_copy_assign) {
+			throw std::runtime_error("LifetimeThrowingTracked copy assignment");
+		}
+		if (throw_on_transfer >= 0 && transfer_count == throw_on_transfer) {
+			throw std::runtime_error("LifetimeThrowingTracked transfer");
+		}
+		value = other.value;
+		return *this;
+	}
+
+	LifetimeThrowingTracked& operator=(LifetimeThrowingTracked&& other) {
+		++move_assign_count;
+		++transfer_count;
+		if (throw_on_move_assign >= 0 && move_assign_count == throw_on_move_assign) {
+			throw std::runtime_error("LifetimeThrowingTracked move assignment");
+		}
+		if (throw_on_transfer >= 0 && transfer_count == throw_on_transfer) {
+			throw std::runtime_error("LifetimeThrowingTracked transfer");
+		}
+		value = other.value;
+		other.value = -1;
+		return *this;
+	}
+
+	~LifetimeThrowingTracked() {
+		++dtor_count;
+		--live;
+	}
+};
+
 template<class V>
 constexpr bool has_using_sso = requires(const V& v) { v.using_sso(); };
 
@@ -257,6 +432,71 @@ void check_invariants(Vec& v, const TestContext& ctx, const char* label) {
 		}
 	}
 }
+
+template<typename Vec>
+std::vector<int> lifetime_payloads(const Vec& v) {
+	std::vector<int> out;
+	out.reserve(v.size());
+	for (const auto& element : v) {
+		out.push_back(element.value);
+	}
+	return out;
+}
+
+template<typename Vec>
+std::vector<int> lifetime_serials(const Vec& v) {
+	std::vector<int> out;
+	out.reserve(v.size());
+	for (const auto& element : v) {
+		out.push_back(element.serial);
+	}
+	return out;
+}
+
+void check_values(const TestContext& ctx, const std::vector<int>& actual, std::initializer_list<int> expected, const char* label) {
+	check(ctx, actual == std::vector<int>(expected), label);
+}
+
+template<typename Vec>
+void check_values(const TestContext& ctx, const Vec& v, std::initializer_list<int> expected, const char* label) {
+	check_values(ctx, lifetime_payloads(v), expected, label);
+}
+
+template<typename Vec>
+void check_no_leak_after_scope(const TestContext& ctx, const char* label) {
+	check(ctx, LifetimeTracked::stats.live == 0, label);
+	check(ctx, LifetimeTracked::stats.dtor ==
+		LifetimeTracked::stats.default_ctor + LifetimeTracked::stats.value_ctor + LifetimeTracked::stats.copy_ctor + LifetimeTracked::stats.move_ctor,
+		"destructor count matches total LifetimeTracked constructions");
+}
+
+template<typename Vec>
+void check_prefix(const TestContext& ctx, const Vec& v, std::initializer_list<int> expected, const char* label) {
+	const auto values = lifetime_payloads(v);
+	bool ok = values.size() >= expected.size();
+	std::size_t i = 0;
+	for (int expected_value : expected) {
+		if (!ok || values[i] != expected_value) {
+			ok = false;
+			break;
+		}
+		++i;
+	}
+	check(ctx, ok, label);
+}
+
+template<typename Vec>
+void check_serials_differ(const TestContext& ctx, const Vec& v, const std::vector<int>& baseline, const char* label) {
+	const auto actual = lifetime_serials(v);
+	bool ok = actual.size() == baseline.size();
+	for (std::size_t i = 0; ok && i < actual.size(); ++i) {
+		ok = (actual[i] != baseline[i]);
+	}
+	check(ctx, ok, label);
+}
+
+template<class T, class Alloc>
+using sso_vector_small = sw::universal::internal::sso_vector<T, 4, Alloc>;
 
 // Convert any vector-like object into plain std::vector contents for parity comparison.
 template<typename Vec>
@@ -797,6 +1037,461 @@ void run_vector_suite(const char* impl_name, int& failures) {
 	}
 }
 
+template<template<class, class> class VecTemplate>
+void run_vector_lifetime_suite(const char* impl_name, int& failures) {
+	TestContext ctx{impl_name, failures};
+
+	using TrackedVec = VecTemplate<LifetimeTracked, std::allocator<LifetimeTracked>>;
+	using ThrowingVec = VecTemplate<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
+
+	{
+		LifetimeTracked::reset();
+		LifetimeTrackedStats before = LifetimeTracked::snapshot();
+		{
+			TrackedVec v;
+			v.reserve(8);
+			LifetimeTrackedStats after_reserve = LifetimeTracked::snapshot();
+			check(ctx, v.empty(), "reserve baseline empty");
+			check(ctx, v.capacity() >= 8, "reserve baseline capacity");
+			check(ctx, after_reserve.default_ctor == before.default_ctor, "reserve does not default-construct");
+			check(ctx, after_reserve.value_ctor == before.value_ctor, "reserve does not value-construct");
+			check(ctx, after_reserve.copy_ctor == before.copy_ctor, "reserve does not copy-construct");
+			check(ctx, after_reserve.move_ctor == before.move_ctor, "reserve does not move-construct");
+			check(ctx, after_reserve.dtor == before.dtor, "reserve does not destroy");
+		}
+		check_no_leak_after_scope<TrackedVec>(ctx, "reserved empty container destroys nothing");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			TrackedVec v;
+			v.reserve(4);
+			v.emplace_back(1);
+			v.emplace_back(2);
+			v.emplace_back(3);
+			check_values(ctx, v, {1, 2, 3}, "append contents");
+			check(ctx, v.size() == 3, "append size");
+			check(ctx, LifetimeTracked::stats.live == 3, "append live count");
+		}
+		check_no_leak_after_scope<TrackedVec>(ctx, "append scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			TrackedVec v;
+			v.reserve(5);
+			v.emplace_back(10);
+			v.emplace_back(20);
+			const LifetimeTrackedStats before_grow = LifetimeTracked::snapshot();
+			v.resize(5);
+			const LifetimeTrackedStats after_grow = LifetimeTracked::snapshot();
+			check(ctx, after_grow.default_ctor - before_grow.default_ctor == 3, "resize grow default-constructs new elements");
+			check_values(ctx, v, {10, 20, 0, 0, 0}, "resize grow values");
+			const int dtor_before_shrink = after_grow.dtor;
+			v.resize(2);
+			check_values(ctx, v, {10, 20}, "resize shrink values");
+			check(ctx, LifetimeTracked::stats.dtor - dtor_before_shrink == 3, "resize shrink destroys removed tail");
+			check(ctx, LifetimeTracked::stats.live == 2, "resize shrink live count");
+		}
+		check_no_leak_after_scope<TrackedVec>(ctx, "resize scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			TrackedVec v;
+			v.reserve(8);
+			v.emplace_back(1);
+			v.emplace_back(2);
+			v.emplace_back(3);
+			v.insert(v.begin() + 1, LifetimeTracked(99));
+			check_values(ctx, v, {1, 99, 2, 3}, "middle insert values");
+			check(ctx, LifetimeTracked::stats.live == static_cast<int>(v.size()), "insert live count");
+			v.erase(v.begin() + 2);
+			check_values(ctx, v, {1, 99, 3}, "middle erase values");
+			check(ctx, LifetimeTracked::stats.live == static_cast<int>(v.size()), "erase live count");
+		}
+		check_no_leak_after_scope<TrackedVec>(ctx, "insert erase scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			TrackedVec source;
+			source.reserve(3);
+			source.emplace_back(4);
+			source.emplace_back(5);
+			source.emplace_back(6);
+			const LifetimeTrackedStats before_copy = LifetimeTracked::snapshot();
+			TrackedVec copied(source);
+			check_values(ctx, copied, {4, 5, 6}, "copy construction values");
+			check(ctx, LifetimeTracked::stats.copy_ctor - before_copy.copy_ctor == 3, "copy construction copies each element");
+
+			TrackedVec assigned;
+			assigned.reserve(4);
+			assigned.emplace_back(7);
+			assigned.emplace_back(8);
+			assigned = source;
+			check_values(ctx, assigned, {4, 5, 6}, "copy assignment values");
+
+			TrackedVec moved(std::move(copied));
+			check_values(ctx, moved, {4, 5, 6}, "move construction values");
+
+			TrackedVec move_assigned;
+			move_assigned = std::move(assigned);
+			check_values(ctx, move_assigned, {4, 5, 6}, "move assignment values");
+		}
+		check_no_leak_after_scope<TrackedVec>(ctx, "copy move scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			TrackedVec v;
+			v.reserve(3);
+			v.emplace_back(1);
+			v.emplace_back(2);
+			v.emplace_back(3);
+			LifetimeTracked rhs(42);
+			const LifetimeTrackedStats before_assign = LifetimeTracked::snapshot();
+			v[1] = std::move(rhs);
+			const LifetimeTrackedStats after_assign = LifetimeTracked::snapshot();
+			check_values(ctx, v, {1, 42, 3}, "operator[] assignment values");
+			check(ctx, after_assign.move_assign - before_assign.move_assign == 1, "operator[] uses move assignment");
+			check(ctx, after_assign.copy_assign == before_assign.copy_assign, "operator[] does not copy-assign");
+			check(ctx, after_assign.copy_ctor == before_assign.copy_ctor, "operator[] does not reconstruct by copy");
+			check(ctx, after_assign.move_ctor == before_assign.move_ctor, "operator[] does not reconstruct by move");
+		}
+		check_no_leak_after_scope<TrackedVec>(ctx, "operator[] assignment scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			TrackedVec v;
+			v.reserve(4);
+			v.emplace_back(1);
+			v.emplace_back(2);
+			v.emplace_back(3);
+			const int dtor_before_pop = LifetimeTracked::stats.dtor;
+			v.pop_back();
+			check_values(ctx, v, {1, 2}, "pop_back values");
+			check(ctx, LifetimeTracked::stats.dtor - dtor_before_pop == 1, "pop_back destroys one element");
+			const int dtor_before_clear = LifetimeTracked::stats.dtor;
+			v.clear();
+			check(ctx, v.empty(), "clear empties container");
+			check(ctx, LifetimeTracked::stats.dtor - dtor_before_clear == 2, "clear destroys active elements");
+			check(ctx, LifetimeTracked::stats.live == 0, "clear live count");
+			v.emplace_back(9);
+			check_values(ctx, v, {9}, "append after clear");
+		}
+		check_no_leak_after_scope<TrackedVec>(ctx, "clear reuse scope destruction");
+	}
+
+	{
+		LifetimeThrowingTracked::reset();
+		{
+			ThrowingVec v;
+			v.reserve(2);
+			v.emplace_back(1);
+			v.emplace_back(2);
+			const auto before = lifetime_payloads(v);
+			LifetimeThrowingTracked::throw_on_copy_ctor = 1;
+			LifetimeThrowingTracked::throw_on_move_ctor = 1;
+			expect_throw<std::runtime_error>(ctx, "insert growth throws", [&]() {
+				v.insert(v.begin() + 1, LifetimeThrowingTracked(99));
+			});
+			check_values(ctx, v, {1, 2}, "insert throw preserves values");
+			check(ctx, v.size() == before.size(), "insert throw preserves size");
+			check(ctx, LifetimeThrowingTracked::live == static_cast<int>(v.size()), "insert throw no leaked elements");
+		}
+		check(ctx, LifetimeThrowingTracked::live == 0, "insert throw scope destruction");
+	}
+
+	{
+		for (int throw_at : {1, 2, 3}) {
+			LifetimeThrowingTracked::reset();
+			{
+				ThrowingVec v;
+				v.reserve(8);
+				v.emplace_back(10);
+				v.emplace_back(20);
+				LifetimeThrowingTracked::throw_on_default_ctor = throw_at;
+				std::string label = "resize grow throws at step " + std::to_string(throw_at);
+				expect_throw<std::runtime_error>(ctx, label.c_str(), [&]() {
+					v.resize(5);
+				});
+				LifetimeThrowingTracked::throw_on_default_ctor = -1;
+				check(ctx, v.size() >= 2 && v.size() <= 4, "resize throw leaves valid size");
+				check_prefix(ctx, v, {10, 20}, "resize throw preserves prefix");
+				for (std::size_t i = 2; i < v.size(); ++i) {
+					check(ctx, lifetime_payloads(v)[i] == 0, "resize throw keeps constructed tail default-initialized");
+				}
+				check(ctx, LifetimeThrowingTracked::live == static_cast<int>(v.size()), "resize throw no leaked elements");
+				v.clear();
+				v.emplace_back(77);
+				check_values(ctx, v, {77}, "resize throw leaves container reusable");
+			}
+			check(ctx, LifetimeThrowingTracked::live == 0, "resize throw scope destruction");
+		}
+	}
+
+	{
+		for (int throw_at : {1, 2, 3}) {
+			LifetimeThrowingTracked::reset();
+			{
+				ThrowingVec v;
+				v.reserve(8);
+				v.emplace_back(1);
+				v.emplace_back(2);
+				std::vector<LifetimeThrowingTracked> src;
+				src.reserve(3);
+				src.emplace_back(30);
+				src.emplace_back(40);
+				src.emplace_back(50);
+				LifetimeThrowingTracked::copy_ctor_count = 0;
+				LifetimeThrowingTracked::throw_on_copy_ctor = throw_at;
+				std::string label = "append sequence throws at step " + std::to_string(throw_at);
+				expect_throw<std::runtime_error>(ctx, label.c_str(), [&]() {
+					for (const auto& element : src) {
+						v.push_back(element);
+					}
+				});
+				LifetimeThrowingTracked::throw_on_copy_ctor = -1;
+				check(ctx, v.size() == static_cast<std::size_t>(2 + throw_at - 1), "append throw leaves prefix of successful appends");
+				if (throw_at == 1) check_values(ctx, v, {1, 2}, "append throw values at first failure");
+				if (throw_at == 2) check_values(ctx, v, {1, 2, 30}, "append throw values at second failure");
+				if (throw_at == 3) check_values(ctx, v, {1, 2, 30, 40}, "append throw values at third failure");
+				check(ctx, LifetimeThrowingTracked::live == static_cast<int>(v.size() + src.size()), "append throw no leaked elements");
+				v.clear();
+				v.emplace_back(88);
+				check_values(ctx, v, {88}, "append throw leaves container reusable");
+			}
+			check(ctx, LifetimeThrowingTracked::live == 0, "append throw scope destruction");
+		}
+	}
+}
+
+void run_sso_vector_specific_lifetime_suite(int& failures) {
+	using Vec = sso_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
+	using ThrowVec = sso_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
+	TestContext ctx{"sso_vector_lifetime_specific", failures};
+
+	{
+		LifetimeTracked::reset();
+		LifetimeTrackedStats before = LifetimeTracked::snapshot();
+		{
+			Vec v;
+			v.reserve(16);
+			LifetimeTrackedStats after = LifetimeTracked::snapshot();
+			check(ctx, after.live == 0, "reserve on empty sso_vector creates no live elements");
+			check(ctx, after.default_ctor == before.default_ctor, "reserve on empty does not default-construct");
+			check(ctx, after.value_ctor == before.value_ctor, "reserve on empty does not value-construct");
+			check(ctx, after.copy_ctor == before.copy_ctor, "reserve on empty does not copy-construct");
+			check(ctx, after.move_ctor == before.move_ctor, "reserve on empty does not move-construct");
+			check(ctx, after.dtor == before.dtor, "reserve on empty does not destroy");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "reserve on empty scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			Vec a;
+			a.reserve(16);
+			for (int i = 0; i < 6; ++i) a.emplace_back(i);
+			const Vec& ca = a;
+			LifetimeTrackedStats after_share{};
+			{
+				Vec b = a;
+				const Vec& cb = b;
+				check(ctx, ca.data() == cb.data(), "heap-backed copy shares storage before teardown");
+				after_share = LifetimeTracked::snapshot();
+			}
+			const LifetimeTrackedStats after_release = LifetimeTracked::snapshot();
+			check_values(ctx, a, {0, 1, 2, 3, 4, 5}, "destroying one sharer preserves survivor contents");
+			check(ctx, after_release.copy_ctor == after_share.copy_ctor, "teardown does not copy-construct");
+			check(ctx, after_release.move_ctor == after_share.move_ctor, "teardown does not move-construct");
+			check(ctx, after_release.value_ctor == after_share.value_ctor, "teardown does not value-construct");
+			check(ctx, after_release.default_ctor == after_share.default_ctor, "teardown does not default-construct");
+			check(ctx, after_release.dtor == after_share.dtor, "teardown of one sharer does not destroy shared elements");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "shared teardown leaves no leaks");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			Vec a;
+			a.reserve(16);
+			for (int i = 0; i < 6; ++i) a.emplace_back(i);
+			Vec b = a;
+			const Vec& cb = b;
+			const LifetimeTracked* shared_before = cb.data();
+			LifetimeTrackedStats before_const_data = LifetimeTracked::snapshot();
+			const Vec& ca = a;
+			(void)ca.data();
+			(void)cb.data();
+			LifetimeTrackedStats after_const_data = LifetimeTracked::snapshot();
+			check(ctx, ca.data() == shared_before, "const data preserves shared pointer");
+			check(ctx, cb.data() == shared_before, "const data on sibling preserves shared pointer");
+			check(ctx, after_const_data.copy_ctor == before_const_data.copy_ctor, "const data does not copy-construct");
+			check(ctx, after_const_data.move_ctor == before_const_data.move_ctor, "const data does not move-construct");
+			check(ctx, after_const_data.dtor == before_const_data.dtor, "const data does not destroy");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "const data scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			Vec a;
+			a.reserve(16);
+			for (int i = 0; i < 6; ++i) a.emplace_back(i);
+			Vec b = a;
+			const Vec& cb = b;
+			const LifetimeTracked* b_before = cb.data();
+			LifetimeTracked* raw = a.data();
+			raw[0].value = 777;
+			check_values(ctx, a, {777, 1, 2, 3, 4, 5}, "mutable data writes through detached storage");
+			check_values(ctx, b, {0, 1, 2, 3, 4, 5}, "mutable data does not mutate sibling sharer");
+			check(ctx, cb.data() == b_before, "mutable data on sibling leaves original block in place");
+
+			Vec c = b;
+			const Vec& cc = c;
+			check(ctx, cc.data() == cb.data(), "untouched sharer remains shareable after sibling mutable data");
+			check_values(ctx, c, {0, 1, 2, 3, 4, 5}, "copy after sibling mutable data preserves untouched values");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "mutable data scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			Vec a;
+			a.reserve(16);
+			for (int i = 0; i < 6; ++i) a.emplace_back(i);
+			Vec b = a;
+			const LifetimeTrackedStats before_write = LifetimeTracked::snapshot();
+			b[2] = LifetimeTracked(999);
+			const LifetimeTrackedStats after_write = LifetimeTracked::snapshot();
+			check_values(ctx, a, {0, 1, 2, 3, 4, 5}, "proxy write preserves source contents");
+			check_values(ctx, b, {0, 1, 999, 3, 4, 5}, "proxy write updates destination contents");
+			check(ctx, after_write.copy_ctor - before_write.copy_ctor == 6, "proxy write detaches by copying shared elements once");
+			check(ctx, after_write.move_assign - before_write.move_assign == 1, "proxy write performs one element move-assignment");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "proxy write scope destruction");
+	}
+
+	{
+		LifetimeThrowingTracked::reset();
+		{
+			ThrowVec src;
+			src.reserve(16);
+			src.emplace_back(10);
+			src.emplace_back(20);
+			src.emplace_back(30);
+			(void)src.data();
+			ThrowVec dst;
+			dst.emplace_back(1);
+			dst.emplace_back(2);
+			const auto src_before = lifetime_payloads(src);
+			LifetimeThrowingTracked::copy_ctor_count = 0;
+			LifetimeThrowingTracked::throw_on_copy_ctor = 1;
+			expect_throw<std::runtime_error>(ctx, "sso copy assignment throws", [&]() {
+				dst = src;
+			});
+			LifetimeThrowingTracked::throw_on_copy_ctor = -1;
+			check_values(ctx, src, {10, 20, 30}, "copy assignment throw preserves source contents");
+			check(ctx, LifetimeThrowingTracked::live == static_cast<int>(src.size() + dst.size()), "copy assignment throw leaves no leaked live objects");
+			check(ctx, lifetime_payloads(src) == src_before, "copy assignment throw does not mutate source");
+		}
+		check(ctx, LifetimeThrowingTracked::live == 0, "copy assignment throw scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			Vec source;
+			source.emplace_back(1);
+			source.emplace_back(2);
+			source.emplace_back(3);
+			const auto source_serials = lifetime_serials(source);
+
+			const LifetimeTrackedStats before_copy = LifetimeTracked::snapshot();
+			Vec copied(source);
+			check_values(ctx, copied, {1, 2, 3}, "inline copy construction preserves values");
+			check(ctx, LifetimeTracked::stats.copy_ctor - before_copy.copy_ctor == 3, "inline copy construction copies each element");
+			check_serials_differ(ctx, copied, source_serials, "inline copy construction creates distinct element objects");
+
+			const LifetimeTrackedStats before_move = LifetimeTracked::snapshot();
+			Vec moved(std::move(source));
+			check_values(ctx, moved, {1, 2, 3}, "inline move construction preserves values");
+			check(ctx, (LifetimeTracked::stats.move_ctor - before_move.move_ctor) + (LifetimeTracked::stats.copy_ctor - before_move.copy_ctor) == 3,
+				"inline move construction constructs each destination element");
+			check_serials_differ(ctx, moved, source_serials, "inline move construction creates distinct destination objects");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "inline copy/move construction scope destruction");
+	}
+
+	{
+		LifetimeTracked::reset();
+		{
+			Vec source;
+			source.emplace_back(4);
+			source.emplace_back(5);
+			source.emplace_back(6);
+			const auto source_serials = lifetime_serials(source);
+
+			Vec copy_assigned;
+			const LifetimeTrackedStats before_copy_assign = LifetimeTracked::snapshot();
+			copy_assigned = source;
+			check_values(ctx, copy_assigned, {4, 5, 6}, "inline copy assignment preserves values");
+			check(ctx, LifetimeTracked::stats.copy_ctor - before_copy_assign.copy_ctor == 3, "inline copy assignment constructs copied elements");
+			check_serials_differ(ctx, copy_assigned, source_serials, "inline copy assignment creates distinct destination objects");
+
+			Vec move_source;
+			move_source.emplace_back(7);
+			move_source.emplace_back(8);
+			move_source.emplace_back(9);
+			const auto move_source_serials = lifetime_serials(move_source);
+			Vec move_assigned;
+			const LifetimeTrackedStats before_move_assign = LifetimeTracked::snapshot();
+			move_assigned = std::move(move_source);
+			check_values(ctx, move_assigned, {7, 8, 9}, "inline move assignment preserves values");
+			check(ctx, (LifetimeTracked::stats.move_ctor - before_move_assign.move_ctor) + (LifetimeTracked::stats.copy_ctor - before_move_assign.copy_ctor) == 3,
+				"inline move assignment constructs each destination element");
+			check_serials_differ(ctx, move_assigned, move_source_serials, "inline move assignment creates distinct destination objects");
+
+			const int dtor_before_erase = LifetimeTracked::stats.dtor;
+			move_assigned.insert(move_assigned.begin() + 1, LifetimeTracked(11));
+			check_values(ctx, move_assigned, {7, 11, 8, 9}, "inline insert preserves order");
+			move_assigned.erase(move_assigned.begin() + 2);
+			check_values(ctx, move_assigned, {7, 11, 9}, "inline erase preserves order");
+			check(ctx, LifetimeTracked::stats.dtor - dtor_before_erase >= 1, "inline erase destroys removed element");
+
+			const LifetimeTrackedStats before_shrink = LifetimeTracked::snapshot();
+			move_assigned.shrink_to_fit();
+			const LifetimeTrackedStats after_shrink = LifetimeTracked::snapshot();
+			check(ctx, after_shrink.copy_ctor == before_shrink.copy_ctor, "inline shrink_to_fit does not copy inline elements");
+			check(ctx, after_shrink.move_ctor == before_shrink.move_ctor, "inline shrink_to_fit does not move inline elements");
+
+			Vec left;
+			left.emplace_back(1);
+			left.emplace_back(2);
+			Vec right;
+			right.emplace_back(9);
+			right.emplace_back(8);
+			left.swap(right);
+			check_values(ctx, left, {9, 8}, "inline swap preserves right values");
+			check_values(ctx, right, {1, 2}, "inline swap preserves left values");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "inline assignment and modifier scope destruction");
+	}
+}
+
 int main() {
 	int nrOfFailedTestCases = 0;
 	run_sso_proxy_suite(nrOfFailedTestCases);
@@ -804,6 +1499,9 @@ int main() {
 	run_vector_std_parity_suite(nrOfFailedTestCases);
 	run_vector_suite<sso_vector_auto>("sso_vector", nrOfFailedTestCases);
 	run_vector_suite<std::vector>("std::vector", nrOfFailedTestCases);
+	run_vector_lifetime_suite<std::vector>("std::vector_lifetime", nrOfFailedTestCases);
+	run_vector_lifetime_suite<sso_vector_small>("sso_vector_lifetime", nrOfFailedTestCases);
+	run_sso_vector_specific_lifetime_suite(nrOfFailedTestCases);
 
 	sw::universal::ReportTestResult(nrOfFailedTestCases, "sso_vector", "unit test");
 	return (nrOfFailedTestCases > 0 ? EXIT_FAILURE : EXIT_SUCCESS);

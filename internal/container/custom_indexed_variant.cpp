@@ -221,6 +221,115 @@ struct RejectConstRvalue {
 	bool operator()(const std::string&&) const = delete;
 };
 
+template<int Tag>
+struct LifetimeVariantTracked {
+	inline static int live = 0;
+	inline static int value_ctor = 0;
+	inline static int copy_ctor = 0;
+	inline static int move_ctor = 0;
+	inline static int copy_assign = 0;
+	inline static int move_assign = 0;
+	inline static int dtor = 0;
+	inline static int next_serial = 0;
+
+	int value = 0;
+	int serial = 0;
+
+	static void reset() {
+		live = 0;
+		value_ctor = 0;
+		copy_ctor = 0;
+		move_ctor = 0;
+		copy_assign = 0;
+		move_assign = 0;
+		dtor = 0;
+		next_serial = 0;
+	}
+
+	explicit LifetimeVariantTracked(int v = 0) : value(v), serial(++next_serial) {
+		++value_ctor;
+		++live;
+	}
+
+	LifetimeVariantTracked(const LifetimeVariantTracked& other) : value(other.value), serial(++next_serial) {
+		++copy_ctor;
+		++live;
+	}
+
+	LifetimeVariantTracked(LifetimeVariantTracked&& other) noexcept : value(other.value), serial(++next_serial) {
+		other.value = -1;
+		++move_ctor;
+		++live;
+	}
+
+	LifetimeVariantTracked& operator=(const LifetimeVariantTracked& other) {
+		value = other.value;
+		++copy_assign;
+		return *this;
+	}
+
+	LifetimeVariantTracked& operator=(LifetimeVariantTracked&& other) noexcept {
+		value = other.value;
+		other.value = -1;
+		++move_assign;
+		return *this;
+	}
+
+	~LifetimeVariantTracked() {
+		++dtor;
+		--live;
+	}
+};
+
+struct LifetimeVariantThrowingTracked {
+	inline static int live = 0;
+	inline static int ctor_count = 0;
+	inline static int next_serial = 0;
+	inline static int throw_on_ctor = -1;
+
+	int value = 0;
+	int serial = 0;
+
+	static void reset() {
+		live = 0;
+		ctor_count = 0;
+		next_serial = 0;
+		throw_on_ctor = -1;
+	}
+
+	explicit LifetimeVariantThrowingTracked(int v = 0) : value(v), serial(++next_serial) {
+		++ctor_count;
+		if (throw_on_ctor >= 0 && ctor_count == throw_on_ctor) {
+			throw std::runtime_error("LifetimeVariantThrowingTracked configured throw");
+		}
+		++live;
+	}
+
+	LifetimeVariantThrowingTracked(const LifetimeVariantThrowingTracked& other) : value(other.value), serial(++next_serial) {
+		++live;
+	}
+
+	LifetimeVariantThrowingTracked& operator=(const LifetimeVariantThrowingTracked& other) {
+		value = other.value;
+		return *this;
+	}
+
+	LifetimeVariantThrowingTracked(LifetimeVariantThrowingTracked&& other) noexcept : value(other.value), serial(++next_serial) {
+		other.value = -1;
+		++live;
+	}
+
+	LifetimeVariantThrowingTracked& operator=(LifetimeVariantThrowingTracked&& other) noexcept {
+		value = other.value;
+		other.value = -1;
+		return *this;
+	}
+
+	~LifetimeVariantThrowingTracked() {
+		--live;
+	}
+};
+
 struct AmbiguousSource {};
 
 struct AmbiguousA {
@@ -1169,6 +1278,146 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 }
 
+template<template<class...> class VariantTemplate>
+void run_custom_variant_lifetime_suite(const char* impl_name, int& failures) {
+	TestContext ctx{impl_name, failures};
+	using A = LifetimeVariantTracked<0>;
+	using B = LifetimeVariantTracked<1>;
+	using V = VariantTemplate<int, A, B, LifetimeVariantThrowingTracked>;
+
+	A::reset();
+	B::reset();
+	LifetimeVariantThrowingTracked::reset();
+
+	{
+		V v;
+		check(ctx, v.index() == 0, "default construction selects first alternative");
+		check(ctx, sw::universal::internal::holds_alternative<int>(v), "default construction holds int");
+		check(ctx, sw::universal::internal::get<int>(v) == 0, "default int payload");
+	}
+
+	A::reset();
+	B::reset();
+	LifetimeVariantThrowingTracked::reset();
+
+	{
+		V v(std::in_place_type<A>, 7);
+		check(ctx, A::live == 1, "A emplace constructs one live object");
+		check(ctx, sw::universal::internal::get<A>(v).value == 7, "A payload stored");
+
+		v.template emplace<B>(9);
+		check(ctx, A::live == 0, "switching to B destroys A");
+		check(ctx, A::dtor == 1, "switching to B destroys A exactly once");
+		check(ctx, B::live == 1, "switching to B constructs B");
+		check(ctx, sw::universal::internal::get<B>(v).value == 9, "B payload stored");
+
+		const int b_dtor_before_int = B::dtor;
+		v.template emplace<0>(42);
+		check(ctx, B::live == 0, "switching to int destroys B");
+		check(ctx, B::dtor - b_dtor_before_int == 1, "switching to int destroys active B exactly once");
+		check(ctx, v.index() == 0, "switching to int updates active index");
+		check(ctx, sw::universal::internal::get<int>(v) == 42, "int payload after switch");
+	}
+	check(ctx, A::live == 0 && B::live == 0, "scope destruction leaves no tracked alternatives alive");
+
+	A::reset();
+	B::reset();
+
+	{
+		V source(std::in_place_type<A>, 11);
+		V copy(source);
+		check(ctx, sw::universal::internal::holds_alternative<A>(copy), "copy construction preserves active alternative");
+		check(ctx, sw::universal::internal::get<A>(copy).value == 11, "copy construction preserves payload");
+		check(ctx, A::copy_ctor == 1, "copy construction copies active alternative exactly once");
+		check(ctx, A::live == 2, "copy construction leaves two live A alternatives");
+
+		V moved(std::move(copy));
+		check(ctx, sw::universal::internal::holds_alternative<A>(moved), "move construction preserves active alternative");
+		check(ctx, sw::universal::internal::get<A>(moved).value == 11, "move construction preserves payload");
+		check(ctx, A::move_ctor == 1, "move construction moves active alternative exactly once");
+	}
+	check(ctx, A::live == 0 && B::live == 0, "copy move destruction leaves no leaks");
+
+	A::reset();
+	B::reset();
+
+	{
+		V same_dst(std::in_place_type<A>, 2);
+		V same_src(std::in_place_type<A>, 5);
+		same_dst = same_src;
+		check(ctx, sw::universal::internal::holds_alternative<A>(same_dst), "same-alternative copy assignment keeps active alternative");
+		check(ctx, sw::universal::internal::get<A>(same_dst).value == 5, "same-alternative copy assignment updates payload");
+		check(ctx, A::copy_assign == 1, "same-alternative copy assignment uses assignment");
+
+		V dst(std::in_place_type<B>, 3);
+		V src(std::in_place_type<A>, 12);
+		dst = src;
+		check(ctx, sw::universal::internal::holds_alternative<A>(dst), "copy assignment switches active alternative");
+		check(ctx, sw::universal::internal::get<A>(dst).value == 12, "copy assignment preserves payload");
+		check(ctx, B::live == 0, "copy assignment destroys replaced alternative");
+		check(ctx, B::dtor == 1, "copy assignment destroys replaced alternative exactly once");
+
+		V same_move_dst(std::in_place_type<A>, 20);
+		V same_move_src(std::in_place_type<A>, 21);
+		same_move_dst = std::move(same_move_src);
+		check(ctx, sw::universal::internal::holds_alternative<A>(same_move_dst), "same-alternative move assignment keeps active alternative");
+		check(ctx, sw::universal::internal::get<A>(same_move_dst).value == 21, "same-alternative move assignment updates payload");
+		check(ctx, A::move_assign == 1, "same-alternative move assignment uses move assignment");
+
+		V move_src(std::in_place_type<B>, 25);
+		dst = std::move(move_src);
+		check(ctx, sw::universal::internal::holds_alternative<B>(dst), "move assignment switches active alternative");
+		check(ctx, sw::universal::internal::get<B>(dst).value == 25, "move assignment preserves payload");
+	}
+	check(ctx, A::live == 0 && B::live == 0, "assignment scope destruction leaves no leaks");
+
+	A::reset();
+	B::reset();
+
+	{
+		V v(std::in_place_type<A>, 1);
+		v = B(2);
+		check(ctx, sw::universal::internal::holds_alternative<B>(v), "assignment to B activates B");
+		check(ctx, A::live == 0 && B::live == 1, "assignment to B destroys A");
+		v = 17;
+		check(ctx, v.index() == 0, "assignment to int activates int");
+		check(ctx, B::live == 0, "assignment to int destroys B");
+		v.template emplace<A>(33);
+		check(ctx, A::live == 1, "re-emplace A reconstructs one object");
+		check(ctx, sw::universal::internal::get<A>(v).value == 33, "re-emplace A payload");
+	}
+	check(ctx, A::live == 0 && B::live == 0, "repeated reassignment scope destruction leaves no leaks");
+
+	if constexpr (requires(V& v) { v.sideband(); }) {
+		A::reset();
+		B::reset();
+		V v(std::in_place_type<A>, 4);
+		v.sideband().set_val(6);
+		check(ctx, static_cast<std::size_t>(v.sideband().val()) == 6, "sideband write round-trips");
+		v.template emplace<B>(8);
+		check(ctx, static_cast<std::size_t>(v.sideband().val()) == 6, "sideband survives alternative switch");
+		check(ctx, sw::universal::internal::get<B>(v).value == 8, "sideband variant keeps payload accessible");
+	}
+
+	{
+		A::reset();
+		B::reset();
+		LifetimeVariantThrowingTracked::reset();
+		V v(std::in_place_type<A>, 55);
+		LifetimeVariantThrowingTracked::throw_on_ctor = 1;
+		expect_throw<std::runtime_error>(ctx, "throwing emplace", [&]() {
+			v.template emplace<LifetimeVariantThrowingTracked>(99);
+		});
+		check(ctx, !v.valueless_by_exception(), "throwing emplace preserves prior active alternative");
+		check(ctx, sw::universal::internal::holds_alternative<A>(v), "throwing emplace keeps prior alternative active");
+		check(ctx, sw::universal::internal::get<A>(v).value == 55, "throwing emplace preserves prior payload");
+		check(ctx, A::live == 1, "throwing emplace leaves replaced alternative alive");
+		check(ctx, LifetimeVariantThrowingTracked::live == 0, "throwing emplace does not leak failed construction");
+	}
+
+	check(ctx, A::live == 0 && B::live == 0, "final scope leaves no tracked alternatives alive");
+}
+
 int main() {
 	int nrOfFailedTestCases = 0;
 	report_std_variant_explicit_only_conversion_sentinel();
@@ -1178,6 +1427,8 @@ int main() {
 	run_variant_suite<CustomVariant>("custom_indexed_variant", nrOfFailedTestCases);
 	run_variant_suite<SidebandVariant>("custom_indexed_variant_sideband", nrOfFailedTestCases);
 	run_variant_suite<std::variant>("std::variant", nrOfFailedTestCases);
+	run_custom_variant_lifetime_suite<CustomVariant>("custom_indexed_variant_lifetime", nrOfFailedTestCases);
+	run_custom_variant_lifetime_suite<SidebandVariant>("custom_indexed_variant_lifetime_sideband", nrOfFailedTestCases);
 
 	sw::universal::ReportTestResult(nrOfFailedTestCases, "custom_indexed_variant", "unit test");
 	return (nrOfFailedTestCases > 0 ? EXIT_FAILURE : EXIT_SUCCESS);
