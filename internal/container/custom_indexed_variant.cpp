@@ -15,7 +15,7 @@
 #include <utility>
 #include <variant>
 
-#include <universal/internal/custom_indexed_variant/custom_indexed_variant.hpp>
+#include <universal/internal/container/custom_indexed_variant.hpp>
 #include <universal/verification/test_status.hpp>
 
 namespace {

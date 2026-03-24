@@ -33,7 +33,6 @@
 #include <tuple>
 #include <utility>
 
-#include "universal/internal/utility/pack_element.hpp"
 
 #ifndef BITFIELD_PACK_ASSERT
 /// @brief Assertion hook.
@@ -414,7 +413,7 @@ private:
 	static constexpr std::size_t kFieldCount = sizeof...(FieldSpecs);
 
 	template <std::size_t I>
-	using spec_t = internal_utility::pack_element_t<I, FieldSpecs...>;
+	using spec_t = std::tuple_element_t<I, std::tuple<FieldSpecs...>>;
 
 	template <std::size_t I>
 	using instantiated_field_spec_t = typename spec_t<I>::template for_storage_t<storage_t>;

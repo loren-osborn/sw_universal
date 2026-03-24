@@ -20,8 +20,8 @@ struct test_assert_failure : std::exception {
 	if (g_assert_enabled && !(expr)) throw test_assert_failure{}; \
 } while (0)
 
-#include "universal/internal/bitvector/bitfield_pack.hpp"
-#include "universal/internal/custom_indexed_variant/custom_indexed_variant.hpp"
+#include "universal/internal/container/bitfield_pack.hpp"
+#include "universal/internal/container/custom_indexed_variant.hpp"
 
 #define TEST_TRUE(expr) do { \
 	if (!(expr)) { \

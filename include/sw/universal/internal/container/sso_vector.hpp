@@ -38,8 +38,8 @@
 #include <utility>
 #include <vector>
 
-#include "universal/internal/custom_indexed_variant/custom_indexed_variant.hpp"
-#include "universal/internal/bitvector/bitfield_pack.hpp"
+#include "universal/internal/container/custom_indexed_variant.hpp"
+#include "universal/internal/container/bitfield_pack.hpp"
 
 namespace sw { namespace universal {
 namespace internal {
