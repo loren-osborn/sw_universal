@@ -430,8 +430,9 @@ private:
 		auto& h = heap_storage_impl();
 		if (!h.block) return;
 		const size_type n = size_impl();
-		release_heap_block_impl(h.block, n);
+		auto* block = h.block;
 		h.block = nullptr;
+		release_heap_block_impl(block, n);
 	}
 
 	/// @brief Detaches from shared heap storage when the active block has `refcount > 1`.
@@ -468,6 +469,47 @@ private:
 
 		h.block = new_block;
 		release_heap_block_impl(old_block, n);
+	}
+
+	/// @brief Releases owned state without cloning shared heap storage.
+	void reset_storage_impl() noexcept {
+		const size_type n = size_impl();
+		if (is_inline_impl()) {
+			destroy_range_impl(inline_storage_impl().data(), inline_storage_impl().data() + n);
+			set_size_impl(0);
+			return;
+		}
+
+		release_heap_impl();
+		set_size_impl(0);
+	}
+
+	/// @brief Moves the observable state out of another vector without byte-moving live inline elements.
+	void move_from_impl(sso_vector&& other) {
+		const size_type n = other.size_impl();
+		if (other.is_inline_impl()) {
+			state_.template emplace<0>();
+			T* dst = inline_storage_impl().data();
+			T* src = other.inline_storage_impl().data();
+			try {
+				move_construct_range_impl(dst, src, n);
+			} catch (...) {
+				set_size_impl(0);
+				throw;
+			}
+			set_size_impl(n);
+			destroy_range_impl(src, src + n);
+			other.set_size_impl(0);
+			return;
+		}
+
+		auto* block = other.heap_storage_impl().block;
+		other.heap_storage_impl().block = nullptr;
+		state_.template emplace<1>();
+		heap_storage_impl().block = block;
+		set_size_impl(n);
+		other.state_.template emplace<0>();
+		other.set_size_impl(0);
 	}
 
 	/// @brief Promotes inline storage to a fresh heap block with capacity `new_cap`.
@@ -548,12 +590,6 @@ private:
 		if (is_heap_impl()) ensure_unique_heap_impl();
 	}
 
-	/// @brief Destroys active elements and releases heap ownership, leaving storage reset.
-	void reset_storage_impl() noexcept {
-		clear_impl();
-		release_heap_impl();
-	}
-
 	/// @brief Resets the container to an empty inline-storage state.
 	void reset_to_inline_empty_impl() noexcept {
 		reset_storage_impl();
@@ -563,7 +599,6 @@ private:
 
 	/// @brief Copies the observable contents/state from another vector, sharing heap storage only when allowed.
 	void copy_from_impl(const sso_vector& other) {
-		set_size_impl(other.size());
 		if (other.is_inline_impl()) {
 			state_.template emplace<0>();
 			T* dst = inline_storage_impl().data();
@@ -574,6 +609,7 @@ private:
 				set_size_impl(0);
 				throw;
 			}
+			set_size_impl(other.size());
 			return;
 		}
 
@@ -583,6 +619,7 @@ private:
 
 		if (sso_vector_detail::try_inc_ref_if_shareable(b)) {
 			heap_storage_impl().block = b;
+			set_size_impl(other.size());
 			return;
 		}
 
@@ -596,6 +633,7 @@ private:
 			throw;
 		}
 		heap_storage_impl().block = nb;
+		set_size_impl(other.size());
 	}
 
 	/// @brief Destroys all active elements while preserving the current representation shell.
@@ -612,7 +650,14 @@ private:
 			return;
 		}
 
-		ensure_unique_heap_impl();
+		const auto hdr = sso_vector_detail::load_hdr(heap_storage_impl().block);
+		if (sso_vector_detail::hdr_refcount(hdr) > 1) {
+			release_heap_impl();
+			state_.template emplace<0>();
+			set_size_impl(0);
+			return;
+		}
+
 		destroy_range_impl(heap_storage_impl().data(), heap_storage_impl().data() + n);
 		set_size_impl(0);
 	}
@@ -622,8 +667,8 @@ private:
 	///          must not share the block because uncontrolled external mutation is now possible.
 	void clear_shareable_and_ensure_unique_impl() {
 		if (auto* block = heap_block_impl()) {
-			sso_vector_detail::clear_shareable(block);
 			ensure_unique_heap_impl();
+			sso_vector_detail::clear_shareable(heap_storage_impl().block);
 		}
 	}
 
@@ -729,7 +774,9 @@ private:
 			move_construct_range_impl(dst, src, n);
 			clear_impl();
 			release_heap_impl();
-			state_.template emplace<0>(ni);
+			state_.template emplace<0>();
+			move_construct_range_impl(inline_storage_impl().data(), dst, n);
+			destroy_range_impl(dst, dst + n);
 			set_size_impl(n);
 			return;
 		}
@@ -964,7 +1011,7 @@ public:
 	sso_vector(sso_vector&& other) noexcept
 		: alloc_(std::move(other.alloc_)), state_(std::in_place_index<0>) {
 		set_size_impl(0);
-		swap(other);
+		move_from_impl(std::move(other));
 	}
 
 	/// @brief Destroys all elements and releases heap ownership.
@@ -978,15 +1025,19 @@ public:
 	sso_vector& operator=(const sso_vector& other) {
 		if (this == &other) return *this;
 
+		Allocator target_alloc = alloc_;
 		if constexpr (std::allocator_traits<Allocator>::propagate_on_container_copy_assignment::value) {
-			if (alloc_ != other.alloc_) {
-				reset_storage_impl();
-				alloc_ = other.alloc_;
-			}
+			target_alloc = other.alloc_;
 		}
 
+		sso_vector temp(target_alloc);
+		temp.copy_from_impl(other);
+
 		reset_storage_impl();
-		copy_from_impl(other);
+		if constexpr (std::allocator_traits<Allocator>::propagate_on_container_copy_assignment::value) {
+			alloc_ = other.alloc_;
+		}
+		move_from_impl(std::move(temp));
 		return *this;
 	}
 
@@ -998,7 +1049,7 @@ public:
 		if constexpr (std::allocator_traits<Allocator>::propagate_on_container_move_assignment::value) {
 			alloc_ = std::move(other.alloc_);
 		}
-		swap(other);
+		move_from_impl(std::move(other));
 		return *this;
 	}
 
@@ -1171,7 +1222,40 @@ public:
 		if constexpr (std::allocator_traits<Allocator>::propagate_on_container_swap::value) {
 			std::swap(alloc_, other.alloc_);
 		}
-		swap_state_impl(other);
+		if (is_heap_impl() && other.is_heap_impl()) {
+			std::swap(heap_storage_impl().block, other.heap_storage_impl().block);
+			const size_type this_size = size_impl();
+			set_size_impl(other.size_impl());
+			other.set_size_impl(this_size);
+			return;
+		}
+		if (is_inline_impl() && other.is_inline_impl()) {
+			sso_vector tmp(std::move(other));
+			other.move_from_impl(std::move(*this));
+			reset_storage_impl();
+			move_from_impl(std::move(tmp));
+			return;
+		}
+		if (is_inline_impl() && other.is_heap_impl()) {
+			inline_storage tmp{};
+			const size_type this_size = size_impl();
+			move_construct_range_impl(tmp.data(), inline_storage_impl().data(), this_size);
+			destroy_range_impl(inline_storage_impl().data(), inline_storage_impl().data() + this_size);
+
+			auto* other_block = other.heap_storage_impl().block;
+			const size_type other_size = other.size_impl();
+			other.heap_storage_impl().block = nullptr;
+			state_.template emplace<1>();
+			heap_storage_impl().block = other_block;
+			set_size_impl(other_size);
+
+			other.state_.template emplace<0>();
+			move_construct_range_impl(other.inline_storage_impl().data(), tmp.data(), this_size);
+			destroy_range_impl(tmp.data(), tmp.data() + this_size);
+			other.set_size_impl(this_size);
+			return;
+		}
+		other.swap(*this);
 	}
 
 	allocator_type get_allocator() const noexcept { return alloc_; }
