@@ -8,6 +8,10 @@
  * - the custom_indexed_variant container template,
  * - trait adapters (variant_size / variant_alternative),
  * - and free-function helpers (get/get_if/holds_alternative/visit).
+ *
+ * The main purpose is to supply a `std::variant`-like discriminated union whose active-index storage
+ * policy is caller-selectable. That lets containers such as `sso_vector` co-locate extra sideband
+ * metadata in the same encoded word that stores the active alternative.
  */
 //
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
@@ -338,6 +342,8 @@ struct for_index_type {
 	/// @tparam NTypes Number of variant alternatives.
 	/// @details The low bits encode the variant index and valueless state; the remaining bits are
 	///          preserved sideband payload that the variant core itself does not interpret.
+	///          "Custom index" in this design means the variant chooses how the discriminator is
+	///          encoded and may carry sideband payload alongside it.
 	template <std::size_t NTypes>
 	struct index_encoded_with_sideband_data {
 		static_assert(std::unsigned_integral<IndexT>, "IndexT must be an unsigned integral type");
@@ -466,6 +472,8 @@ using index_encoded_with_sideband_data = for_index_type<std::size_t>::index_enco
 /// @details The active alternative lives in raw aligned storage and is tracked by `encoded_index_t`.
 ///          Depending on the encoded-index policy, the index word may also carry sideband bits that
 ///          are preserved across ordinary variant operations.
+///          Unlike `std::variant`, this type treats that index representation as a policy choice so
+///          internal containers can piggyback metadata such as `sso_vector`'s size sideband.
 /// @note This implementation intentionally prefers a unique exact-type match before falling back to
 ///       the implicit non-narrowing overload-resolution winner for converting construction/assignment.
 template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
@@ -791,6 +799,8 @@ private:
 	const std::byte* storage_bytes_impl() const noexcept { return storage_.buffer; }
 
 	/// @brief Placement-constructs alternative `I` into raw storage and publishes its index.
+	/// @details The index is published only after successful construction so the variant never reports
+	///          a live alternative whose lifetime has not actually begun.
 	template<std::size_t I, typename... Args>
 	void construct_active_impl(Args&&... args) {
 		assert(is_valueless_impl() && "construct requires valueless state");
@@ -802,6 +812,8 @@ private:
 
 	/// @brief Destroys the active alternative and transitions to valueless.
 	/// @note This function is idempotent: calling it while already valueless is a no-op.
+	/// @details The index remains the old active value until destruction completes, then transitions
+	///          to `npos`. That ordering helps keep active-state assertions truthful.
 	void destroy_active_impl() noexcept {
 		const std::size_t active = current_index_impl();
 		if (active == npos) {
@@ -879,6 +891,8 @@ private:
 
 	// Transition helpers.
 	/// @brief Replaces the active alternative with `I`, preserving strong behavior where construction permits.
+	/// @details When the target type can be staged in a temporary, construction is attempted before the
+	///          current alternative is destroyed. The tests call out this "throw before destroy" path.
 	template<std::size_t I, typename... Args>
 	void emplace_impl(Args&&... args) {
 		using T = detail::type_at_t<I, Types...>;
@@ -898,6 +912,8 @@ private:
 	}
 
 	/// @brief Assigns from a non-variant value using the preselected target alternative `I`.
+	/// @details Same-alternative assignment reuses the existing live object. Different-alternative
+	///          assignment destroys and reconstructs, optionally through a staged temporary.
 	template<std::size_t I, typename Value>
 	void assign_value_impl(Value&& value) {
 		using Target = detail::type_at_t<I, Types...>;
@@ -941,6 +957,9 @@ private:
 	}
 
 	/// @brief Assigns from another variant, either reusing the current alternative or replacing it.
+	/// @details The important invariant is "assign in place only when both sides currently hold the
+	///          same alternative". Otherwise the old alternative must be destroyed exactly once before
+	///          the new lifetime begins.
 	template<typename Other>
 	custom_indexed_variant& assign_from_variant_impl(Other&& other) {
 		if (other.valueless_by_exception()) {
@@ -1045,7 +1064,10 @@ private:
 		});
 	}
 
+	// Some policies store only the active alternative; others also carry sideband bits that must survive
+	// ordinary construct/destroy/assign traffic.
 	[[no_unique_address]] encoded_index_t index_obj_;
+	// Raw aligned storage for the currently active alternative only. At most one lifetime is active here.
 	typename storage_traits::storage_t storage_{};
 };
 

@@ -1,4 +1,13 @@
 // test_bitfield_pack.cpp
+//
+// Focused tests for the bitfield packing utility itself:
+// - layout math (widths, offsets, masks, remainder fields)
+// - semantic field encoding/decoding and validity checks
+// - word-spec/indexing customization and backend hook behavior
+//
+// This file is intentionally more direct than the container suites because the API is mostly
+// compile-time/static. The comments here explain why each scenario exists rather than trying to
+// narrate every assertion.
 #include <cmath>
 #include <bit>
 #include <cstddef>
@@ -51,6 +60,7 @@ struct test_assert_failure : std::exception {
 using namespace sw::universal;
 
 // Helper for assembling an expected raw word by hand in the canonical storage domain.
+// Tests use this to verify pack layout independently of the production helper implementation.
 template<typename Storage>
 constexpr Storage insert_field(Storage raw, Storage value, std::size_t width, std::size_t offset) {
 	const Storage all_ones = ~Storage(0);
@@ -185,7 +195,8 @@ static void test_bits_alias_basic() {
 	static_assert(P::field_width<2>() == 8);
 	static_assert(P::field_offset<2>() == 8);
 
-	// Setting masks (silent truncation)
+	// Setting masks (silent truncation). These checks document that truncation is intentional and that
+	// callers who want rejection must use the validation hooks separately.
 	p.template set_bits<0>(0b1111); // 4-bit into 3-bit -> truncates to 0b111
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{0b111});
 	TEST_EQ(p.raw_storage(), std::uint16_t{0b111});
