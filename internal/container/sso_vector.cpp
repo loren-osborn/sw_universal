@@ -356,6 +356,30 @@ struct LifetimeThrowingTracked {
 	}
 };
 
+struct LifetimeThrowingTrackedSnapshot {
+	int live = 0;
+	int default_ctor_count = 0;
+	int copy_ctor_count = 0;
+	int move_ctor_count = 0;
+	int copy_assign_count = 0;
+	int move_assign_count = 0;
+	int transfer_count = 0;
+	int dtor_count = 0;
+};
+
+LifetimeThrowingTrackedSnapshot snapshot_lifetime_throwing_tracked() {
+	return LifetimeThrowingTrackedSnapshot{
+		LifetimeThrowingTracked::live,
+		LifetimeThrowingTracked::default_ctor_count,
+		LifetimeThrowingTracked::copy_ctor_count,
+		LifetimeThrowingTracked::move_ctor_count,
+		LifetimeThrowingTracked::copy_assign_count,
+		LifetimeThrowingTracked::move_assign_count,
+		LifetimeThrowingTracked::transfer_count,
+		LifetimeThrowingTracked::dtor_count
+	};
+}
+
 template<class V>
 constexpr bool has_using_sso = requires(const V& v) { v.using_sso(); };
 
@@ -517,6 +541,64 @@ void check_serials_differ(const TestContext& ctx, const Vec& v, const std::vecto
 		ok = (actual[i] != baseline[i]);
 	}
 	check(ctx, ok, label);
+}
+
+template<typename Vec>
+Vec make_heap_backed_lifetime_vector(std::initializer_list<int> values) {
+	Vec v;
+	v.reserve((std::max)(std::size_t{16}, values.size()));
+	for (int value : values) {
+		v.emplace_back(value);
+	}
+	return v;
+}
+
+template<typename Vec>
+void assert_effectively_shareable_via_copy_probe(const TestContext& ctx, const Vec& source, const char* label) {
+	// This helper is intentionally a behavioral probe with side effects: it performs a real copy and then
+	// infers effective shareability from observable copy behavior and safe const-data pointer identity.
+	const auto before = LifetimeTracked::snapshot();
+	const auto expected_values = lifetime_payloads(source);
+	const auto* source_ptr = source.data();
+	Vec probe = source;
+	const Vec& cprobe = probe;
+	const auto after = LifetimeTracked::snapshot();
+	check(ctx, lifetime_payloads(probe) == expected_values, label);
+	check(ctx, cprobe.data() == source_ptr, label);
+	check(ctx, after.copy_ctor == before.copy_ctor, "shareable copy probe does not copy-construct elements");
+	check(ctx, after.move_ctor == before.move_ctor, "shareable copy probe does not move-construct elements");
+	check(ctx, after.value_ctor == before.value_ctor, "shareable copy probe does not value-construct elements");
+	check(ctx, after.default_ctor == before.default_ctor, "shareable copy probe does not default-construct elements");
+}
+
+template<typename Vec>
+void assert_effectively_unshareable_via_copy_probe(const TestContext& ctx, const Vec& source, const char* label) {
+	// This helper also has side effects: it copies `source` and uses the resulting element construction
+	// activity plus pointer inequality to show that future copies no longer share the existing payload.
+	const auto before = LifetimeTracked::snapshot();
+	const auto expected_values = lifetime_payloads(source);
+	const auto* source_ptr = source.data();
+	const auto size_before = source.size();
+	Vec probe = source;
+	const Vec& cprobe = probe;
+	const auto after = LifetimeTracked::snapshot();
+	check(ctx, lifetime_payloads(probe) == expected_values, label);
+	check(ctx, cprobe.data() != source_ptr, label);
+	check(ctx, after.copy_ctor - before.copy_ctor == static_cast<int>(size_before), "unshareable copy probe deep-copies each live element");
+	check(ctx, after.move_ctor == before.move_ctor, "unshareable copy probe does not move-construct elements");
+}
+
+void assert_no_new_constructions_during_lifetime_tracked_interval(
+	const TestContext& ctx,
+	const LifetimeTrackedStats& before,
+	const LifetimeTrackedStats& after,
+	const char* label_prefix) {
+	// Helper for pure release / scope-exit checks. It intentionally says nothing about destruction counts:
+	// some destructor paths should destroy exactly N objects, while others should destroy none.
+	check(ctx, after.default_ctor == before.default_ctor, label_prefix);
+	check(ctx, after.value_ctor == before.value_ctor, label_prefix);
+	check(ctx, after.copy_ctor == before.copy_ctor, label_prefix);
+	check(ctx, after.move_ctor == before.move_ctor, label_prefix);
 }
 
 template<class T, class Alloc>
@@ -1314,6 +1396,425 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 	}
 }
 
+void run_sso_vector_cow_behavior_suite(int& failures) {
+	using Vec = sso_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
+	using ThrowVec = sso_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
+	TestContext ctx{"sso_vector_cow_specific", failures};
+
+	{
+		// A fresh heap-backed vector should remain effectively shareable across ordinary copies.
+		LifetimeTracked::reset();
+		{
+			const Vec a = make_heap_backed_lifetime_vector<Vec>({0, 1, 2, 3, 4, 5});
+			assert_effectively_shareable_via_copy_probe(ctx, a, "fresh heap-backed vector is effectively shareable via copy probe");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "fresh shareability probe scope destruction");
+	}
+
+	{
+		// Releasing one sharer by overwrite/reset must not clone the shared payload just to tear it down.
+		LifetimeTracked::reset();
+		{
+			Vec survivor = make_heap_backed_lifetime_vector<Vec>({10, 11, 12, 13, 14, 15});
+			Vec releaser = survivor;
+			const auto before_release = LifetimeTracked::snapshot();
+			releaser = Vec{};
+			const auto after_release = LifetimeTracked::snapshot();
+			check(ctx, releaser.empty(), "release overwrite leaves source empty");
+			check_values(ctx, survivor, {10, 11, 12, 13, 14, 15}, "release overwrite preserves sibling contents");
+			check(ctx, after_release.copy_ctor == before_release.copy_ctor, "release overwrite does not copy-construct");
+			check(ctx, after_release.move_ctor == before_release.move_ctor, "release overwrite does not move-construct");
+			check(ctx, after_release.value_ctor == before_release.value_ctor, "release overwrite does not value-construct");
+			check(ctx, after_release.default_ctor == before_release.default_ctor, "release overwrite does not default-construct");
+			check(ctx, after_release.dtor == before_release.dtor, "release overwrite does not destroy shared elements while sibling remains");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "release overwrite scope destruction");
+	}
+
+	{
+		// clear() on shared storage should release this owner without cloning just to destroy.
+		LifetimeTracked::reset();
+		{
+			Vec a = make_heap_backed_lifetime_vector<Vec>({20, 21, 22, 23, 24, 25});
+			Vec b = a;
+			const auto before_clear = LifetimeTracked::snapshot();
+			a.clear();
+			const auto after_clear = LifetimeTracked::snapshot();
+			check(ctx, a.empty(), "clear on shared storage empties target");
+			check_values(ctx, b, {20, 21, 22, 23, 24, 25}, "clear on shared storage preserves sibling contents");
+			check(ctx, after_clear.copy_ctor == before_clear.copy_ctor, "clear on shared storage does not copy-construct");
+			check(ctx, after_clear.move_ctor == before_clear.move_ctor, "clear on shared storage does not move-construct");
+			check(ctx, after_clear.value_ctor == before_clear.value_ctor, "clear on shared storage does not value-construct");
+			check(ctx, after_clear.default_ctor == before_clear.default_ctor, "clear on shared storage does not default-construct");
+			check(ctx, after_clear.dtor == before_clear.dtor, "clear on shared storage does not destroy shared elements while sibling remains");
+			a.emplace_back(99);
+			check_values(ctx, a, {99}, "cleared vector remains reusable");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "clear on shared storage scope destruction");
+	}
+
+	{
+		// Proxy write should detach, preserve the sibling, and leave the detached vector still shareable
+		// for future read-only copies because no raw mutable pointer escaped.
+		LifetimeTracked::reset();
+		{
+			Vec a = make_heap_backed_lifetime_vector<Vec>({30, 31, 32, 33, 34, 35});
+			Vec b = a;
+			const auto before_write = LifetimeTracked::snapshot();
+			a[1] = LifetimeTracked(777);
+			const auto after_write = LifetimeTracked::snapshot();
+			check_values(ctx, a, {30, 777, 32, 33, 34, 35}, "proxy write updates detached destination");
+			check_values(ctx, b, {30, 31, 32, 33, 34, 35}, "proxy write leaves sibling untouched");
+			check(ctx, after_write.copy_ctor - before_write.copy_ctor == 6, "proxy write clone copies the shared payload once");
+			check(ctx, after_write.move_assign - before_write.move_assign == 1, "proxy write applies one in-place move assignment after detach");
+			assert_effectively_shareable_via_copy_probe(ctx, a, "proxy-written vector stays effectively shareable via copy probe");
+			assert_effectively_shareable_via_copy_probe(ctx, b, "untouched sibling stays effectively shareable via copy probe");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "proxy write behavior scope destruction");
+	}
+
+	{
+		// Non-const data() should detach first, then make the target effectively unshareable for future copies.
+		LifetimeTracked::reset();
+		{
+			Vec a = make_heap_backed_lifetime_vector<Vec>({40, 41, 42, 43, 44, 45});
+			Vec b = a;
+			const auto before_detach = LifetimeTracked::snapshot();
+			LifetimeTracked* raw = a.data();
+			const auto after_detach = LifetimeTracked::snapshot();
+			check(ctx, after_detach.copy_ctor - before_detach.copy_ctor == 6, "non-const data detaches by copying the shared payload once");
+			check(ctx, after_detach.move_ctor == before_detach.move_ctor, "non-const data detach does not move-construct elements");
+			raw[2].value = 4242;
+			check_values(ctx, a, {40, 41, 4242, 43, 44, 45}, "non-const data mutation updates detached target");
+			check_values(ctx, b, {40, 41, 42, 43, 44, 45}, "non-const data mutation leaves sibling untouched");
+			assert_effectively_unshareable_via_copy_probe(ctx, a, "non-const data makes target effectively unshareable via copy probe");
+			assert_effectively_shareable_via_copy_probe(ctx, b, "untouched sibling remains effectively shareable via copy probe");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "non-const data detach scope destruction");
+	}
+
+	{
+		// const data() on shared storage should be observational only: no detach and no lifetime traffic.
+		LifetimeTracked::reset();
+		{
+			Vec a = make_heap_backed_lifetime_vector<Vec>({50, 51, 52, 53, 54, 55});
+			Vec b = a;
+			const Vec& ca = a;
+			const Vec& cb = b;
+			const auto before_const_data = LifetimeTracked::snapshot();
+			const LifetimeTracked* pa = ca.data();
+			const LifetimeTracked* pb = cb.data();
+			const auto after_const_data = LifetimeTracked::snapshot();
+			check(ctx, pa == pb, "const data preserves shared observable address");
+			check_values(ctx, a, {50, 51, 52, 53, 54, 55}, "const data preserves left contents");
+			check_values(ctx, b, {50, 51, 52, 53, 54, 55}, "const data preserves right contents");
+			check(ctx, after_const_data.copy_ctor == before_const_data.copy_ctor, "const data does not copy-construct");
+			check(ctx, after_const_data.move_ctor == before_const_data.move_ctor, "const data does not move-construct");
+			check(ctx, after_const_data.value_ctor == before_const_data.value_ctor, "const data does not value-construct");
+			check(ctx, after_const_data.default_ctor == before_const_data.default_ctor, "const data does not default-construct");
+			check(ctx, after_const_data.dtor == before_const_data.dtor, "const data does not destroy");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "const data behavior scope destruction");
+	}
+
+	{
+		// If detach via non-const data() throws mid-clone, the shared source state must survive intact and
+		// partially constructed clone elements must be cleaned up immediately.
+		LifetimeThrowingTracked::reset();
+		{
+			ThrowVec a = make_heap_backed_lifetime_vector<ThrowVec>({60, 61, 62, 63, 64, 65});
+			ThrowVec b = a;
+			const ThrowVec& cb = b;
+			const auto* shared_ptr = cb.data();
+			const auto before_throw = snapshot_lifetime_throwing_tracked();
+			LifetimeThrowingTracked::throw_on_copy_ctor = 3;
+			expect_throw<std::runtime_error>(ctx, "non-const data detach clone throws", [&]() {
+				(void)a.data();
+			});
+			LifetimeThrowingTracked::throw_on_copy_ctor = -1;
+			const auto after_throw = snapshot_lifetime_throwing_tracked();
+			const ThrowVec& ca = a;
+			check_values(ctx, a, {60, 61, 62, 63, 64, 65}, "failed non-const data detach preserves target contents");
+			check_values(ctx, b, {60, 61, 62, 63, 64, 65}, "failed non-const data detach preserves sibling contents");
+			check(ctx, after_throw.copy_ctor_count - before_throw.copy_ctor_count == 3, "failed non-const data detach attempts copies through the throwing element");
+			check(ctx, after_throw.dtor_count - before_throw.dtor_count == 2, "failed non-const data detach destroys fully constructed clone prefix");
+			check(ctx, after_throw.live == before_throw.live, "failed non-const data detach leaves no leaked live objects");
+			check(ctx, ca.data() == shared_ptr, "after failed detach the target still observes original shared storage");
+			check(ctx, cb.data() == shared_ptr, "failed detach leaves sibling on original shared storage");
+		}
+		check(ctx, LifetimeThrowingTracked::live == 0, "failed non-const data detach scope destruction");
+	}
+
+	{
+		// Same failure mode, but triggered by the write path itself. Clone must fail before any element
+		// assignment becomes observable.
+		LifetimeThrowingTracked::reset();
+		{
+			ThrowVec a = make_heap_backed_lifetime_vector<ThrowVec>({70, 71, 72, 73, 74, 75});
+			ThrowVec b = a;
+			LifetimeThrowingTracked rhs(999);
+			const ThrowVec& cb = b;
+			const auto* shared_ptr = cb.data();
+			const auto before_throw = snapshot_lifetime_throwing_tracked();
+			LifetimeThrowingTracked::throw_on_copy_ctor = 4;
+			expect_throw<std::runtime_error>(ctx, "proxy write detach clone throws", [&]() {
+				a[2] = rhs;
+			});
+			LifetimeThrowingTracked::throw_on_copy_ctor = -1;
+			const auto after_throw = snapshot_lifetime_throwing_tracked();
+			const ThrowVec& ca = a;
+			check_values(ctx, a, {70, 71, 72, 73, 74, 75}, "failed proxy write detach preserves target contents");
+			check_values(ctx, b, {70, 71, 72, 73, 74, 75}, "failed proxy write detach preserves sibling contents");
+			check(ctx, after_throw.copy_ctor_count - before_throw.copy_ctor_count == 4, "failed proxy write detach attempts copies through the throwing element");
+			check(ctx, after_throw.dtor_count - before_throw.dtor_count == 3, "failed proxy write detach destroys fully constructed clone prefix");
+			check(ctx, after_throw.copy_assign_count == before_throw.copy_assign_count, "failed proxy write detach does not reach copy assignment");
+			check(ctx, after_throw.move_assign_count == before_throw.move_assign_count, "failed proxy write detach does not reach move assignment");
+			check(ctx, after_throw.live == before_throw.live, "failed proxy write detach leaves no leaked live objects");
+			check(ctx, ca.data() == shared_ptr, "failed proxy write detach leaves target observing original shared storage");
+			check(ctx, cb.data() == shared_ptr, "failed proxy write detach leaves sibling observing original shared storage");
+		}
+		check(ctx, LifetimeThrowingTracked::live == 0, "failed proxy write detach scope destruction");
+	}
+}
+
+void run_sso_vector_cow_destructor_and_reuse_suite(int& failures) {
+	using Vec = sso_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
+	using ThrowVec = sso_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
+	TestContext ctx{"sso_vector_cow_destructor_reuse", failures};
+
+	{
+		// True destructor path: one sharer dies by actual scope exit while another survives.
+		LifetimeTracked::reset();
+		{
+			Vec survivor = make_heap_backed_lifetime_vector<Vec>({80, 81, 82, 83, 84, 85});
+			const LifetimeTracked* shared_ptr = nullptr;
+			LifetimeTrackedStats before_scope_exit{};
+			{
+				Vec dying = survivor;
+				const Vec& cdying = dying;
+				shared_ptr = cdying.data();
+				before_scope_exit = LifetimeTracked::snapshot();
+			}
+			const LifetimeTrackedStats after_scope_exit = LifetimeTracked::snapshot();
+			const Vec& csurvivor = survivor;
+			check_values(ctx, survivor, {80, 81, 82, 83, 84, 85}, "survivor retains contents after sibling scope exit");
+			check(ctx, csurvivor.data() == shared_ptr, "survivor still observes original shared payload after sibling scope exit");
+			assert_no_new_constructions_during_lifetime_tracked_interval(
+				ctx, before_scope_exit, after_scope_exit, "shared scope exit performs no new constructions");
+			check(ctx, after_scope_exit.dtor == before_scope_exit.dtor, "shared scope exit destroys no payload while survivor remains");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "true shared destructor-path scope destruction");
+	}
+
+	{
+		// After proxy-write detach, destroying the detached branch should destroy only that branch's payload.
+		LifetimeTracked::reset();
+		{
+			Vec survivor = make_heap_backed_lifetime_vector<Vec>({90, 91, 92, 93, 94, 95});
+			LifetimeTrackedStats before_scope_exit{};
+			{
+				Vec detached = survivor;
+				detached[2] = LifetimeTracked(9092);
+				check_values(ctx, detached, {90, 91, 9092, 93, 94, 95}, "proxy-write detached branch mutates independently");
+				before_scope_exit = LifetimeTracked::snapshot();
+			}
+			const LifetimeTrackedStats after_scope_exit = LifetimeTracked::snapshot();
+			check_values(ctx, survivor, {90, 91, 92, 93, 94, 95}, "proxy-write survivor keeps original contents after detached branch dies");
+			assert_no_new_constructions_during_lifetime_tracked_interval(
+				ctx, before_scope_exit, after_scope_exit, "detached branch scope exit performs no new constructions");
+			check(ctx, after_scope_exit.dtor - before_scope_exit.dtor == 6, "detached branch scope exit destroys exactly its own payload");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "proxy-write detached destructor scope destruction");
+	}
+
+	{
+		// Same destructor-path check, but after non-const data() detach and raw mutable escape.
+		LifetimeTracked::reset();
+		{
+			Vec survivor = make_heap_backed_lifetime_vector<Vec>({100, 101, 102, 103, 104, 105});
+			LifetimeTrackedStats before_scope_exit{};
+			{
+				Vec detached = survivor;
+				LifetimeTracked* raw = detached.data();
+				raw[1].value = 1001;
+				check_values(ctx, detached, {100, 1001, 102, 103, 104, 105}, "raw-mutable detached branch mutates independently");
+				before_scope_exit = LifetimeTracked::snapshot();
+			}
+			const LifetimeTrackedStats after_scope_exit = LifetimeTracked::snapshot();
+			check_values(ctx, survivor, {100, 101, 102, 103, 104, 105}, "raw-mutable survivor keeps original contents after detached branch dies");
+			assert_no_new_constructions_during_lifetime_tracked_interval(
+				ctx, before_scope_exit, after_scope_exit, "raw-mutable detached scope exit performs no new constructions");
+			check(ctx, after_scope_exit.dtor - before_scope_exit.dtor == 6, "raw-mutable detached scope exit destroys exactly its own payload");
+			assert_effectively_shareable_via_copy_probe(ctx, survivor, "surviving untouched branch stays effectively shareable after raw-mutable sibling dies");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "raw-mutable detached destructor scope destruction");
+	}
+
+	{
+		// Failed detach should still be followed by a clean later destructor path for the original shared payload.
+		LifetimeThrowingTracked::reset();
+		LifetimeThrowingTrackedSnapshot after_failed_detach{};
+		{
+			ThrowVec a = make_heap_backed_lifetime_vector<ThrowVec>({110, 111, 112, 113, 114, 115});
+			ThrowVec b = a;
+			LifetimeThrowingTracked::throw_on_copy_ctor = 3;
+			expect_throw<std::runtime_error>(ctx, "failed detach before scope-exit destruction", [&]() {
+				(void)a.data();
+			});
+			LifetimeThrowingTracked::throw_on_copy_ctor = -1;
+			check_values(ctx, a, {110, 111, 112, 113, 114, 115}, "failed-detach target keeps original contents before destruction");
+			check_values(ctx, b, {110, 111, 112, 113, 114, 115}, "failed-detach sibling keeps original contents before destruction");
+			after_failed_detach = snapshot_lifetime_throwing_tracked();
+			check(ctx, after_failed_detach.live == 6, "failed detach leaves only original shared payload live before scope exit");
+		}
+		const auto after_scope_exit = snapshot_lifetime_throwing_tracked();
+		check(ctx, after_scope_exit.live == 0, "failed-detach scope exit leaves no live objects");
+		check(ctx, after_scope_exit.dtor_count - after_failed_detach.dtor_count == 6, "failed-detach scope exit destroys original shared payload exactly once");
+	}
+
+	{
+		// Destructor-path analogue of the failed proxy-write detach test: clone fails first, no assignment
+		// becomes visible, and later scope exit still destroys the original shared payload exactly once.
+		LifetimeThrowingTracked::reset();
+		LifetimeThrowingTrackedSnapshot after_rhs_scope{};
+		{
+			ThrowVec a = make_heap_backed_lifetime_vector<ThrowVec>({116, 117, 118, 119, 120, 121});
+			ThrowVec b = a;
+			const ThrowVec& ca = a;
+			const ThrowVec& cb = b;
+			const auto* shared_ptr = cb.data();
+			{
+				LifetimeThrowingTracked rhs(9118);
+				const auto before_throw = snapshot_lifetime_throwing_tracked();
+				LifetimeThrowingTracked::throw_on_copy_ctor = 4;
+				expect_throw<std::runtime_error>(ctx, "failed proxy-write detach before scope-exit destruction", [&]() {
+					a[2] = rhs;
+				});
+				LifetimeThrowingTracked::throw_on_copy_ctor = -1;
+				const auto after_throw = snapshot_lifetime_throwing_tracked();
+				check_values(ctx, a, {116, 117, 118, 119, 120, 121}, "failed proxy-write detach keeps target contents before destruction");
+				check_values(ctx, b, {116, 117, 118, 119, 120, 121}, "failed proxy-write detach keeps sibling contents before destruction");
+				check(ctx, after_throw.copy_ctor_count - before_throw.copy_ctor_count == 4, "failed proxy-write detach attempts copies through the throwing element before destruction");
+				check(ctx, after_throw.dtor_count - before_throw.dtor_count == 3, "failed proxy-write detach cleans up fully constructed clone prefix before destruction");
+				check(ctx, after_throw.copy_assign_count == before_throw.copy_assign_count, "failed proxy-write detach does not reach copy assignment before destruction");
+				check(ctx, after_throw.move_assign_count == before_throw.move_assign_count, "failed proxy-write detach does not reach move assignment before destruction");
+				check(ctx, after_throw.live == before_throw.live, "failed proxy-write detach leaves no leaked live objects mid-scope");
+				check(ctx, ca.data() == shared_ptr, "failed proxy-write detach leaves target observing original shared storage before destruction");
+				check(ctx, cb.data() == shared_ptr, "failed proxy-write detach leaves sibling observing original shared storage before destruction");
+			}
+			after_rhs_scope = snapshot_lifetime_throwing_tracked();
+			check_values(ctx, a, {116, 117, 118, 119, 120, 121}, "failed proxy-write detach keeps target contents after rhs teardown");
+			check_values(ctx, b, {116, 117, 118, 119, 120, 121}, "failed proxy-write detach keeps sibling contents after rhs teardown");
+			check(ctx, after_rhs_scope.live == 6, "after rhs scope only the original shared payload remains live before vector destruction");
+			check(ctx, ca.data() == shared_ptr, "after rhs scope the target still observes original shared storage before vector destruction");
+			check(ctx, cb.data() == shared_ptr, "after rhs scope the sibling still observes original shared storage before vector destruction");
+		}
+		const auto after_scope_exit = snapshot_lifetime_throwing_tracked();
+		check(ctx, after_scope_exit.live == 0, "failed proxy-write detach scope exit leaves no live objects");
+		check(ctx, after_scope_exit.default_ctor_count == after_rhs_scope.default_ctor_count, "failed proxy-write detach teardown performs no new default constructions");
+		check(ctx, after_scope_exit.copy_ctor_count == after_rhs_scope.copy_ctor_count, "failed proxy-write detach teardown performs no new copy constructions");
+		check(ctx, after_scope_exit.move_ctor_count == after_rhs_scope.move_ctor_count, "failed proxy-write detach teardown performs no new move constructions");
+		check(ctx, after_scope_exit.dtor_count - after_rhs_scope.dtor_count == 6, "failed proxy-write detach scope exit destroys the original shared payload exactly once");
+	}
+
+	{
+		// Multi-generation sharing: mutate one branch, destroy one untouched branch, then copy again from
+		// the surviving untouched branch to verify bookkeeping across more than two sharers.
+		LifetimeTracked::reset();
+		{
+			Vec a = make_heap_backed_lifetime_vector<Vec>({120, 121, 122, 123, 124, 125});
+			Vec b = a;
+			LifetimeTrackedStats before_scope_exit{};
+			{
+				Vec c = b;
+				b[3] = LifetimeTracked(3123);
+				check_values(ctx, a, {120, 121, 122, 123, 124, 125}, "multi-generation untouched root keeps original contents");
+				check_values(ctx, b, {120, 121, 122, 3123, 124, 125}, "multi-generation mutated branch changes independently");
+				check_values(ctx, c, {120, 121, 122, 123, 124, 125}, "multi-generation untouched sibling keeps original contents");
+				before_scope_exit = LifetimeTracked::snapshot();
+			}
+			const LifetimeTrackedStats after_scope_exit = LifetimeTracked::snapshot();
+			check_values(ctx, a, {120, 121, 122, 123, 124, 125}, "multi-generation survivor stays correct after untouched sibling dies");
+			check_values(ctx, b, {120, 121, 122, 3123, 124, 125}, "multi-generation mutated branch stays detached after untouched sibling dies");
+			assert_no_new_constructions_during_lifetime_tracked_interval(
+				ctx, before_scope_exit, after_scope_exit, "multi-generation untouched-branch scope exit performs no new constructions");
+			check(ctx, after_scope_exit.dtor == before_scope_exit.dtor, "multi-generation untouched-branch scope exit destroys no shared payload while root survives");
+			assert_effectively_shareable_via_copy_probe(ctx, a, "surviving untouched branch remains effectively shareable via copy probe");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "multi-generation sharing scope destruction");
+	}
+
+	{
+		// Copying from an effectively unshareable source must deep-copy, and later destroying the source
+		// must not trigger any clone-on-destroy behavior.
+		LifetimeTracked::reset();
+		{
+			Vec copy_survivor;
+			LifetimeTrackedStats before_source_scope_exit{};
+			{
+				Vec source = make_heap_backed_lifetime_vector<Vec>({130, 131, 132, 133, 134, 135});
+				LifetimeTracked* raw = source.data();
+				raw[0].value = 1313;
+				const Vec& csource = source;
+				const auto* source_ptr = csource.data();
+				const LifetimeTrackedStats before_copy = LifetimeTracked::snapshot();
+				copy_survivor = source;
+				const LifetimeTrackedStats after_copy = LifetimeTracked::snapshot();
+				const Vec& ccopy_survivor = copy_survivor;
+				check_values(ctx, copy_survivor, {1313, 131, 132, 133, 134, 135}, "copy from unshareable source preserves payload");
+				check(ctx, ccopy_survivor.data() != source_ptr, "copy from unshareable source deep-copies instead of sharing");
+				check(ctx, after_copy.copy_ctor - before_copy.copy_ctor == 6, "copy from unshareable source copies each live element");
+				before_source_scope_exit = LifetimeTracked::snapshot();
+			}
+			const LifetimeTrackedStats after_source_scope_exit = LifetimeTracked::snapshot();
+			check_values(ctx, copy_survivor, {1313, 131, 132, 133, 134, 135}, "copy from unshareable source survives source destruction");
+			assert_no_new_constructions_during_lifetime_tracked_interval(
+				ctx, before_source_scope_exit, after_source_scope_exit, "destroying unshareable source performs no new constructions");
+			check(ctx, after_source_scope_exit.dtor - before_source_scope_exit.dtor == 6, "destroying unshareable source destroys exactly its own payload");
+			assert_effectively_shareable_via_copy_probe(ctx, copy_survivor, "deep-copied survivor remains effectively shareable after source destruction");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "copy from unshareable source scope destruction");
+	}
+
+	{
+		// After a successful detach, both branches should remain reusable for further mutations and growth.
+		LifetimeTracked::reset();
+		{
+			Vec a = make_heap_backed_lifetime_vector<Vec>({140, 141, 142, 143, 144, 145});
+			Vec b = a;
+			a[0] = LifetimeTracked(4140);
+			a.emplace_back(146);
+			b.clear();
+			b.emplace_back(241);
+			b.emplace_back(242);
+			check_values(ctx, a, {4140, 141, 142, 143, 144, 145, 146}, "post-detach target remains reusable for append");
+			check_values(ctx, b, {241, 242}, "post-detach sibling remains reusable after clear-and-append");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "post-successful-detach reuse scope destruction");
+	}
+
+	{
+		// After a failed detach, both vectors should still be reusable once throwing is disabled again.
+		LifetimeThrowingTracked::reset();
+		{
+			ThrowVec a = make_heap_backed_lifetime_vector<ThrowVec>({150, 151, 152, 153, 154, 155});
+			ThrowVec b = a;
+			LifetimeThrowingTracked::throw_on_copy_ctor = 2;
+			expect_throw<std::runtime_error>(ctx, "failed detach before reuse", [&]() {
+				(void)a.data();
+			});
+			LifetimeThrowingTracked::throw_on_copy_ctor = -1;
+			a.emplace_back(156);
+			b.clear();
+			b.emplace_back(251);
+			b[0] = LifetimeThrowingTracked(252);
+			check_values(ctx, a, {150, 151, 152, 153, 154, 155, 156}, "post-failed-detach target remains reusable");
+			check_values(ctx, b, {252}, "post-failed-detach sibling remains reusable");
+		}
+		check(ctx, LifetimeThrowingTracked::live == 0, "post-failed-detach reuse scope destruction");
+	}
+}
+
 void run_sso_vector_specific_lifetime_suite(int& failures) {
 	using Vec = sso_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
 	using ThrowVec = sso_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
@@ -1550,6 +2051,8 @@ int main() {
 	int nrOfFailedTestCases = 0;
 	run_sso_proxy_suite(nrOfFailedTestCases);
 	run_sso_cow_suite(nrOfFailedTestCases);
+	run_sso_vector_cow_behavior_suite(nrOfFailedTestCases);
+	run_sso_vector_cow_destructor_and_reuse_suite(nrOfFailedTestCases);
 	run_vector_std_parity_suite(nrOfFailedTestCases);
 	run_vector_suite<sso_vector_auto>("sso_vector", nrOfFailedTestCases);
 	run_vector_suite<std::vector>("std::vector", nrOfFailedTestCases);
