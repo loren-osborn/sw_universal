@@ -7,6 +7,11 @@
 //  - Proxy element + proxy non-const iterators (vector<bool>-style)
 //  - "Shareable" state to prevent sharing when an external non-const pointer has been handed out.
 //
+// The core intent is to keep small vectors in-object while still allowing large heap-backed vectors
+// to be copied cheaply until an operation needs unique mutable ownership. The mutable API is
+// intentionally not "ordinary std::vector<T>& everywhere": non-const element access goes through
+// proxies so reads can preserve sharing and writes can detach only when needed.
+//
 // Key design points:
 //  - Two-layout representation uses custom_indexed_variant with sideband size.
 //  - Heap sharing state uses bitfield_pack over a single atomic control word.
@@ -15,6 +20,12 @@
 //  - Heap control word is mutable so refcount/shareable can change through const references.
 //  - N==0 degrades to std::vector.
 //  - Default N computed to match sizeof(std::vector<T, Allocator>) where possible.
+//
+// Lifetime model:
+//  - Both inline and heap representations hold raw storage, not always-live T objects.
+//  - Elements are explicitly constructed and destroyed only for indices [0, size()).
+//  - Future maintainers must not treat the buffers as trivially relocatable byte arrays unless T's
+//    semantics truly permit it; bytewise movement would be wrong for many non-trivial element types.
 //
 // Threading model (matches std::vector intent):
 //  - Like std::vector, element operations are not thread-safe against concurrent mutation.
@@ -127,6 +138,9 @@ inline constexpr header_word hdr_set_refcount(header_word w, std::uint64_t rc) n
 
 // ------------------------ heap block ------------------------
 
+// Heap blocks are reference-counted storage nodes shared by multiple vectors while the block remains
+// marked shareable. The vector's logical size is not stored in the block; it remains per-container in
+// the variant sideband so sharing does not require rewriting per-instance size metadata.
 template<class T>
 struct heap_block {
 	static_assert(alignof(T) <= alignof(std::max_align_t), "sso_vector requires T alignment compatible with byte-rebound allocator");
@@ -413,6 +427,8 @@ private:
 	// ------------------------ heap/state transitions ------------------------
 
 	/// @brief Releases one reference to a heap block, destroying elements and deallocating if it becomes unique-to-zero.
+	/// @details This is a teardown path only. It must never clone or detach: destroying one sharer of
+	///          a shared block should just decrement the refcount unless this was the last owner.
 	void release_heap_block_impl(sso_vector_detail::heap_block<T>* b, size_type constructed) noexcept {
 		if (!b) return;
 		if (sso_vector_detail::dec_ref(b)) {
@@ -425,6 +441,7 @@ private:
 	}
 
 	/// @brief Releases the active heap representation, if any.
+	/// @details Like `release_heap_block_impl`, this is a release/reset helper, not a mutation helper.
 	void release_heap_impl() noexcept {
 		if (!is_heap_impl()) return;
 		auto& h = heap_storage_impl();
@@ -438,6 +455,8 @@ private:
 	/// @brief Detaches from shared heap storage when the active block has `refcount > 1`.
 	/// @details Shareability controls whether future copies may share; it does not prevent detaching
 	///          for mutation. This helper allocates a fresh heap block and copies the active payload.
+	///          It is the "clone for mutation" path, in contrast to release/reset helpers which must
+	///          never clone. Construction of the replacement block completes before publication.
 	void ensure_unique_heap_impl() {
 		if (!is_heap_impl()) return;
 		auto& h = heap_storage_impl();
@@ -472,6 +491,7 @@ private:
 	}
 
 	/// @brief Releases owned state without cloning shared heap storage.
+	/// @details Destructor and assignment both rely on this staying a pure release path.
 	void reset_storage_impl() noexcept {
 		const size_type n = size_impl();
 		if (is_inline_impl()) {
@@ -513,6 +533,8 @@ private:
 	}
 
 	/// @brief Promotes inline storage to a fresh heap block with capacity `new_cap`.
+	/// @details Inline elements are live objects in raw inline storage, so promotion must transfer them
+	///          element-wise and then explicitly destroy the old inline lifetimes.
 	void promote_inline_to_heap_impl(size_type new_cap) {
 		assert(is_inline_impl());
 		if (new_cap < 1) new_cap = 1;
@@ -536,6 +558,8 @@ private:
 	}
 
 	/// @brief Reallocates the active heap representation into a fresh block with capacity `new_cap`.
+	/// @details Reallocation first forces uniqueness so the old block can be treated as exclusively owned
+	///          storage during transfer and teardown.
 	void reallocate_heap_impl(size_type new_cap) {
 		assert(is_heap_impl());
 		auto& h = heap_storage_impl();
@@ -598,6 +622,7 @@ private:
 	}
 
 	/// @brief Copies the observable contents/state from another vector, sharing heap storage only when allowed.
+	/// @details Heap-backed copies retain sharing only while the source block is still marked shareable.
 	void copy_from_impl(const sso_vector& other) {
 		if (other.is_inline_impl()) {
 			state_.template emplace<0>();
@@ -637,6 +662,9 @@ private:
 	}
 
 	/// @brief Destroys all active elements while preserving the current representation shell.
+	/// @details Clearing a shared heap-backed vector must not detach just to destroy "its own" elements.
+	///          Instead it drops its reference and becomes empty, leaving surviving sharers in charge of
+	///          eventual payload destruction.
 	void clear_impl() noexcept {
 		const size_type n = size_impl();
 		if (n == 0) {
@@ -865,6 +893,9 @@ public:
 	 *  - Reading does NOT detach.
 	 *  - Writing detaches if shared (refcount > 1), then writes.
 	 *  - Does NOT clear SHAREABLE; only data() does that.
+	 *
+	 * This intentional split lets `v[i]` behave like a mutable element operation without immediately
+	 * leaking a raw `T*`. The proxy is therefore closer to `vector<bool>::reference` than to `T&`.
 	 */
 	class reference_proxy {
 	public:
@@ -1066,6 +1097,8 @@ public:
 
 	/// @brief Proxy-based subscript for mutable access.
 	/// @details Reading through the proxy does not detach. Writing through it detaches shared heap storage.
+	///          This differs intentionally from `std::vector<T>::operator[]`, whose mutable overload
+	///          returns `T&` directly.
 	reference operator[](size_type pos) noexcept { return reference(this, pos); }
 	const_reference operator[](size_type pos) const noexcept { return data_const_impl()[pos]; }
 
@@ -1107,6 +1140,7 @@ public:
 	size_type capacity() const noexcept { return capacity_impl(); }
 
 	/// @brief Ensures capacity for at least `new_cap` elements.
+	/// @details Reserving storage changes capacity/representation only; it must not construct elements.
 	void reserve(size_type new_cap) {
 		if (new_cap <= capacity()) return;
 		ensure_capacity_impl(new_cap);
@@ -1261,7 +1295,10 @@ public:
 	allocator_type get_allocator() const noexcept { return alloc_; }
 
 private:
+	// Allocator used for explicit element construction/destruction and heap-block byte allocation.
 	Allocator alloc_{};
+	// Active representation plus sideband logical size. The sideband must always match the number of
+	// live T objects in the active storage alternative.
 	variant_t state_{std::in_place_index<0>};
 };
 

@@ -390,6 +390,9 @@ consteval std::size_t remainder_count() {
 ///          and exposes whole-word conversion through `raw_iface_t`. Ordinary mutation APIs
 ///          are whole-word load/modify/store operations through the word-spec hooks; retry/CAS
 ///          policy, if desired, belongs to the caller using sideband access.
+///          This is a typed field-access discipline and readability utility, not a sequence
+///          container: callers define one fixed compile-time layout and then manipulate named
+///          slices of that word.
 template <class Word, class IndexingSpec, class... FieldSpecs>
 class bitfield_pack {
 private:
@@ -430,7 +433,8 @@ private:
 		}
 	}
 
-	// Compile-time layout computation.
+	// Compile-time layout computation. Field specs are interpreted LSB-first; offsets are prefix sums
+	// over the resolved widths, with an optional trailing remainder field consuming all spare bits.
 	static consteval auto make_widths() {
 		std::array<std::size_t, kFieldCount> w{};
 		[&]<std::size_t... Is>(std::index_sequence<Is...>) {
@@ -694,6 +698,8 @@ private:
 		word_spec_t::store_storage(backend_, v);
 	}
 
+	// Owned backend object that ultimately stores the packed word. All field-oriented operations go
+	// through the canonical `storage_t` representation regardless of the raw whole-word interface type.
 	backend_t backend_{};
 };
 

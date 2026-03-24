@@ -1,5 +1,13 @@
 // custom_indexed_variant.cpp: unit tests for custom_indexed_variant
 //
+// Organization:
+// - encoded-index tests validate the pluggable index policies directly
+// - parity tests compare `custom_indexed_variant` against `std::variant` where semantics are intended
+//   to match closely
+// - custom-only suites document sideband behavior and the stronger "throw before destroy" cases used by
+//   internal consumers such as `sso_vector`
+// - lifetime suites use tracked alternatives to verify switching, assignment, and destruction invariants
+//
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
 // SPDX-License-Identifier: MIT
 //
@@ -49,6 +57,7 @@ bool expect_throw(const TestContext& ctx, const char* label, Fn&& fn) {
 	}
 }
 
+// Small probe for leak / double-destroy style checks.
 struct LiveCountedType {
 	static int live;
 	static int min_live;
@@ -69,6 +78,8 @@ struct LiveCountedType {
 int LiveCountedType::live = 0;
 int LiveCountedType::min_live = 0;
 
+// Constructor that can throw before any old alternative is destroyed. Tests use this to distinguish
+// "stage new value first" behavior from the simpler destroy-then-construct path.
 struct ThrowBeforeDestroyType {
 	static int live;
 	static int ctor_count;
@@ -101,6 +112,7 @@ int ThrowBeforeDestroyType::live = 0;
 int ThrowBeforeDestroyType::ctor_count = 0;
 int ThrowBeforeDestroyType::throw_on_ctor = -1;
 
+// General exception probe for std::variant parity and custom-only recovery checks.
 struct ThrowingType {
 	static int live;
 	static int default_count;
@@ -179,6 +191,8 @@ int ThrowingType::throw_on_move = -1;
 int ThrowingType::throw_on_copy_assign = -1;
 int ThrowingType::throw_on_move_assign = -1;
 
+// Captures what the local standard library actually does for selected throwing transitions so the
+// custom variant can compare against behavior instead of assuming one library's interpretation.
 struct StrongGuaranteeExpectations {
 	bool emplace_preserves = false;
 	bool assign_preserves = false;
@@ -191,6 +205,7 @@ enum class VisitRefCategory {
 	ConstRValue = 4
 };
 
+// Used to verify that `visit` preserves cv/ref category instead of silently decaying everything.
 struct VisitCategoryVisitor {
 	VisitRefCategory operator()(int&) const { return VisitRefCategory::LValue; }
 	VisitRefCategory operator()(const int&) const { return VisitRefCategory::ConstLValue; }
@@ -221,6 +236,8 @@ struct RejectConstRvalue {
 	bool operator()(const std::string&&) const = delete;
 };
 
+// Distinct tracked alternative types used to make "same active alternative" and "different active
+// alternative" assignment paths visible in the counters.
 template<int Tag>
 struct LifetimeVariantTracked {
 	inline static int live = 0;
@@ -281,6 +298,7 @@ struct LifetimeVariantTracked {
 	}
 };
 
+// Throwing tracked alternative used for tests that stage construction before replacing the current value.
 struct LifetimeVariantThrowingTracked {
 	inline static int live = 0;
 	inline static int ctor_count = 0;
@@ -406,6 +424,7 @@ StrongGuaranteeExpectations compute_std_expectations() {
 
 namespace variant_test {
 	// These adapters let the same parity tests target std::variant and custom_indexed_variant.
+	// The test bodies stay focused on observable behavior while the adapter picks the right API surface.
 	using std::get;
 	using std::get_if;
 	using std::holds_alternative;
@@ -447,7 +466,8 @@ struct VariantStateSummary {
 	std::string held;
 };
 
-// Summarize the observable variant state so parity tests can compare std/custom behavior directly.
+// Summarize the observable variant state so parity tests can compare std/custom behavior directly
+// without depending on implementation details.
 template<typename Variant>
 VariantStateSummary summarize_variant_state(const Variant& v) {
 	using namespace variant_test;
@@ -682,6 +702,8 @@ void run_encoded_index_tests(const char* impl_name, int& failures) {
 
 	{
 		// Sideband-carrying encoded index: index updates must preserve the sideband payload and vice versa.
+		// This is the property `sso_vector` depends on when it stores size in the sideband while the
+		// alternative index tracks inline-vs-heap representation.
 		using Index = sw::universal::internal::index_encoded_with_sideband_data<3>;
 		Index index{};
 		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data default index is std::variant_npos");
@@ -789,6 +811,8 @@ void run_variant_std_parity_tests(int& failures) {
 
 	{
 		// `emplace` is checked separately because it exercises destroy/reconstruct transitions.
+		// The first assignment here is the "same alternative, reuse object" case; the later emplaces are
+		// the "destroy current alternative and construct a new one" cases.
 		Std sv(5);
 		Custom cv(5);
 		std::get<0>(sv) = 6;
@@ -831,6 +855,7 @@ void run_variant_std_parity_tests(int& failures) {
 
 	{
 		// Swapping same-index and different-index alternatives exercises the active-state machine.
+		// Same-index swap should reuse live objects; different-index swap must exchange lifetimes.
 		Std left_sv(10);
 		Custom left_cv(10);
 		Std right_sv(20);
@@ -931,6 +956,8 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Exact-match conversion is an important documented choice: the exact type should win before
+		// broader implicit conversion ranking is considered.
 		using ExactNumeric = Variant<int, std::string>;
 		ExactNumeric v = 7;
 		check(ctx, v.index() == 0, "converting ctor exact match wins for int");
@@ -992,7 +1019,8 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	if constexpr (requires(VariantT& v) { v.sideband(); }) {
-		// Custom-only behavior: sideband bits must survive ordinary alternative transitions.
+		// Custom-only behavior: sideband bits belong to the encoded index policy rather than to any one
+		// payload alternative, so ordinary transitions must preserve them.
 		VariantT v(std::in_place_type<std::string>, "sb");
 		auto sa = v.sideband();
 		auto sb = v.sideband();
@@ -1021,6 +1049,7 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// `visit` tests are primarily about forwarding discipline, not visitor business logic.
 		VariantT v(std::in_place_type<LiveCountedType>, LiveCountedType{5});
 		int visit_result = visit_adapter([](auto& value) {
 			if constexpr (std::is_same_v<std::decay_t<decltype(value)>, int>) {
@@ -1070,6 +1099,8 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// This mirrors std::variant's library-specific behavior for throwing emplace when replacing the
+		// active alternative. The test records whether the old state is preserved or the variant becomes valueless.
 		ThrowingType::reset();
 		VariantT v(123);
 		ThrowingType::throw_on_default = 1;
@@ -1221,6 +1252,8 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Swap can fail while staging/moving values. The assertions focus on invariant preservation:
+		// any surviving ThrowingType instances must match the engaged variants, and recovery must remain possible.
 		ThrowingType::reset();
 		VariantT left(1);
 		VariantT right(std::in_place_type<ThrowingType>, ThrowingType{7});
@@ -1301,6 +1334,8 @@ void run_custom_variant_lifetime_suite(const char* impl_name, int& failures) {
 	LifetimeVariantThrowingTracked::reset();
 
 	{
+		// Switching alternatives should destroy the old active lifetime exactly once before the new one
+		// becomes observable.
 		V v(std::in_place_type<A>, 7);
 		check(ctx, A::live == 1, "A emplace constructs one live object");
 		check(ctx, sw::universal::internal::get<A>(v).value == 7, "A payload stored");
@@ -1342,6 +1377,9 @@ void run_custom_variant_lifetime_suite(const char* impl_name, int& failures) {
 	B::reset();
 
 	{
+		// Assignment splits into two important cases:
+		// - same active alternative: use assignment on the live object
+		// - different active alternative: destroy/reconstruct
 		V same_dst(std::in_place_type<A>, 2);
 		V same_src(std::in_place_type<A>, 5);
 		same_dst = same_src;
@@ -1389,6 +1427,7 @@ void run_custom_variant_lifetime_suite(const char* impl_name, int& failures) {
 	check(ctx, A::live == 0 && B::live == 0, "repeated reassignment scope destruction leaves no leaks");
 
 	if constexpr (requires(V& v) { v.sideband(); }) {
+		// Sideband payload must be orthogonal to payload switching.
 		A::reset();
 		B::reset();
 		V v(std::in_place_type<A>, 4);
@@ -1400,6 +1439,7 @@ void run_custom_variant_lifetime_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Throwing emplace should preserve the prior alternative when construction fails before replacement.
 		A::reset();
 		B::reset();
 		LifetimeVariantThrowingTracked::reset();

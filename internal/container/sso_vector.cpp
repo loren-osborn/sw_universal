@@ -1,5 +1,16 @@
 // sso_vector.cpp: unit tests for sso_vector
 //
+// Organization:
+// - parity suites compare observable behavior against std::vector where the APIs intentionally overlap
+// - proxy/COW suites cover sso_vector-specific semantics that std::vector does not have
+// - lifetime suites use tracked and throwing element types to make construction/destruction visible
+//
+// Testing philosophy:
+// - Prefer observable behavior over direct inspection of internal representation details
+// - When a helper necessarily exposes side effects, the helper name or surrounding comment calls that out
+// - Count-based checks are used mainly to verify invariants such as "reserve does not construct" or
+//   "detach copied N live elements once", not to freeze every incidental implementation step
+//
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
 // SPDX-License-Identifier: MIT
 //
@@ -54,6 +65,8 @@ T& identity_ref(T& value) {
 	return value;
 }
 
+// Minimal probe for "how many objects are currently alive?" checks.
+// This catches leaks and double-destruction but intentionally does not distinguish copy vs move.
 struct LiveCountedType {
 	static int live;
 	int value{0};
@@ -68,6 +81,7 @@ struct LiveCountedType {
 
 int LiveCountedType::live = 0;
 
+// Exercises paths that must succeed without copy construction.
 struct MoveOnly {
 	static int live;
 	int value;
@@ -82,6 +96,8 @@ struct MoveOnly {
 
 int MoveOnly::live = 0;
 
+// General-purpose exception probe used for vector-style operations.
+// The various counters let tests say which operation threw without inspecting container internals.
 struct ThrowingType {
 	static int live;
 	static int default_count;
@@ -160,6 +176,7 @@ int ThrowingType::throw_on_move = -1;
 int ThrowingType::throw_on_copy_assign = -1;
 int ThrowingType::throw_on_move_assign = -1;
 
+// Richer lifetime accounting for tests that need to distinguish construction, assignment, and teardown.
 struct LifetimeTrackedStats {
 	int default_ctor = 0;
 	int value_ctor = 0;
@@ -172,6 +189,8 @@ struct LifetimeTrackedStats {
 	int next_serial = 0;
 };
 
+// Tracks payload plus a unique serial so tests can tell "same value, different object lifetime" apart.
+// That matters for inline-storage transitions where bytewise movement of live objects would be wrong.
 struct LifetimeTracked {
 	inline static LifetimeTrackedStats stats{};
 
@@ -226,6 +245,9 @@ struct LifetimeTracked {
 	}
 };
 
+// Lifetime probe that can throw from both construction and assignment.
+// `transfer_count` intentionally groups copy/move style payload transfers so cleanup tests can reason
+// about partial progress without depending on every exact internal step.
 struct LifetimeThrowingTracked {
 	inline static int live = 0;
 	inline static int default_ctor_count = 0;
@@ -420,6 +442,8 @@ private:
 	std::size_t count_ = 0;
 };
 
+// Shared invariant helper for vector-like tests. It stays at the semantic level: contiguity, size, and
+// data presence, rather than checking inline-vs-heap representation details.
 template<typename Vec>
 void check_invariants(Vec& v, const TestContext& ctx, const char* label) {
 	check(ctx, v.size() <= v.capacity(), label);
@@ -504,7 +528,8 @@ std::vector<typename Vec::value_type> materialize(const Vec& v) {
 	return std::vector<typename Vec::value_type>(v.begin(), v.end());
 }
 
-// Parity tests compare observable container state and contents, not exact growth policy.
+// Parity tests compare observable container state and contents, not exact growth policy or internal
+// representation. This keeps the suite focused on public semantics.
 template<typename LeftVec, typename RightVec>
 void check_same_vector_state(const TestContext& ctx, const LeftVec& left, const RightVec& right, const char* label) {
 	check(ctx, left.empty() == right.empty(), label);
@@ -726,6 +751,7 @@ void run_sso_proxy_suite(int& failures) {
 	TestContext ctx{"sso_vector(proxy)", failures};
 
 	// Custom-only behavior: non-const indexing/iteration uses proxy objects instead of raw references.
+	// This suite exists to make that intentional API difference obvious to future readers.
 	Vec v;
 	v.push_back(11);
 	v.push_back(22);
@@ -742,6 +768,8 @@ void run_sso_cow_suite(int& failures) {
 
 	{
 		// Copy-on-write: copying a shareable heap block should share until a write detaches it.
+		// Pointer equality is used here only as the observable sign that both vectors still read the
+		// same block; the test is not trying to pin down refcount internals.
 		Vec a;
 		a.reserve(64);
 		for (int i = 0; i < 12; ++i) a.push_back(i);
@@ -758,7 +786,8 @@ void run_sso_cow_suite(int& failures) {
 	}
 
 	{
-		// Mutable data() explicitly clears shareability so future copies deep-copy instead of sharing.
+		// Mutable data() is the "raw mutable access escapes" path. After handing out `T*`, future copies
+		// must stop sharing because the container can no longer police external mutation.
 		Vec v;
 		v.reserve(48);
 		for (int i = 0; i < 10; ++i) v.push_back(i);
@@ -773,7 +802,8 @@ void run_sso_cow_suite(int& failures) {
 	}
 
 	{
-		// Mutating operations on a shared heap block should detach before modifying observable contents.
+		// Structural mutation should also detach before touching shared payload, leaving the source
+		// vector's observable contents and size unchanged.
 		Vec base;
 		base.reserve(96);
 		for (int i = 0; i < 16; ++i) base.push_back(i);
@@ -789,6 +819,7 @@ void run_sso_cow_suite(int& failures) {
 
 	{
 		// Concurrency smoke test: repeated share-only copies should leave the source vector unchanged.
+		// This is not a full thread-safety proof; it only exercises the share bookkeeping path.
 		Vec shared;
 		shared.reserve(64);
 		for (int i = 0; i < 8; ++i) shared.push_back(i * 3);
@@ -958,6 +989,7 @@ void run_vector_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Growth failure should not leak partially transferred elements and should leave a usable prefix.
 		ThrowingType::reset();
 		VecDefaultAlloc<Vec, ThrowingType> v;
 		v.reserve(1);
@@ -975,6 +1007,7 @@ void run_vector_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Middle insertion is a good stress case because it combines growth with tail shifting.
 		ThrowingType::reset();
 		VecDefaultAlloc<Vec, ThrowingType> v;
 		for (int i = 0; i < 3; ++i) v.emplace_back(i);
@@ -991,6 +1024,7 @@ void run_vector_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Resizing growth can leave some new tail elements already live when a later construction throws.
 		ThrowingType::reset();
 		VecDefaultAlloc<Vec, ThrowingType> v;
 		for (int i = 0; i < 3; ++i) v.emplace_back(i);
@@ -1045,6 +1079,7 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 	using ThrowingVec = VecTemplate<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
 
 	{
+		// Reserve is the canonical "allocate raw storage but do not begin any element lifetimes" check.
 		LifetimeTracked::reset();
 		LifetimeTrackedStats before = LifetimeTracked::snapshot();
 		{
@@ -1063,6 +1098,7 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Resize growth should construct exactly the appended tail; shrink should destroy exactly that tail.
 		LifetimeTracked::reset();
 		{
 			TrackedVec v;
@@ -1078,6 +1114,7 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Shared vector-like lifetime semantics: copy/move create the expected destination lifetimes without leaks.
 		LifetimeTracked::reset();
 		{
 			TrackedVec v;
@@ -1099,6 +1136,7 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// Operator[] assignment should mutate one existing live element rather than reconstruct it.
 		LifetimeTracked::reset();
 		{
 			TrackedVec v;
@@ -1211,6 +1249,8 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 	}
 
 	{
+		// These append tests intentionally check prefix preservation rather than an all-or-nothing strong
+		// guarantee, because earlier successful appends are observable work.
 		for (int throw_at : {1, 2, 3}) {
 			LifetimeThrowingTracked::reset();
 			{
@@ -1280,6 +1320,8 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 	TestContext ctx{"sso_vector_lifetime_specific", failures};
 
 	{
+		// Highest-priority SSO lifetime invariant: reserve may change capacity/representation, but it must
+		// not construct live `T` objects just for spare capacity.
 		LifetimeTracked::reset();
 		LifetimeTrackedStats before = LifetimeTracked::snapshot();
 		{
@@ -1297,6 +1339,8 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 	}
 
 	{
+		// "No clone on destroy": dropping one owner of shared heap storage should neither reconstruct nor
+		// destroy payload while another sharer still exists.
 		LifetimeTracked::reset();
 		{
 			Vec a;
@@ -1322,6 +1366,7 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 	}
 
 	{
+		// Const raw access is observational only. It must not detach, unshare, or perturb lifetime counts.
 		LifetimeTracked::reset();
 		{
 			Vec a;
@@ -1345,6 +1390,8 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 	}
 
 	{
+		// Mutable raw access is stronger than proxy mutation: it detaches and also clears future shareability.
+		// The final copy check confirms that only the touched vector becomes pinned.
 		LifetimeTracked::reset();
 		{
 			Vec a;
@@ -1368,6 +1415,8 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 	}
 
 	{
+		// Proxy assignment is the detach-on-write path that avoids exposing raw pointers.
+		// The counters document "clone shared payload once, then assign the targeted live element".
 		LifetimeTracked::reset();
 		{
 			Vec a;
@@ -1386,6 +1435,8 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 	}
 
 	{
+		// Copy assignment from a non-shareable source must deep-copy, and any failure during that copy must
+		// not mutate the source or leak partially constructed destination elements.
 		LifetimeThrowingTracked::reset();
 		{
 			ThrowVec src;
@@ -1412,6 +1463,8 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 	}
 
 	{
+		// Inline-storage-specific tests: non-trivial inline elements live in raw in-object storage, so copy
+		// and move operations must create/destroy actual object lifetimes rather than bytewise transplant them.
 		LifetimeTracked::reset();
 		{
 			Vec source;
@@ -1472,6 +1525,7 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 			check_values(ctx, move_assigned, {7, 11, 9}, "inline erase preserves order");
 			check(ctx, LifetimeTracked::stats.dtor - dtor_before_erase >= 1, "inline erase destroys removed element");
 
+			// Shrinking an already-inline vector should be a near no-op for element lifetimes.
 			const LifetimeTrackedStats before_shrink = LifetimeTracked::snapshot();
 			move_assigned.shrink_to_fit();
 			const LifetimeTrackedStats after_shrink = LifetimeTracked::snapshot();
