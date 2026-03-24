@@ -33,8 +33,7 @@
 #include <variant>
 #include <bit>
 
-#include "universal/internal/bitvector/bitfield_pack.hpp"
-#include "universal/internal/utility/pack_element.hpp"
+#include "universal/internal/container/bitfield_pack.hpp"
 
 namespace sw { namespace universal {
 
@@ -44,7 +43,7 @@ namespace custom_indexed_variant_detail {
 
 	/// @brief Selects the Ith alternative type from a variant parameter pack.
 	template<std::size_t I, typename... Ts>
-	using type_at_t = internal_utility::pack_element_t<I, Ts...>;
+	using type_at_t = std::tuple_element_t<I, std::tuple<Ts...>>;
 
 	/// @brief Finds the unique exact-match index of `T` in `Ts...`, or `std::variant_npos`.
 	template<typename T, typename... Ts>

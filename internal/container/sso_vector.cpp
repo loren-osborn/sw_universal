@@ -14,7 +14,7 @@
 #include <thread>
 #include <vector>
 
-#include <universal/internal/sso_vector/sso_vector.hpp>
+#include <universal/internal/container/sso_vector.hpp>
 #include <universal/verification/test_status.hpp>
 
 namespace {
