@@ -229,7 +229,7 @@ static void test_bits_alias_basic() {
 static void test_raw_enum_indexing() {
 	using P = bitfield_pack<std::uint16_t, named_field, bitfield_field_spec<3>, bitfield_field_spec<5>, bitfield_field_spec<8>>;
 	static_assert(std::is_same_v<P::field_key_type, named_field>);
-	static_assert(std::is_same_v<P::indexing_spec, sw::universal::bitfield_pack_detail::bitfield_index_by_enum<named_field>>);
+	static_assert(std::is_same_v<P::indexing_spec, sw::universal::bitfield_pack_detail::bitfield_index_by_cast<named_field>>);
 	static_assert(P::template field_width<named_field::low>() == 3);
 	static_assert(P::template field_offset<named_field::mid>() == 3);
 	static_assert(P::template field_mask<named_field::high>() == std::uint16_t{0xFF00});
@@ -561,7 +561,7 @@ static void test_word_spec_normalization() {
 	static_assert(std::is_same_v<IntegralPack::backend_type, std::uint32_t>);
 	static_assert(std::is_same_v<IntegralPack::storage_type, std::uint32_t>);
 	static_assert(std::is_same_v<IntegralPack::raw_iface_type, std::uint32_t>);
-	static_assert(std::is_same_v<IntegralPack::indexing_spec, sw::universal::bitfield_pack_detail::bitfield_index_by_position>);
+	static_assert(std::is_same_v<IntegralPack::indexing_spec, sw::universal::bitfield_pack_detail::bitfield_index_by_cast<std::size_t>>);
 
 	static_assert(std::is_same_v<FloatPack::backend_type, std::uint32_t>);
 	static_assert(std::is_same_v<FloatPack::storage_type, std::uint32_t>);
