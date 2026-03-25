@@ -371,6 +371,101 @@ consteval std::size_t remainder_count() {
 	return (std::size_t(Specs::template for_storage_t<std::uintmax_t>::is_remainder) + ... + 0u);
 }
 
+// ------------------------ layout computation ------------------------
+
+template <std::size_t FieldCount>
+struct bitfield_layout_data {
+	std::array<std::size_t, FieldCount> widths{};
+	std::array<std::size_t, FieldCount> offsets{};
+};
+
+/// @brief Compile-time layout traits for one `bitfield_pack` instantiation.
+/// @details This centralizes field-count, width resolution, remainder handling, and offset
+///          computation so the main class can stay focused on the public API and word access paths.
+template <class StorageT, class... FieldSpecs>
+struct bitfield_layout_traits {
+	static_assert(std::unsigned_integral<StorageT>, "StorageT must be unsigned integral");
+
+	using storage_type = StorageT;
+	using field_specs = std::tuple<FieldSpecs...>;
+
+	static constexpr std::size_t storage_bits = storage_bits_v<storage_type>;
+	static constexpr std::size_t field_count = sizeof...(FieldSpecs);
+	static constexpr std::size_t remainder_fields = remainder_count<FieldSpecs...>();
+	static constexpr bool has_remainder = remainder_fields == 1;
+
+	template <std::size_t I>
+	using raw_field_spec_t = std::tuple_element_t<I, field_specs>;
+
+	template <std::size_t I>
+	using field_spec_t = typename raw_field_spec_t<I>::template for_storage_t<storage_type>;
+
+	template <std::size_t I>
+	static constexpr bool is_remainder_v = field_spec_t<I>::is_remainder;
+
+	template <std::size_t I>
+	static consteval std::size_t declared_width() {
+		if constexpr (is_remainder_v<I>) {
+			return 0u;
+		} else {
+			return std::size_t(field_spec_t<I>::width);
+		}
+	}
+
+	static consteval auto declared_widths() {
+		std::array<std::size_t, field_count> widths{};
+		[&]<std::size_t... Is>(std::index_sequence<Is...>) {
+			((widths[Is] = declared_width<Is>()), ...);
+		}(std::make_index_sequence<field_count>{});
+		return widths;
+	}
+
+	static consteval std::size_t sum_widths(const std::array<std::size_t, field_count>& widths) {
+		std::size_t sum = 0;
+		for (std::size_t i = 0; i < field_count; ++i) {
+			sum += widths[i];
+		}
+		return sum;
+	}
+
+	static consteval bool remainder_is_final() {
+		if constexpr (!has_remainder) {
+			return true;
+		} else if constexpr (!is_remainder_v<field_count - 1>) {
+			return false;
+		} else {
+			return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
+				return ((!is_remainder_v<Is>) && ...);
+			}(std::make_index_sequence<field_count - 1>{});
+		}
+	}
+
+	static consteval bitfield_layout_data<field_count> make_layout() {
+		constexpr auto fixed_widths = declared_widths();
+		constexpr std::size_t fixed_width_sum = sum_widths(fixed_widths);
+		static_assert(remainder_is_final(), "bitfield_pack: remainder field must be the final field");
+
+		auto widths = fixed_widths;
+		if constexpr (has_remainder) {
+			static_assert(fixed_width_sum < storage_bits, "bitfield_pack: remainder would be zero bits wide; disallowed");
+			widths[field_count - 1] = storage_bits - fixed_width_sum;
+		} else {
+			static_assert(fixed_width_sum <= storage_bits, "bitfield_pack: total fixed widths exceed storage bits");
+		}
+
+		std::array<std::size_t, field_count> offsets{};
+		std::size_t current_offset = 0;
+		for (std::size_t i = 0; i < field_count; ++i) {
+			offsets[i] = current_offset;
+			current_offset += widths[i];
+		}
+
+		return bitfield_layout_data<field_count>{widths, offsets};
+	}
+
+	static constexpr auto layout = make_layout();
+};
+
 } // namespace bitfield_pack_detail
 
 /// @brief Packs multiple logical fields into one canonical storage word.
@@ -393,6 +488,7 @@ private:
 	using backend_t = typename word_spec_t::backend_t;
 	using storage_t = typename word_spec_t::storage_t;
 	using field_key_t = typename indexing_spec_t::field_key;
+	using layout_traits = bitfield_pack_detail::bitfield_layout_traits<storage_t, FieldSpecs...>;
 
 	static_assert(std::unsigned_integral<storage_t>, "bitfield_pack: storage_t must be unsigned integral");
 	static_assert(sizeof...(FieldSpecs) > 0, "bitfield_pack: must define at least one field");
@@ -404,88 +500,12 @@ private:
 	static_assert((bitfield_pack_detail::bitfield_field_spec<FieldSpecs, storage_t> && ...),
 	              "bitfield_pack: all FieldSpecs must satisfy the bitfield_field_spec concept");
 
-	static constexpr std::size_t kStorageBits = bitfield_pack_detail::storage_bits_v<storage_t>;
-	static constexpr std::size_t kFieldCount = sizeof...(FieldSpecs);
+	static constexpr std::size_t kStorageBits = layout_traits::storage_bits;
+	static constexpr std::size_t kFieldCount = layout_traits::field_count;
+	static constexpr auto kLayout = layout_traits::layout;
 
 	template <std::size_t I>
-	using spec_t = std::tuple_element_t<I, std::tuple<FieldSpecs...>>;
-
-	template <std::size_t I>
-	using instantiated_field_spec_t = typename spec_t<I>::template for_storage_t<storage_t>;
-
-	template <std::size_t I>
-	static constexpr bool is_remainder_v = instantiated_field_spec_t<I>::is_remainder;
-
-	template <std::size_t I>
-	static consteval std::size_t declared_field_width() {
-		if constexpr (instantiated_field_spec_t<I>::is_remainder) {
-			return 0u;
-		} else {
-			return std::size_t(instantiated_field_spec_t<I>::width);
-		}
-	}
-
-	// Compile-time layout computation. Field specs are interpreted LSB-first; offsets are prefix sums
-	// over the resolved widths, with an optional trailing remainder field consuming all spare bits.
-	static consteval auto make_widths() {
-		std::array<std::size_t, kFieldCount> w{};
-		[&]<std::size_t... Is>(std::index_sequence<Is...>) {
-			((w[Is] = declared_field_width<Is>()), ...);
-		}(std::make_index_sequence<kFieldCount>{});
-		return w;
-	}
-
-	static consteval bool remainder_is_final() {
-		if constexpr (bitfield_pack_detail::remainder_count<FieldSpecs...>() == 0) {
-			return true;
-		} else {
-			if constexpr (!is_remainder_v<kFieldCount - 1>) {
-				return false;
-			} else {
-				return [&]<std::size_t... Is>(std::index_sequence<Is...>) {
-					return ((!is_remainder_v<Is>) && ...);
-				}(std::make_index_sequence<kFieldCount - 1>{});
-			}
-		}
-	}
-
-	static consteval std::size_t fixed_sum(const std::array<std::size_t, kFieldCount>& w) {
-		std::size_t s = 0;
-		for (std::size_t i = 0; i < kFieldCount; ++i) s += w[i];
-		return s;
-	}
-
-	static consteval auto resolve_widths_and_offsets() {
-		constexpr auto fixed_widths = make_widths();
-		constexpr auto sum_fixed = fixed_sum(fixed_widths);
-		auto w = fixed_widths;
-
-		constexpr bool has_remainder = bitfield_pack_detail::remainder_count<FieldSpecs...>() == 1;
-		static_assert(remainder_is_final(), "bitfield_pack: remainder field must be the final field");
-
-		if constexpr (has_remainder) {
-			static_assert(sum_fixed < kStorageBits, "bitfield_pack: remainder would be zero bits wide; disallowed");
-			w[kFieldCount - 1] = kStorageBits - sum_fixed;
-		} else {
-			static_assert(sum_fixed <= kStorageBits, "bitfield_pack: total fixed widths exceed storage bits");
-		}
-
-		// offsets as prefix sums
-		std::array<std::size_t, kFieldCount> off{};
-		std::size_t cur = 0;
-		for (std::size_t i = 0; i < kFieldCount; ++i) {
-			off[i] = cur;
-			cur += w[i];
-		}
-
-		struct result {
-			std::array<std::size_t, kFieldCount> widths;
-			std::array<std::size_t, kFieldCount> offsets;
-		};
-		return result{w, off};
-	}
-
-	static constexpr auto kLayout = resolve_widths_and_offsets();
+	using field_spec_t = typename layout_traits::template field_spec_t<I>;
 
 	template <field_key_t Field>
 	static consteval std::size_t field_index() noexcept {
@@ -493,6 +513,24 @@ private:
 		static_assert(index < kFieldCount, "bitfield_pack: field key maps outside the defined field-spec range");
 		return index;
 	}
+
+	template <field_key_t Field>
+	struct field_traits {
+		static constexpr std::size_t index = field_index<Field>();
+		static constexpr std::size_t width = kLayout.widths[index];
+		static constexpr std::size_t offset = kLayout.offsets[index];
+		static constexpr storage_t value_mask = bitfield_pack_detail::value_mask_unshifted<width, storage_t>();
+		static constexpr storage_t mask = []() consteval {
+			if constexpr (width == 0) {
+				return storage_t(0);
+			} else if constexpr (width >= kStorageBits) {
+				return bitfield_pack_detail::all_ones_v<storage_t>;
+			} else {
+				return storage_t(value_mask << offset);
+			}
+		}();
+		using value_type = typename field_spec_t<index>::decoded_type;
+	};
 
 public:
 	/// @brief Canonical normalized word spec used by this pack.
@@ -558,47 +596,42 @@ public:
 	/// @brief Returns the compile-time bit width of a field key.
 	template <field_key_t Field>
 	static consteval std::size_t field_width() noexcept {
-		return kLayout.widths[field_index<Field>()];
+		return field_traits<Field>::width;
 	}
 
 	/// @brief Returns the compile-time starting bit offset of a field key.
 	/// @details Offsets are computed in least-significant-bit first packing order.
 	template <field_key_t Field>
 	static consteval std::size_t field_offset() noexcept {
-		return kLayout.offsets[field_index<Field>()];
+		return field_traits<Field>::offset;
 	}
 
 	/// @brief Returns the unshifted mask covering a field key's value bits.
 	template <field_key_t Field>
 	static consteval storage_t field_value_mask() noexcept {
-		return bitfield_pack_detail::value_mask_unshifted<field_width<Field>(), storage_t>();
+		return field_traits<Field>::value_mask;
 	}
 
 	/// @brief Returns the shifted mask for a field key within the full storage word.
 	template <field_key_t Field>
 	static consteval storage_t field_mask() noexcept {
-		constexpr std::size_t off = field_offset<Field>();
-		constexpr std::size_t w = field_width<Field>();
-		if constexpr (w == 0) return storage_t(0);
-		if constexpr (w >= kStorageBits) return bitfield_pack_detail::all_ones_v<storage_t>;
-		return storage_t(field_value_mask<Field>() << off);
+		return field_traits<Field>::mask;
 	}
 
 	/// @brief Returns the maximum raw bit-pattern representable by a field key.
 	template <field_key_t Field>
 	static consteval storage_t field_max_bits() noexcept {
-		return field_value_mask<Field>();
+		return field_traits<Field>::value_mask;
 	}
 
 	/// @brief Semantic value type decoded by a field key.
 	template <field_key_t Field>
-	using value_type = typename instantiated_field_spec_t<field_index<Field>()>::decoded_type;
+	using value_type = typename field_traits<Field>::value_type;
 
 	/// @brief Extracts the raw bit-pattern stored in a field key.
 	template <field_key_t Field>
 	constexpr storage_t get_bits() const BITFIELD_PACK_NOEXCEPT {
-		constexpr std::size_t off = field_offset<Field>();
-		return storage_t((load_storage_word() >> off) & field_value_mask<Field>());
+		return storage_t((load_storage_word() >> field_traits<Field>::offset) & field_traits<Field>::value_mask);
 	}
 
 	/// @brief Stores a raw bit-pattern into a field key.
@@ -606,8 +639,8 @@ public:
 	/// @warning This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
 	template <field_key_t Field>
 	constexpr void set_bits(storage_t bits) BITFIELD_PACK_NOEXCEPT {
-		constexpr storage_t m = field_mask<Field>();
-		constexpr std::size_t off = field_offset<Field>();
+		constexpr storage_t m = field_traits<Field>::mask;
+		constexpr std::size_t off = field_traits<Field>::offset;
 		const storage_t raw = load_storage_word();
 		store_storage_word(storage_t((raw & ~m) | ((storage_t(bits) << off) & m)));
 	}
@@ -615,7 +648,7 @@ public:
 	/// @brief Decodes and returns the semantic value of a field key.
 	template <field_key_t Field>
 	constexpr value_type<Field> get() const BITFIELD_PACK_NOEXCEPT {
-		return instantiated_field_spec_t<field_index<Field>()>::decode(get_bits<Field>());
+		return field_spec_t<field_traits<Field>::index>::decode(get_bits<Field>());
 	}
 
 	/// @brief Encodes and stores the semantic value of a field key.
@@ -623,19 +656,19 @@ public:
 	/// @warning This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
 	template <field_key_t Field>
 	constexpr void set(value_type<Field> v) BITFIELD_PACK_NOEXCEPT {
-		const storage_t enc = instantiated_field_spec_t<field_index<Field>()>::encode(v);
+		const storage_t enc = field_spec_t<field_traits<Field>::index>::encode(v);
 		set_bits<Field>(enc);
 	}
 
 	/// @brief Checks whether a semantic value is valid for a field key before masking.
 	template <field_key_t Field>
 	static constexpr bool is_valid(value_type<Field> v) noexcept {
-		const storage_t enc = instantiated_field_spec_t<field_index<Field>()>::encode(v);
+		const storage_t enc = field_spec_t<field_traits<Field>::index>::encode(v);
 		bool width_fits = true;
 		if constexpr (field_width<Field>() < kStorageBits) {
 			width_fits = (enc & ~field_value_mask<Field>()) == 0;
 		}
-		return width_fits && instantiated_field_spec_t<field_index<Field>()>::is_valid(v);
+		return width_fits && field_spec_t<field_traits<Field>::index>::is_valid(v);
 	}
 
 	/// @brief Validates a semantic value for a field key using `BITFIELD_PACK_ASSERT`.
