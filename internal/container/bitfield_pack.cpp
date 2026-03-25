@@ -444,8 +444,8 @@ static void test_word_spec_float_roundtrip() {
 	TEST_EQ(Word::to_storage(q.raw()), q.raw_storage());
 }
 
-static void test_backend_sideband_access() {
-	// Sideband access exposes the backend and whole-word hooks explicitly without teaching the pack
+static void test_backend_access() {
+	// Backend access exposes the backend and whole-word hooks explicitly without teaching the pack
 	// about synchronization policy such as CAS loops.
 	struct backend_word {
 		std::uint32_t word = 0;
@@ -466,7 +466,7 @@ static void test_backend_sideband_access() {
 	static_assert(std::is_same_v<P::backend_type, backend_word>);
 
 	P p(P::from_backend, backend_word{0x4321u});
-	auto sb = p.sideband();
+	auto sb = p.backend_access();
 	TEST_EQ(sb.load_storage_word(), std::uint32_t{0x4321u});
 	TEST_EQ(sb.backend().word, std::uint32_t{0x4321u});
 
@@ -478,7 +478,7 @@ static void test_backend_sideband_access() {
 	TEST_EQ(sb.load_storage_word(), std::uint32_t{0x123Fu});
 
 	const P& cp = p;
-	auto csb = cp.sideband();
+	auto csb = cp.backend_access();
 	TEST_EQ(csb.load_storage_word(), std::uint32_t{0x123Fu});
 	TEST_EQ(csb.backend().word, std::uint32_t{0x123Fu});
 }
@@ -514,7 +514,7 @@ static void test_backend_hook_mutation_semantics() {
 	int loads = 0;
 	int stores = 0;
 	P p(P::from_backend, counting_backend{0x1200u, &loads, &stores});
-	auto sb = p.sideband();
+	auto sb = p.backend_access();
 	sb.store_storage_word(0x1234u);
 	TEST_EQ(loads, 0);
 	TEST_EQ(stores, 1);
@@ -605,7 +605,7 @@ int main() {
 		test_custom_descriptor_indexing();
 		test_biased_field_spec();
 		test_word_spec_float_roundtrip();
-		test_backend_sideband_access();
+		test_backend_access();
 		test_backend_hook_mutation_semantics();
 		test_word_spec_normalization();
 		test_index_encoded_sideband();
