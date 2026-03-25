@@ -222,19 +222,21 @@ struct normalize_word<Word> {
 template <class Word>
 using normalize_word_t = typename normalize_word<Word>::type;
 
-/// @brief Identity indexing descriptor for the generic numeric-keyed case.
-struct bitfield_index_by_position {
-	using field_key = std::size_t;
+/// @brief Acceptable plain field-key types for the cast-based indexing wrapper.
+/// @details This is intentionally narrower than "anything castable to std::size_t":
+///          plain indexing keys are either integral positional keys or raw enums.
+template <class Key>
+concept bitfield_cast_index_key =
+	(std::integral<Key> && !std::same_as<std::remove_cv_t<Key>, bool>) || std::is_enum_v<Key>;
 
-	static consteval std::size_t to_index(field_key key) noexcept { return key; }
-};
-
-/// @brief Identity indexing descriptor for the common raw-enum case.
-/// @tparam Enum Field enum whose values already match the field-spec slot order.
-template <class Enum>
-	requires std::is_enum_v<Enum>
-struct bitfield_index_by_enum {
-	using field_key = Enum;
+/// @brief Cast-based indexing descriptor for plain integral or enum field keys.
+/// @tparam Key Raw field-key type accepted at the `bitfield_pack` call site.
+/// @details This is the normalization wrapper used when callers provide a plain key type rather than
+///          a full descriptor. The mapping policy is a direct `static_cast<std::size_t>(key)`.
+template <class Key>
+	requires bitfield_cast_index_key<Key>
+struct bitfield_index_by_cast {
+	using field_key = Key;
 
 	static consteval std::size_t to_index(field_key key) noexcept {
 		return static_cast<std::size_t>(key);
@@ -252,26 +254,16 @@ concept bitfield_indexing_descriptor =
 	};
 
 /// @brief Normalizes an indexing spec into the canonical descriptor protocol.
-/// @details Supported inputs are:
-/// - `std::size_t` for generic numeric indexing
-/// - a raw enum type, which maps by `static_cast<std::size_t>(key)`
-/// - a descriptor that already provides `field_key` and `to_index()`
-template <class IndexingSpec>
-struct normalize_indexing;
-
-template <>
-struct normalize_indexing<std::size_t> {
-	using type = bitfield_index_by_position;
+/// @details Normalization is:
+/// - preserve the type as-is when it already satisfies the full descriptor protocol
+/// - otherwise wrap the plain integral/enum key type in `bitfield_index_by_cast`
+template <class IndexingSpec, bool = bitfield_indexing_descriptor<IndexingSpec>>
+struct normalize_indexing {
+	using type = bitfield_index_by_cast<IndexingSpec>;
 };
 
 template <class IndexingSpec>
-	requires std::is_enum_v<IndexingSpec>
-struct normalize_indexing<IndexingSpec> {
-	using type = bitfield_index_by_enum<IndexingSpec>;
-};
-
-template <bitfield_indexing_descriptor IndexingSpec>
-struct normalize_indexing<IndexingSpec> {
+struct normalize_indexing<IndexingSpec, true> {
 	using type = IndexingSpec;
 };
 
