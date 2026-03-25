@@ -17,6 +17,9 @@
 /// - Setters mask and store (silent truncation). Validity is separate:
 ///   * is_valid<I>(value)
 ///   * validate<I>(value) -> assertion hook
+///   This is intentional: `set()` is a masked store, not a checked transaction.
+///   Callers that need a precondition check should use `is_valid()` or `validate()`
+///   before storing.
 /// - Mutation APIs perform a whole-word load/modify/store through the word spec hooks.
 ///   They do not provide conditional publication or CAS-loop semantics.
 /// - Remainder field supported, but if present it MUST be the final field.
@@ -41,12 +44,10 @@
 #endif
 
 #ifndef BITFIELD_PACK_NOEXCEPT
-/// @brief noexcept hook.
-/// In unit tests, you can define this to empty to allow thrown-assert paths.
+/// @brief `noexcept` annotation hook.
+/// @details Tests may override this to empty so assertion hooks can throw through
+///          code paths that are `noexcept` in normal builds.
 #define BITFIELD_PACK_NOEXCEPT noexcept
-#ifdef NDEBUG
-#define BITFIELD_PACK_NDEBUG
-#endif // def NDEBUG
 #endif // ndef BITFIELD_PACK_NOEXCEPT
 
 namespace sw::universal {
@@ -124,10 +125,6 @@ namespace sw::universal {
 /// @endcode
 
 namespace bitfield_pack_detail {
-
-/// @brief Convenience false value for dependent static_assert branches.
-template <class T>
-inline constexpr bool always_false_v = false;
 
 /// @brief Canonical description of how a bitfield word is stored, exposed, and loaded.
 /// @tparam StorageUInt Unsigned integral word used for all masking, shifting, and layout math.
@@ -225,6 +222,10 @@ using normalize_word_t = typename normalize_word<Word>::type;
 /// @brief Acceptable plain field-key types for the cast-based indexing wrapper.
 /// @details This is intentionally narrower than "anything castable to std::size_t":
 ///          plain indexing keys are either integral positional keys or raw enums.
+///          Raw enums are most appropriate when their values already form the desired
+///          contiguous zero-based field order. Sparse, reordered, or externally fixed
+///          enum values should use a custom indexing descriptor instead of relying on
+///          direct casting.
 template <class Key>
 concept bitfield_cast_index_key =
 	(std::integral<Key> && !std::same_as<std::remove_cv_t<Key>, bool>) || std::is_enum_v<Key>;
@@ -232,7 +233,8 @@ concept bitfield_cast_index_key =
 /// @brief Cast-based indexing descriptor for plain integral or enum field keys.
 /// @tparam Key Raw field-key type accepted at the `bitfield_pack` call site.
 /// @details This is the normalization wrapper used when callers provide a plain key type rather than
-///          a full descriptor. The mapping policy is a direct `static_cast<std::size_t>(key)`.
+///          a full descriptor. The mapping policy is a direct `static_cast<std::size_t>(key)`,
+///          so enum inputs should already encode the intended field slot numbering.
 template <class Key>
 	requires bitfield_cast_index_key<Key>
 struct bitfield_index_by_cast {
@@ -277,6 +279,10 @@ using normalize_indexing_t = typename normalize_indexing<IndexingSpec>::type;
 /// - a fixed-width field with `width`, `encode`, `decode`, and `is_valid`, or
 /// - the trailing `bitfield_remainder` marker.
 /// Semantic encode/decode is always expressed in terms of the enclosing pack's `storage_t`.
+/// `is_valid(decoded)` is interpreted in the encoded-storage sense used by the pack:
+/// field-specific semantic checks happen here, while width fit is checked separately by
+/// `bitfield_pack::is_valid()` after `encode(decoded)`. Custom codecs should keep that
+/// split in mind, especially for signed decoded domains or non-identity encodings.
 template <class FieldSpec, class StorageUInt>
 concept bitfield_field_spec =
 	std::unsigned_integral<StorageUInt> &&
@@ -366,6 +372,10 @@ constexpr StorageUInt value_mask_unshifted() noexcept {
 }
 
 /// @brief Count how many remainder fields appear.
+/// @details This probes `for_storage_t<std::uintmax_t>` only to read the storage-invariant
+///          `is_remainder` marker. Field specs are expected to be storage-parametric over
+///          unsigned integral types, so this is a protocol assumption rather than a layout
+///          dependency on `std::uintmax_t` specifically.
 template <class... Specs>
 consteval std::size_t remainder_count() {
 	return (std::size_t(Specs::template for_storage_t<std::uintmax_t>::is_remainder) + ... + 0u);
@@ -476,7 +486,7 @@ struct bitfield_layout_traits {
 /// @details `bitfield_pack` owns a `backend_t`, performs all field math in `storage_t`,
 ///          and exposes whole-word conversion through `raw_iface_t`. Ordinary mutation APIs
 ///          are whole-word load/modify/store operations through the word-spec hooks; retry/CAS
-///          policy, if desired, belongs to the caller using sideband access.
+///          policy, if desired, belongs to the caller using explicit backend access.
 ///          This is a typed field-access discipline and readability utility, not a sequence
 ///          container: callers define one fixed compile-time layout and then manipulate named
 ///          slices of that word.
@@ -557,9 +567,9 @@ public:
 	static constexpr from_backend_t from_backend{};
 
 	/// @brief Mutable advanced-access proxy for backend-aware whole-word operations.
-	struct sideband_proxy;
+	struct backend_access_proxy;
 	/// @brief Const advanced-access proxy for backend-aware whole-word observation.
-	struct const_sideband_proxy;
+	struct const_backend_access_proxy;
 
 	/// @brief Number of fields.
 	static consteval std::size_t size() noexcept { return kFieldCount; }
@@ -575,7 +585,9 @@ public:
 	}
 
 	/// @brief Construct directly from a backend object.
-	/// This bypasses the default-construct-then-store path for backend-backed usage.
+	/// @details The backend is taken by value and then moved into place. This keeps the
+	///          constructor simple for both movable backends and prvalue call sites while
+	///          still bypassing the default-construct-then-store path.
 	explicit constexpr bitfield_pack(from_backend_t, backend_t backend) BITFIELD_PACK_NOEXCEPT
 		: backend_(std::move(backend)) {}
 
@@ -636,6 +648,8 @@ public:
 
 	/// @brief Stores a raw bit-pattern into a field key.
 	/// @note Oversized values are masked to the field width.
+	/// @details This is the bit-pattern-oriented store path. It does not consult the
+	///          field spec's semantic `is_valid()` predicate.
 	/// @warning This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
 	template <field_key_t Field>
 	constexpr void set_bits(storage_t bits) BITFIELD_PACK_NOEXCEPT {
@@ -653,6 +667,10 @@ public:
 
 	/// @brief Encodes and stores the semantic value of a field key.
 	/// @note The encoded bits are still masked to the field width after encoding.
+	/// @details `set()` intentionally performs a masked store, not a checked store. If the
+	///          encoded representation does not fit, high bits are truncated just as they are
+	///          for `set_bits()`. Call `is_valid()` or `validate()` first when silent
+	///          truncation would be surprising or unacceptable.
 	/// @warning This is a whole-word load/modify/store through the backend hooks, not a CAS operation.
 	template <field_key_t Field>
 	constexpr void set(value_type<Field> v) BITFIELD_PACK_NOEXCEPT {
@@ -661,6 +679,11 @@ public:
 	}
 
 	/// @brief Checks whether a semantic value is valid for a field key before masking.
+	/// @details Validity is judged in the encoded storage domain used by the pack:
+	///          `encode(v)` must fit within the field width, and the field spec's own
+	///          `is_valid(v)` predicate must also accept the decoded value. This matters for
+	///          signed decoded types and custom codecs, where "domain-valid" and
+	///          "encoded-width-valid" are related but distinct questions.
 	template <field_key_t Field>
 	static constexpr bool is_valid(value_type<Field> v) noexcept {
 		const storage_t enc = field_spec_t<field_traits<Field>::index>::encode(v);
@@ -672,21 +695,28 @@ public:
 	}
 
 	/// @brief Validates a semantic value for a field key using `BITFIELD_PACK_ASSERT`.
+	/// @details This is an assertion hook only. It does not store the value, and `set()`
+	///          does not call it implicitly.
 	template <field_key_t Field>
 	static constexpr void validate(value_type<Field> v) BITFIELD_PACK_NOEXCEPT {
 		BITFIELD_PACK_ASSERT(is_valid<Field>(v));
 	}
 
-	/// @brief Returns an explicit advanced-access proxy for backend-aware operations.
+	/// @brief Returns an explicit backend-access proxy for advanced whole-word operations.
 	/// @details The main API stays backend-agnostic; callers that need backend access,
 	///          manual synchronization, or explicit whole-word load/store can opt in here.
-	constexpr sideband_proxy sideband() BITFIELD_PACK_NOEXCEPT { return sideband_proxy(this); }
-	constexpr const_sideband_proxy sideband() const BITFIELD_PACK_NOEXCEPT { return const_sideband_proxy(this); }
+	///          This is intentionally "expert mode": the proxy exposes backend and whole-word
+	///          hooks, not higher-level field-aware helpers or extra synchronization policy.
+	constexpr backend_access_proxy backend_access() BITFIELD_PACK_NOEXCEPT { return backend_access_proxy(this); }
+	constexpr const_backend_access_proxy backend_access() const BITFIELD_PACK_NOEXCEPT { return const_backend_access_proxy(this); }
 
 	/// @brief Mutable proxy exposing backend-aware whole-word operations.
-	struct sideband_proxy {
-		sideband_proxy() = delete;
-		explicit constexpr sideband_proxy(bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
+	/// @details This proxy is deliberately minimal. It exists so advanced callers can
+	///          coordinate with external publication/synchronization rules while still using
+	///          the word spec's load/store hooks.
+	struct backend_access_proxy {
+		backend_access_proxy() = delete;
+		explicit constexpr backend_access_proxy(bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
 
 		/// @brief Returns the owned backend object by reference.
 		constexpr backend_t& backend() BITFIELD_PACK_NOEXCEPT { return data_->backend_; }
@@ -700,9 +730,11 @@ public:
 	};
 
 	/// @brief Const proxy exposing backend-aware whole-word observation.
-	struct const_sideband_proxy {
-		const_sideband_proxy() = delete;
-		explicit constexpr const_sideband_proxy(const bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
+	/// @details This mirrors the read-only portion of `backend_access_proxy`; it does not
+	///          expose field-level accessors because the ordinary pack API already provides those.
+	struct const_backend_access_proxy {
+		const_backend_access_proxy() = delete;
+		explicit constexpr const_backend_access_proxy(const bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
 
 		/// @brief Returns the owned backend object by const reference.
 		constexpr const backend_t& backend() const BITFIELD_PACK_NOEXCEPT { return data_->backend_; }
