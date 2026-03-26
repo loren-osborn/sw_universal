@@ -517,8 +517,9 @@ static void test_word_spec_float_roundtrip() {
 	TEST_EQ(Word::to_underlying_value(q.formatted_value()), q.underlying_value());
 }
 
-static void test_backend_access() {
-	// Backend access exposes the backend and whole-value hooks explicitly without teaching the pack
+static void test_direct_storage_and_underlying_value_access() {
+	// Direct storage access and explicit whole-value hooks expose the word-spec storage object
+	// without adding an extra proxy layer or hiding the underlying-value load/store path.
 	// about synchronization policy such as CAS loops.
 	struct backend_word {
 		std::uint32_t word = 0;
@@ -539,25 +540,23 @@ static void test_backend_access() {
 	static_assert(std::is_same_v<P::storage_type, backend_word>);
 
 	P p(P::from_backend, backend_word{0x4321u});
-	auto sb = p.backend_access();
-	TEST_EQ(sb.load_underlying_value(), std::uint32_t{0x4321u});
-	TEST_EQ(sb.backend().word, std::uint32_t{0x4321u});
+	TEST_EQ(p.load_underlying_value(), std::uint32_t{0x4321u});
+	TEST_EQ(p.storage().word, std::uint32_t{0x4321u});
 
-	sb.store_underlying_value(0x1234u);
+	p.store_underlying_value(0x1234u);
 	TEST_EQ(p.underlying_value(), std::uint32_t{0x1234u});
-	TEST_EQ(sb.backend().word, std::uint32_t{0x1234u});
+	TEST_EQ(p.storage().word, std::uint32_t{0x1234u});
 
 	p.template set_bits<0>(0xFu);
-	TEST_EQ(sb.load_underlying_value(), std::uint32_t{0x123Fu});
+	TEST_EQ(p.load_underlying_value(), std::uint32_t{0x123Fu});
 
 	const P& cp = p;
-	auto csb = cp.backend_access();
-	TEST_EQ(csb.load_underlying_value(), std::uint32_t{0x123Fu});
-	TEST_EQ(csb.backend().word, std::uint32_t{0x123Fu});
+	TEST_EQ(cp.load_underlying_value(), std::uint32_t{0x123Fu});
+	TEST_EQ(cp.storage().word, std::uint32_t{0x123Fu});
 }
 
 static void test_backend_hook_mutation_semantics() {
-	// This backend counts load/store hook traffic so ordinary mutation can be verified as
+	// This storage type counts load/store hook traffic so ordinary mutation can be verified as
 	// whole-word load/modify/store through the spec rather than direct member access.
 	struct counting_backend {
 		std::uint16_t word = 0;
@@ -587,8 +586,7 @@ static void test_backend_hook_mutation_semantics() {
 	int loads = 0;
 	int stores = 0;
 	P p(P::from_backend, counting_backend{0x1200u, &loads, &stores});
-	auto sb = p.backend_access();
-	sb.store_underlying_value(0x1234u);
+	p.store_underlying_value(0x1234u);
 	TEST_EQ(loads, 0);
 	TEST_EQ(stores, 1);
 
@@ -608,7 +606,7 @@ static void test_backend_hook_mutation_semantics() {
 	TEST_EQ(p.underlying_value(), std::uint16_t{0x122Fu});
 	TEST_EQ(loads, 5);
 
-	TEST_EQ(sb.backend().word, std::uint16_t{0x122Fu});
+	TEST_EQ(p.storage().word, std::uint16_t{0x122Fu});
 }
 
 static void test_word_spec_normalization() {
@@ -681,7 +679,7 @@ int main() {
 		test_custom_descriptor_indexing();
 		test_biased_field_spec();
 		test_word_spec_float_roundtrip();
-		test_backend_access();
+		test_direct_storage_and_underlying_value_access();
 		test_backend_hook_mutation_semantics();
 		test_word_spec_normalization();
 		test_index_encoded_sideband();
