@@ -664,20 +664,15 @@ public:
 	                                          bitfield_pack_detail::tuple_append_t<field_values_type, underlying_value_t>,
 	                                          field_values_type>;
 
-	/// @brief Tag type selecting direct backend construction.
+	/// @brief Tag type selecting direct storage construction.
 	/// @details This allows callers with a pre-built `storage_t` to bypass the
 	///          default-construct-then-store path used by the underlying-value constructor.
 	struct from_backend_t {
 		explicit constexpr from_backend_t() = default;
 	};
 
-	/// @brief Tag constant used with the backend constructor.
+	/// @brief Tag constant used with the direct-storage constructor.
 	static constexpr from_backend_t from_backend{};
-
-	/// @brief Mutable advanced-access proxy for backend-aware whole-word operations.
-	struct backend_access_proxy;
-	/// @brief Const advanced-access proxy for backend-aware whole-word observation.
-	struct const_backend_access_proxy;
 
 	/// @brief Number of fields.
 	static consteval std::size_t size() noexcept { return kFieldCount; }
@@ -718,6 +713,22 @@ public:
 	/// @note For integral shorthand words this is the same as `set_underlying_value()`.
 	constexpr void set_formatted_value(formatted_value_t v) BITFIELD_PACK_NOEXCEPT {
 		store_underlying_value(word_spec_t::to_underlying_value(v));
+	}
+
+	/// @brief Returns the owned storage object by reference.
+	constexpr storage_type& storage() BITFIELD_PACK_NOEXCEPT { return storage_; }
+
+	/// @brief Returns the owned storage object by const reference.
+	constexpr storage_type const& storage() const BITFIELD_PACK_NOEXCEPT { return storage_; }
+
+	/// @brief Loads the canonical underlying value through the word-spec hook.
+	constexpr underlying_value_t load_underlying_value() const BITFIELD_PACK_NOEXCEPT {
+		return word_spec_t::load_underlying_value(storage_);
+	}
+
+	/// @brief Stores the canonical underlying value through the word-spec hook.
+	constexpr void store_underlying_value(underlying_value_t v) BITFIELD_PACK_NOEXCEPT {
+		word_spec_t::store_underlying_value(storage_, v);
 	}
 
 	/// @brief Returns the compile-time bit width of a field key.
@@ -897,60 +908,8 @@ public:
 		return true;
 	}
 
-	/// @brief Returns an explicit backend-access proxy for advanced whole-value operations.
-	/// @details The main API stays backend-agnostic; callers that need backend access,
-	///          manual synchronization, or explicit whole-value load/store can opt in here.
-	///          This is intentionally "expert mode": the proxy exposes backend and whole-value
-	///          hooks, not higher-level field-aware helpers or extra synchronization policy.
-	constexpr backend_access_proxy backend_access() BITFIELD_PACK_NOEXCEPT { return backend_access_proxy(this); }
-	constexpr const_backend_access_proxy backend_access() const BITFIELD_PACK_NOEXCEPT { return const_backend_access_proxy(this); }
-
-	/// @brief Mutable proxy exposing backend-aware whole-value operations.
-	/// @details This proxy is deliberately minimal. It exists so advanced callers can
-	///          coordinate with external publication/synchronization rules while still using
-	///          the word spec's load/store hooks.
-	struct backend_access_proxy {
-		backend_access_proxy() = delete;
-		explicit constexpr backend_access_proxy(bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
-
-		/// @brief Returns the owned backend object by reference.
-		constexpr storage_t& backend() BITFIELD_PACK_NOEXCEPT { return data_->storage_; }
-		/// @brief Loads the canonical underlying value through the word-spec hook.
-		constexpr underlying_value_t load_underlying_value() const BITFIELD_PACK_NOEXCEPT { return data_->load_underlying_value(); }
-		/// @brief Stores the canonical underlying value through the word-spec hook.
-		constexpr void store_underlying_value(underlying_value_t v) BITFIELD_PACK_NOEXCEPT { data_->store_underlying_value(v); }
-
-	private:
-		bitfield_pack* data_;
-	};
-
-	/// @brief Const proxy exposing backend-aware whole-value observation.
-	/// @details This mirrors the read-only portion of `backend_access_proxy`; it does not
-	///          expose field-level accessors because the ordinary pack API already provides those.
-	struct const_backend_access_proxy {
-		const_backend_access_proxy() = delete;
-		explicit constexpr const_backend_access_proxy(const bitfield_pack* src) BITFIELD_PACK_NOEXCEPT : data_(src) {}
-
-		/// @brief Returns the owned backend object by const reference.
-		constexpr const storage_t& backend() const BITFIELD_PACK_NOEXCEPT { return data_->storage_; }
-		/// @brief Loads the canonical underlying value through the word-spec hook.
-		constexpr underlying_value_t load_underlying_value() const BITFIELD_PACK_NOEXCEPT { return data_->load_underlying_value(); }
-
-	private:
-		const bitfield_pack* data_;
-	};
-
 private:
-	// Backend hook access.
-	constexpr underlying_value_t load_underlying_value() const BITFIELD_PACK_NOEXCEPT {
-		return word_spec_t::load_underlying_value(storage_);
-	}
-
-	constexpr void store_underlying_value(underlying_value_t v) BITFIELD_PACK_NOEXCEPT {
-		word_spec_t::store_underlying_value(storage_, v);
-	}
-
-	// Owned backend object that ultimately stores the packed word. All field-oriented operations go
+	// Owned storage object that ultimately stores the packed word. All field-oriented operations go
 	// through the canonical `underlying_value_t` representation regardless of the formatted value type.
 	storage_t storage_{};
 };
