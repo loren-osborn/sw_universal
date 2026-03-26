@@ -131,8 +131,8 @@ namespace bitfield_pack_detail {
 /// @tparam UnderlyingValueT Unsigned integral whole-value type used for masking, shifting, and layout math.
 /// @tparam FormattedValueT Whole-pack API type exposed by `formatted_value()` / `set_formatted_value()`.
 /// @tparam StorageT Actual contained backend object type stored by `bitfield_pack`.
-/// @details `underlying_value_t` is always the canonical unsigned representation used for bit math.
-///          `formatted_value_t` is the public whole-pack value type.
+/// @details `underlying_val_t` is always the canonical unsigned representation used for bit math.
+///          `formatted_val_t` is the public whole-pack value type.
 ///          `storage_t` is the owned backend object and may differ from both when callers want
 ///          custom load/store hooks.
 template <class UnderlyingValueT, class FormattedValueT = UnderlyingValueT, class StorageT = UnderlyingValueT>
@@ -142,41 +142,41 @@ struct bitfield_word_spec {
 	static_assert(sizeof(FormattedValueT) == sizeof(UnderlyingValueT),
 	              "FormattedValueT must have same size as UnderlyingValueT");
 
-	using underlying_value_t = UnderlyingValueT;
-	using formatted_value_t = FormattedValueT;
+	using underlying_val_t = UnderlyingValueT;
+	using formatted_val_t = FormattedValueT;
 	using storage_t = StorageT;
 
 	/// @brief Converts a public whole-pack value into the canonical underlying representation.
-	static constexpr underlying_value_t to_underlying_value(formatted_value_t v) noexcept {
-		if constexpr (std::is_same_v<formatted_value_t, underlying_value_t>) {
+	static constexpr underlying_val_t to_underlying_value(formatted_val_t v) noexcept {
+		if constexpr (std::is_same_v<formatted_val_t, underlying_val_t>) {
 			return v;
 		} else {
-			return std::bit_cast<underlying_value_t>(v);
+			return std::bit_cast<underlying_val_t>(v);
 		}
 	}
 
 	/// @brief Converts the canonical underlying representation into the public whole-pack value.
-	static constexpr formatted_value_t from_underlying_value(underlying_value_t v) noexcept {
-		if constexpr (std::is_same_v<formatted_value_t, underlying_value_t>) {
+	static constexpr formatted_val_t from_underlying_value(underlying_val_t v) noexcept {
+		if constexpr (std::is_same_v<formatted_val_t, underlying_val_t>) {
 			return v;
 		} else {
-			return std::bit_cast<formatted_value_t>(v);
+			return std::bit_cast<formatted_val_t>(v);
 		}
 	}
 
 	/// @brief Loads the canonical underlying representation from a storage object.
-	/// @note The default implementation is direct when `storage_t == underlying_value_t`.
-	static constexpr underlying_value_t load_underlying_value(const storage_t& storage) noexcept {
-		static_assert(std::same_as<storage_t, underlying_value_t>,
-		              "bitfield_word_spec default load_underlying_value requires storage_t == underlying_value_t; provide a custom word spec otherwise");
+	/// @note The default implementation is direct when `storage_t == underlying_val_t`.
+	static constexpr underlying_val_t load_underlying_value(const storage_t& storage) noexcept {
+		static_assert(std::same_as<storage_t, underlying_val_t>,
+		              "bitfield_word_spec default load_underlying_value requires storage_t == underlying_val_t; provide a custom word spec otherwise");
 		return storage;
 	}
 
 	/// @brief Stores the canonical underlying representation back into a storage object.
-	/// @note The default implementation is direct when `storage_t == underlying_value_t`.
-	static constexpr void store_underlying_value(storage_t& storage, underlying_value_t v) noexcept {
-		static_assert(std::same_as<storage_t, underlying_value_t>,
-		              "bitfield_word_spec default store_underlying_value requires storage_t == underlying_value_t; provide a custom word spec otherwise");
+	/// @note The default implementation is direct when `storage_t == underlying_val_t`.
+	static constexpr void store_underlying_value(storage_t& storage, underlying_val_t v) noexcept {
+		static_assert(std::same_as<storage_t, underlying_val_t>,
+		              "bitfield_word_spec default store_underlying_value requires storage_t == underlying_val_t; provide a custom word spec otherwise");
 		storage = v;
 	}
 };
@@ -184,23 +184,23 @@ struct bitfield_word_spec {
 /// @brief Concept describing the minimal "word spec" protocol accepted by `bitfield_pack`.
 /// @details A word spec supplies:
 /// - `storage_t`: owned backend representation type
-/// - `underlying_value_t`: canonical unsigned whole value used for bit math
-/// - `formatted_value_t`: public whole-pack API type
-/// - load/store hooks between `storage_t` and `underlying_value_t`
-/// - whole-pack conversions between `formatted_value_t` and `underlying_value_t`
+/// - `underlying_val_t`: canonical unsigned whole value used for bit math
+/// - `formatted_val_t`: public whole-pack API type
+/// - load/store hooks between `storage_t` and `underlying_val_t`
+/// - whole-pack conversions between `formatted_val_t` and `underlying_val_t`
 template <class Word>
 concept bitfield_word_spec_like =
 	requires(const typename Word::storage_t& cstorage,
 	         typename Word::storage_t& storage,
-	         typename Word::formatted_value_t formatted_value,
-	         typename Word::underlying_value_t underlying_value) {
+	         typename Word::formatted_val_t formatted_value,
+	         typename Word::underlying_val_t underlying_value) {
 		typename Word::storage_t;
-		typename Word::underlying_value_t;
-		typename Word::formatted_value_t;
-		requires std::unsigned_integral<typename Word::underlying_value_t>;
-		{ Word::to_underlying_value(formatted_value) } -> std::same_as<typename Word::underlying_value_t>;
-		{ Word::from_underlying_value(underlying_value) } -> std::same_as<typename Word::formatted_value_t>;
-		{ Word::load_underlying_value(cstorage) } -> std::same_as<typename Word::underlying_value_t>;
+		typename Word::underlying_val_t;
+		typename Word::formatted_val_t;
+		requires std::unsigned_integral<typename Word::underlying_val_t>;
+		{ Word::to_underlying_value(formatted_value) } -> std::same_as<typename Word::underlying_val_t>;
+		{ Word::from_underlying_value(underlying_value) } -> std::same_as<typename Word::formatted_val_t>;
+		{ Word::load_underlying_value(cstorage) } -> std::same_as<typename Word::underlying_val_t>;
 		{ Word::store_underlying_value(storage, underlying_value) } -> std::same_as<void>;
 	};
 
@@ -502,8 +502,8 @@ struct bitfield_layout_traits {
 /// @tparam IndexingSpec Field-indexing specification. Use `std::size_t` for generic numeric keys,
 ///         a raw enum for the preferred named-field case, or a custom descriptor for sparse/reordered mapping.
 /// @tparam FieldSpecs Field descriptors evaluated in least-significant-bit first order.
-/// @details `bitfield_pack` owns a `storage_t`, performs all field math in `underlying_value_t`,
-///          and exposes whole-pack conversion through `formatted_value_t`. Ordinary mutation APIs
+/// @details `bitfield_pack` owns a `storage_t`, performs all field math in `underlying_val_t`,
+///          and exposes whole-pack conversion through `formatted_val_t`. Ordinary mutation APIs
 ///          are whole-value load/modify/store operations through the word-spec hooks; retry/CAS
 ///          policy, if desired, belongs to the caller using explicit backend access.
 ///          This is a typed field-access discipline and readability utility, not a sequence
@@ -515,19 +515,19 @@ private:
 	using word_spec_t = bitfield_pack_detail::normalize_word_t<Word>;
 	using indexing_spec_t = bitfield_pack_detail::normalize_indexing_t<IndexingSpec>;
 	using storage_t = typename word_spec_t::storage_t;
-	using underlying_value_t = typename word_spec_t::underlying_value_t;
-	using formatted_value_t = typename word_spec_t::formatted_value_t;
+	using underlying_val_t = typename word_spec_t::underlying_val_t;
+	using formatted_val_t = typename word_spec_t::formatted_val_t;
 	using field_key_t = typename indexing_spec_t::field_key;
-	using layout_traits = bitfield_pack_detail::bitfield_layout_traits<underlying_value_t, FieldSpecs...>;
+	using layout_traits = bitfield_pack_detail::bitfield_layout_traits<underlying_val_t, FieldSpecs...>;
 
-	static_assert(std::unsigned_integral<underlying_value_t>, "bitfield_pack: underlying_value_t must be unsigned integral");
+	static_assert(std::unsigned_integral<underlying_val_t>, "bitfield_pack: underlying_val_t must be unsigned integral");
 	static_assert(sizeof...(FieldSpecs) > 0, "bitfield_pack: must define at least one field");
 	static_assert(bitfield_pack_detail::remainder_count<FieldSpecs...>() <= 1, "bitfield_pack: at most one remainder field is allowed");
 	static_assert(bitfield_pack_detail::bitfield_indexing_descriptor<indexing_spec_t>,
 	              "bitfield_pack: IndexingSpec must normalize to a descriptor with field_key and to_index()");
 
 	// Validate that each FieldSpec conforms.
-	static_assert((bitfield_pack_detail::bitfield_field_spec<FieldSpecs, underlying_value_t> && ...),
+	static_assert((bitfield_pack_detail::bitfield_field_spec<FieldSpecs, underlying_val_t> && ...),
 	              "bitfield_pack: all FieldSpecs must satisfy the bitfield_field_spec concept");
 
 	static constexpr std::size_t kUnderlyingValueBits = layout_traits::storage_bits;
@@ -535,7 +535,7 @@ private:
 	static constexpr std::size_t kExtraBits = layout_traits::extra_bits;
 	static constexpr bool kHasExtraBits = layout_traits::has_extra_bits;
 	static constexpr std::size_t kExtraBitsOffset = layout_traits::extra_bits_offset;
-	static constexpr underlying_value_t kExtraBitsMask = layout_traits::extra_bits_mask;
+	static constexpr underlying_val_t kExtraBitsMask = layout_traits::extra_bits_mask;
 	static constexpr auto kLayout = layout_traits::layout;
 
 	template <std::size_t I>
@@ -546,14 +546,14 @@ private:
 		static constexpr std::size_t index = I;
 		static constexpr std::size_t width = kLayout.widths[index];
 		static constexpr std::size_t offset = kLayout.offsets[index];
-		static constexpr underlying_value_t value_mask = bitfield_pack_detail::value_mask_unshifted<width, underlying_value_t>();
-		static constexpr underlying_value_t mask = []() consteval {
+		static constexpr underlying_val_t value_mask = bitfield_pack_detail::value_mask_unshifted<width, underlying_val_t>();
+		static constexpr underlying_val_t mask = []() consteval {
 			if constexpr (width == 0) {
-				return underlying_value_t(0);
+				return underlying_val_t(0);
 			} else if constexpr (width >= kUnderlyingValueBits) {
-				return bitfield_pack_detail::all_ones_v<underlying_value_t>;
+				return bitfield_pack_detail::all_ones_v<underlying_val_t>;
 			} else {
-				return underlying_value_t(value_mask << offset);
+				return underlying_val_t(value_mask << offset);
 			}
 		}();
 		using value_type = typename field_spec_t<index>::decoded_type;
@@ -571,8 +571,8 @@ private:
 		static constexpr std::size_t index = field_index<Field>();
 		static constexpr std::size_t width = field_slot_traits<index>::width;
 		static constexpr std::size_t offset = field_slot_traits<index>::offset;
-		static constexpr underlying_value_t value_mask = field_slot_traits<index>::value_mask;
-		static constexpr underlying_value_t mask = field_slot_traits<index>::mask;
+		static constexpr underlying_val_t value_mask = field_slot_traits<index>::value_mask;
+		static constexpr underlying_val_t mask = field_slot_traits<index>::mask;
 		using value_type = typename field_slot_traits<index>::value_type;
 	};
 
@@ -582,18 +582,18 @@ private:
 	using field_values_type = decltype(make_field_values_type(std::make_index_sequence<kFieldCount>{}));
 
 	template <std::size_t I>
-	static constexpr underlying_value_t get_bits_by_index(underlying_value_t underlying_value) noexcept {
-		return underlying_value_t((underlying_value >> field_slot_traits<I>::offset) & field_slot_traits<I>::value_mask);
+	static constexpr underlying_val_t get_bits_by_index(underlying_val_t underlying_value) noexcept {
+		return underlying_val_t((underlying_value >> field_slot_traits<I>::offset) & field_slot_traits<I>::value_mask);
 	}
 
 	template <std::size_t I>
-	static constexpr typename field_slot_traits<I>::value_type get_value_by_index(underlying_value_t underlying_value) noexcept {
+	static constexpr typename field_slot_traits<I>::value_type get_value_by_index(underlying_val_t underlying_value) noexcept {
 		return field_spec_t<I>::decode(get_bits_by_index<I>(underlying_value));
 	}
 
 	template <std::size_t I>
 	static constexpr bool is_valid_by_index(typename field_slot_traits<I>::value_type v) noexcept {
-		const underlying_value_t encoded = field_spec_t<I>::encode(v);
+		const underlying_val_t encoded = field_spec_t<I>::encode(v);
 		bool width_fits = true;
 		if constexpr (field_slot_traits<I>::width < kUnderlyingValueBits) {
 			width_fits = (encoded & ~field_slot_traits<I>::value_mask) == 0;
@@ -607,16 +607,16 @@ private:
 	}
 
 	template <class Tuple, std::size_t... Is>
-	static constexpr underlying_value_t compose_underlying_value_impl(
+	static constexpr underlying_val_t compose_underlying_value_impl(
 		const Tuple& values,
-		underlying_value_t extra_bits,
+		underlying_val_t extra_bits,
 		std::index_sequence<Is...>) noexcept {
-		underlying_value_t underlying_value = 0;
-		((underlying_value |= underlying_value_t(
+		underlying_val_t underlying_value = 0;
+		((underlying_value |= underlying_val_t(
 			(field_spec_t<Is>::encode(static_cast<typename field_slot_traits<Is>::value_type>(std::get<Is>(values))) &
 			 field_slot_traits<Is>::value_mask) << field_slot_traits<Is>::offset)), ...);
 		if constexpr (kHasExtraBits) {
-			underlying_value |= underlying_value_t((extra_bits & kExtraBitsMask) << kExtraBitsOffset);
+			underlying_value |= underlying_val_t((extra_bits & kExtraBitsMask) << kExtraBitsOffset);
 		}
 		return underlying_value;
 	}
@@ -642,7 +642,7 @@ private:
 		} else {
 			using values_tuple = std::tuple<Values...>;
 			return values_match_fields_impl<values_tuple>(std::make_index_sequence<kFieldCount>{}) &&
-			       std::constructible_from<underlying_value_t, std::tuple_element_t<kFieldCount, values_tuple>>;
+			       std::constructible_from<underlying_val_t, std::tuple_element_t<kFieldCount, values_tuple>>;
 		}
 	}
 
@@ -654,15 +654,23 @@ public:
 	/// @brief Backend/storage object type owned by this pack instance.
 	using storage_type = storage_t;
 	/// @brief Canonical unsigned whole-value type used for masks, shifts, and layout.
-	using underlying_value_type = underlying_value_t;
+	using underlying_val_type = underlying_val_t;
 	/// @brief Whole-pack API type returned by `formatted_value()` and accepted by `set_formatted_value()`.
-	using formatted_value_type = formatted_value_t;
+	using formatted_val_type = formatted_val_t;
 	/// @brief Field-key type accepted by field-oriented APIs.
 	using field_key_type = field_key_t;
 	/// @brief Tuple returned by `get_all()`, in declared field order plus trailing extra bits when present.
 	using all_values_type = std::conditional_t<kHasExtraBits,
-	                                          bitfield_pack_detail::tuple_append_t<field_values_type, underlying_value_t>,
+	                                          bitfield_pack_detail::tuple_append_t<field_values_type, underlying_val_t>,
 	                                          field_values_type>;
+	/// @brief Equivalent pack type rebound to plain underlying-value storage.
+	using scratch_copy_type = std::conditional_t<
+		std::same_as<storage_t, underlying_val_t>,
+		bitfield_pack,
+		bitfield_pack<
+			bitfield_pack_detail::bitfield_word_spec<underlying_val_t, formatted_val_t, underlying_val_t>,
+			IndexingSpec,
+			FieldSpecs...>>;
 
 	/// @brief Tag type selecting direct storage construction.
 	/// @details This allows callers with a pre-built `storage_t` to bypass the
@@ -686,7 +694,7 @@ public:
 	}
 
 	/// @brief Construct from the canonical underlying whole value.
-	explicit constexpr bitfield_pack(underlying_value_t underlying_value) BITFIELD_PACK_NOEXCEPT : storage_{} {
+	explicit constexpr bitfield_pack(underlying_val_t underlying_value) BITFIELD_PACK_NOEXCEPT : storage_{} {
 		store_underlying_value(underlying_value);
 	}
 
@@ -698,20 +706,20 @@ public:
 		: storage_(std::move(storage)) {}
 
 	/// @brief Get the canonical underlying whole value (always available).
-	constexpr underlying_value_t underlying_value() const BITFIELD_PACK_NOEXCEPT { return load_underlying_value(); }
+	constexpr underlying_val_t underlying_value() const BITFIELD_PACK_NOEXCEPT { return load_underlying_value(); }
 
 	/// @brief Set the canonical underlying whole value (always available).
-	constexpr void set_underlying_value(underlying_value_t v) BITFIELD_PACK_NOEXCEPT { store_underlying_value(v); }
+	constexpr void set_underlying_value(underlying_val_t v) BITFIELD_PACK_NOEXCEPT { store_underlying_value(v); }
 
 	/// @brief Get the public whole-pack formatted value.
 	/// @note For integral shorthand words this is the same as `underlying_value()`.
-	constexpr formatted_value_t formatted_value() const BITFIELD_PACK_NOEXCEPT {
+	constexpr formatted_val_t formatted_value() const BITFIELD_PACK_NOEXCEPT {
 		return word_spec_t::from_underlying_value(load_underlying_value());
 	}
 
 	/// @brief Store the public whole-pack formatted value.
 	/// @note For integral shorthand words this is the same as `set_underlying_value()`.
-	constexpr void set_formatted_value(formatted_value_t v) BITFIELD_PACK_NOEXCEPT {
+	constexpr void set_formatted_value(formatted_val_t v) BITFIELD_PACK_NOEXCEPT {
 		store_underlying_value(word_spec_t::to_underlying_value(v));
 	}
 
@@ -722,13 +730,18 @@ public:
 	constexpr storage_type const& storage() const BITFIELD_PACK_NOEXCEPT { return storage_; }
 
 	/// @brief Loads the canonical underlying value through the word-spec hook.
-	constexpr underlying_value_t load_underlying_value() const BITFIELD_PACK_NOEXCEPT {
+	constexpr underlying_val_t load_underlying_value() const BITFIELD_PACK_NOEXCEPT {
 		return word_spec_t::load_underlying_value(storage_);
 	}
 
 	/// @brief Stores the canonical underlying value through the word-spec hook.
-	constexpr void store_underlying_value(underlying_value_t v) BITFIELD_PACK_NOEXCEPT {
+	constexpr void store_underlying_value(underlying_val_t v) BITFIELD_PACK_NOEXCEPT {
 		word_spec_t::store_underlying_value(storage_, v);
+	}
+
+	/// @brief Returns an equivalent pack rebound to plain underlying-value storage.
+	constexpr scratch_copy_type scratch_copy() const BITFIELD_PACK_NOEXCEPT {
+		return scratch_copy_type(load_underlying_value());
 	}
 
 	/// @brief Returns the compile-time bit width of a field key.
@@ -746,19 +759,19 @@ public:
 
 	/// @brief Returns the unshifted mask covering a field key's value bits.
 	template <field_key_t Field>
-	static consteval underlying_value_t field_value_mask() noexcept {
+	static consteval underlying_val_t field_value_mask() noexcept {
 		return field_traits<Field>::value_mask;
 	}
 
 	/// @brief Returns the shifted mask for a field key within the full underlying value.
 	template <field_key_t Field>
-	static consteval underlying_value_t field_mask() noexcept {
+	static consteval underlying_val_t field_mask() noexcept {
 		return field_traits<Field>::mask;
 	}
 
 	/// @brief Returns the maximum raw bit-pattern representable by a field key.
 	template <field_key_t Field>
-	static consteval underlying_value_t field_max_bits() noexcept {
+	static consteval underlying_val_t field_max_bits() noexcept {
 		return field_traits<Field>::value_mask;
 	}
 
@@ -768,7 +781,7 @@ public:
 
 	/// @brief Extracts the raw bit-pattern stored in a field key.
 	template <field_key_t Field>
-	constexpr underlying_value_t get_bits() const BITFIELD_PACK_NOEXCEPT {
+	constexpr underlying_val_t get_bits() const BITFIELD_PACK_NOEXCEPT {
 		return get_bits_by_index<field_traits<Field>::index>(load_underlying_value());
 	}
 
@@ -778,11 +791,11 @@ public:
 	///          field spec's semantic `is_valid()` predicate.
 	/// @warning This is a whole-value load/modify/store through the backend hooks, not a CAS operation.
 	template <field_key_t Field>
-	constexpr void set_bits(underlying_value_t bits) BITFIELD_PACK_NOEXCEPT {
-		constexpr underlying_value_t m = field_traits<Field>::mask;
+	constexpr void set_bits(underlying_val_t bits) BITFIELD_PACK_NOEXCEPT {
+		constexpr underlying_val_t m = field_traits<Field>::mask;
 		constexpr std::size_t off = field_traits<Field>::offset;
-		const underlying_value_t current_underlying_value = load_underlying_value();
-		store_underlying_value(underlying_value_t((current_underlying_value & ~m) | ((underlying_value_t(bits) << off) & m)));
+		const underlying_val_t current_underlying_value = load_underlying_value();
+		store_underlying_value(underlying_val_t((current_underlying_value & ~m) | ((underlying_val_t(bits) << off) & m)));
 	}
 
 	/// @brief Decodes and returns the semantic value of a field key.
@@ -801,7 +814,7 @@ public:
 	/// @warning This is a whole-value load/modify/store through the backend hooks, not a CAS operation.
 	template <field_key_t Field>
 	constexpr void set_masked(value_type<Field> v) BITFIELD_PACK_NOEXCEPT {
-		const underlying_value_t enc = field_spec_t<field_traits<Field>::index>::encode(v);
+		const underlying_val_t enc = field_spec_t<field_traits<Field>::index>::encode(v);
 		set_bits<Field>(enc);
 	}
 
@@ -838,7 +851,7 @@ public:
 
 	template <std::size_t... Is>
 	constexpr all_values_type get_all_impl(std::index_sequence<Is...>) const BITFIELD_PACK_NOEXCEPT {
-		const underlying_value_t current_underlying_value = load_underlying_value();
+		const underlying_val_t current_underlying_value = load_underlying_value();
 		if constexpr (kHasExtraBits) {
 			return all_values_type{get_value_by_index<Is>(current_underlying_value)..., get_extra_bits()};
 		} else {
@@ -849,7 +862,7 @@ public:
 	/// @brief Returns all decoded field values in declared order.
 	/// @details When declared fields do not consume the full underlying-value width,
 	///          `get_all()` appends one final trailing element containing the residual
-	///          unclaimed bits packed down into the low bits of `underlying_value_t`.
+	///          unclaimed bits packed down into the low bits of `underlying_val_t`.
 	constexpr all_values_type get_all() const BITFIELD_PACK_NOEXCEPT {
 		return get_all_impl(std::make_index_sequence<kFieldCount>{});
 	}
@@ -857,8 +870,8 @@ public:
 	/// @brief Returns residual unclaimed bits packed into the low bits.
 	template <bool Enabled = kHasExtraBits>
 		requires(Enabled)
-	constexpr underlying_value_t get_extra_bits() const BITFIELD_PACK_NOEXCEPT {
-		return underlying_value_t((load_underlying_value() >> kExtraBitsOffset) & kExtraBitsMask);
+	constexpr underlying_val_t get_extra_bits() const BITFIELD_PACK_NOEXCEPT {
+		return underlying_val_t((load_underlying_value() >> kExtraBitsOffset) & kExtraBitsMask);
 	}
 
 	/// @brief Stores all decoded field values in declared order with silent masking.
@@ -868,14 +881,14 @@ public:
 		requires(values_match_fields<Values...>())
 	constexpr void set_all_masked(Values... values) BITFIELD_PACK_NOEXCEPT {
 		const auto field_values = std::tuple<Values...>(std::move(values)...);
-		store_underlying_value(compose_underlying_value_impl(field_values, underlying_value_t{0}, std::make_index_sequence<kFieldCount>{}));
+		store_underlying_value(compose_underlying_value_impl(field_values, underlying_val_t{0}, std::make_index_sequence<kFieldCount>{}));
 	}
 
 	template <class... Values>
 		requires(values_match_fields_plus_extra_bits<Values...>())
 	constexpr void set_all_masked(Values... values) BITFIELD_PACK_NOEXCEPT {
 		auto values_tuple = std::tuple<Values...>(std::move(values)...);
-		const underlying_value_t extra_bits = static_cast<underlying_value_t>(std::get<kFieldCount>(values_tuple));
+		const underlying_val_t extra_bits = static_cast<underlying_val_t>(std::get<kFieldCount>(values_tuple));
 		store_underlying_value(compose_underlying_value_impl(values_tuple, extra_bits, std::make_index_sequence<kFieldCount>{}));
 	}
 
@@ -889,7 +902,7 @@ public:
 		if (!validate_all_fields_impl(field_values, std::make_index_sequence<kFieldCount>{})) {
 			return false;
 		}
-		store_underlying_value(compose_underlying_value_impl(field_values, underlying_value_t{0}, std::make_index_sequence<kFieldCount>{}));
+		store_underlying_value(compose_underlying_value_impl(field_values, underlying_val_t{0}, std::make_index_sequence<kFieldCount>{}));
 		return true;
 	}
 
@@ -897,7 +910,7 @@ public:
 		requires(values_match_fields_plus_extra_bits<Values...>())
 	constexpr bool set_all_if_valid(Values... values) BITFIELD_PACK_NOEXCEPT {
 		auto values_tuple = std::tuple<Values...>(std::move(values)...);
-		const underlying_value_t extra_bits = static_cast<underlying_value_t>(std::get<kFieldCount>(values_tuple));
+		const underlying_val_t extra_bits = static_cast<underlying_val_t>(std::get<kFieldCount>(values_tuple));
 		if (!validate_all_fields_impl(values_tuple, std::make_index_sequence<kFieldCount>{})) {
 			return false;
 		}
@@ -910,7 +923,7 @@ public:
 
 private:
 	// Owned storage object that ultimately stores the packed word. All field-oriented operations go
-	// through the canonical `underlying_value_t` representation regardless of the formatted value type.
+	// through the canonical `underlying_val_t` representation regardless of the formatted value type.
 	storage_t storage_{};
 };
 
