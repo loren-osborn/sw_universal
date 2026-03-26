@@ -15,6 +15,7 @@
 #include <exception>
 #include <iostream>
 #include <limits>
+#include <tuple>
 #include <type_traits>
 
 #define BITFIELD_PACK_NOEXCEPT /* empty for tests */
@@ -62,23 +63,23 @@ using namespace sw::universal;
 // Helper for assembling an expected raw word by hand in the canonical storage domain.
 // Tests use this to verify pack layout independently of the production helper implementation.
 template<typename Storage>
-constexpr Storage insert_field(Storage raw, Storage value, std::size_t width, std::size_t offset) {
+constexpr Storage insert_field(Storage underlying_value, Storage value, std::size_t width, std::size_t offset) {
 	const Storage all_ones = ~Storage(0);
 	const Storage mask = (width >= std::numeric_limits<Storage>::digits)
 		? all_ones
 		: ((Storage(1) << width) - 1);
-	return Storage((raw & ~(mask << offset)) | ((value & mask) << offset));
+	return Storage((underlying_value & ~(mask << offset)) | ((value & mask) << offset));
 }
 
-// Shared assertion helper for tests that reason about both raw storage and decoded field slices.
+// Shared assertion helper for tests that reason about both underlying whole values and decoded field slices.
 template<typename Pack>
 void check_raw_and_fields_numeric(const Pack& pack,
-                                  typename Pack::storage_type expected_raw,
-                                  typename Pack::storage_type f0,
-                                  typename Pack::storage_type f1,
-                                  typename Pack::storage_type f2) {
+                                  typename Pack::underlying_value_type expected_underlying_value,
+                                  typename Pack::underlying_value_type f0,
+                                  typename Pack::underlying_value_type f1,
+                                  typename Pack::underlying_value_type f2) {
 	static_assert(std::is_same_v<typename Pack::field_key_type, std::size_t>);
-	TEST_EQ(pack.raw_storage(), expected_raw);
+	TEST_EQ(pack.underlying_value(), expected_underlying_value);
 	TEST_EQ(pack.template get_bits<0>(), f0);
 	TEST_EQ(pack.template get_bits<1>(), f1);
 	TEST_EQ(pack.template get_bits<2>(), f2);
@@ -172,9 +173,9 @@ static void test_bits_alias_basic() {
 	// and the generic std::size_t indexing fallback.
 	using P = bitfield_pack_bits<std::uint16_t, 3, 5, 8>;
 	static_assert(P::size() == 3);
-	static_assert(std::is_same_v<P::backend_type, std::uint16_t>);
 	static_assert(std::is_same_v<P::storage_type, std::uint16_t>);
-	static_assert(std::is_same_v<P::raw_iface_type, std::uint16_t>);
+	static_assert(std::is_same_v<P::underlying_value_type, std::uint16_t>);
+	static_assert(std::is_same_v<P::formatted_value_type, std::uint16_t>);
 	static_assert(std::is_same_v<P::field_key_type, std::size_t>);
 	static_assert(P::template field_mask<0>() == std::uint16_t{0x0007});
 	static_assert(P::template field_mask<1>() == std::uint16_t{0x00F8});
@@ -184,8 +185,8 @@ static void test_bits_alias_basic() {
 	static_assert(P::template field_value_mask<2>() == std::uint16_t{0x00FF});
 
 	P p;
-	TEST_EQ(p.raw_storage(), std::uint16_t{0});
-	TEST_EQ(p.raw(), std::uint16_t{0});
+	TEST_EQ(p.underlying_value(), std::uint16_t{0});
+	TEST_EQ(p.formatted_value(), std::uint16_t{0});
 
 	// width/offset sanity (LSB first)
 	static_assert(P::field_width<0>() == 3);
@@ -199,7 +200,7 @@ static void test_bits_alias_basic() {
 	// callers who want rejection must use the validation hooks separately.
 	p.template set_bits<0>(0b1111); // 4-bit into 3-bit -> truncates to 0b111
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{0b111});
-	TEST_EQ(p.raw_storage(), std::uint16_t{0b111});
+	TEST_EQ(p.underlying_value(), std::uint16_t{0b111});
 
 	p.template set_bits<1>(0b100101); // truncates to 5 bits
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{0b111});
@@ -213,13 +214,13 @@ static void test_bits_alias_basic() {
 		std::uint16_t{0b00101},
 		std::uint16_t{0xAB});
 
-	p.set_raw_storage(0xBEEF);
-	TEST_EQ(p.raw_storage(), std::uint16_t{0xBEEF});
-	TEST_EQ(p.raw(), std::uint16_t{0xBEEF});
+	p.set_underlying_value(0xBEEF);
+	TEST_EQ(p.underlying_value(), std::uint16_t{0xBEEF});
+	TEST_EQ(p.formatted_value(), std::uint16_t{0xBEEF});
 
-	p.set_raw(0x1234);
-	TEST_EQ(p.raw_storage(), std::uint16_t{0x1234});
-	TEST_EQ(p.raw(), std::uint16_t{0x1234});
+	p.set_formatted_value(0x1234);
+	TEST_EQ(p.underlying_value(), std::uint16_t{0x1234});
+	TEST_EQ(p.formatted_value(), std::uint16_t{0x1234});
 
 	// Validity check separately
 	TEST_TRUE(P::is_valid<0>(std::uint16_t{0b111}));
@@ -239,22 +240,22 @@ static void test_raw_enum_indexing() {
 	p.template set_bits<named_field::mid>(0b100101);
 	p.template set_bits<named_field::high>(0xAB);
 
-	TEST_EQ(p.raw_storage(),
+	TEST_EQ(p.underlying_value(),
 	        insert_field(insert_field(insert_field(std::uint16_t{0}, std::uint16_t{0b111}, 3, 0), std::uint16_t{0b00101}, 5, 3), std::uint16_t{0xAB}, 8, 8));
 	TEST_EQ(p.template get_bits<named_field::low>(), std::uint16_t{0b111});
 	TEST_EQ(p.template get_bits<named_field::mid>(), std::uint16_t{0b00101});
 	TEST_EQ(p.template get_bits<named_field::high>(), std::uint16_t{0xAB});
 }
 
-static void test_raw_storage_constructor_and_field_isolation() {
-	// Starting from a raw word lets us verify field extraction and neighboring-field isolation.
+static void test_underlying_value_constructor_and_field_isolation() {
+	// Starting from an underlying whole value lets us verify field extraction and neighboring-field isolation.
 	using P = bitfield_pack_bits<std::uint16_t, 4, 4, 8>;
 	P p(std::uint16_t{0xABCD});
 	check_raw_and_fields_numeric(p, std::uint16_t{0xABCD}, std::uint16_t{0xD}, std::uint16_t{0xC}, std::uint16_t{0xAB});
 
-	const auto before = p.raw_storage();
+	const auto before = p.underlying_value();
 	p.template set_bits<1>(0x2);
-	const auto after = p.raw_storage();
+	const auto after = p.underlying_value();
 	TEST_EQ(after, insert_field(before, std::uint16_t{0x2}, 4, 4));
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{0xD});
 	TEST_EQ(p.template get_bits<1>(), std::uint16_t{0x2});
@@ -268,9 +269,9 @@ static void test_semantic_field_spec_access() {
 	static_assert(P::template field_width<0>() == 4);
 
 	P p;
-	p.template set<0>(5);
-	p.template set<1>(0xA);
-	p.template set<2>(0x5C);
+	p.template set_masked<0>(5);
+	p.template set_masked<1>(0xA);
+	p.template set_masked<2>(0x5C);
 
 	TEST_EQ(p.template get<0>(), 5);
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{7});
@@ -331,6 +332,23 @@ static void test_width_fit_and_semantic_validity_split() {
 	TEST_TRUE(!SemanticPack::is_valid<0>(std::uint16_t{8}));
 }
 
+static void test_set_if_valid() {
+	using P = bitfield_pack<std::uint16_t, std::size_t, even_only_field, bitfield_field_spec<5>>;
+
+	P p;
+	p.set_underlying_value(0xAAAAu);
+
+	TEST_TRUE(p.template set_if_valid<0>(std::uint16_t{6}));
+	TEST_EQ(p.template get<0>(), std::uint16_t{6});
+
+	const auto after_valid = p.underlying_value();
+	TEST_TRUE(!p.template set_if_valid<0>(std::uint16_t{3}));
+	TEST_EQ(p.underlying_value(), after_valid);
+
+	TEST_TRUE(!p.template set_if_valid<1>(std::uint16_t{0x20}));
+	TEST_EQ(p.underlying_value(), after_valid);
+}
+
 static void test_remainder_layout() {
 	// The trailing remainder consumes whatever bits are left after the fixed-width prefix.
 	// [4 bits][remainder]
@@ -349,15 +367,69 @@ static void test_remainder_layout() {
 	p.template set_bits<1>(0xABC);
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{0xF});
 	TEST_EQ(p.template get_bits<1>(), std::uint16_t{0xABC});
-	TEST_EQ(p.raw_storage(), std::uint16_t{0xABCF});
+	TEST_EQ(p.underlying_value(), std::uint16_t{0xABCF});
 
-	p.set_raw_storage(0x1234);
+	p.set_underlying_value(0x1234);
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{0x4});
 	TEST_EQ(p.template get_bits<1>(), std::uint16_t{0x123});
 
 	p.template set_bits<1>(0xFFFF);
 	TEST_EQ(p.template get_bits<1>(), std::uint16_t{0x0FFF});
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{0x4});
+}
+
+static void test_get_all_and_extra_bits() {
+	using ExtraPack = bitfield_pack_bits<std::uint16_t, 4, 4>;
+	using FullPack = bitfield_pack_bits<std::uint16_t, 4, 4, 8>;
+
+	static_assert(std::tuple_size_v<ExtraPack::all_values_type> == 3);
+	static_assert(std::tuple_size_v<FullPack::all_values_type> == 3);
+	static_assert(requires(const ExtraPack& p) { p.get_extra_bits(); });
+	static_assert(ExtraPack::extra_bits_width() == 8);
+	static_assert(FullPack::extra_bits_width() == 0);
+
+	ExtraPack p;
+	p.set_underlying_value(0xABCDu);
+	const auto all = p.get_all();
+	TEST_EQ(std::get<0>(all), std::uint16_t{0xDu});
+	TEST_EQ(std::get<1>(all), std::uint16_t{0xCu});
+	TEST_EQ(std::get<2>(all), std::uint16_t{0xABu});
+	TEST_EQ(p.get_extra_bits(), std::uint16_t{0xABu});
+
+	FullPack q;
+	q.set_underlying_value(0xABCDu);
+	const auto all_full = q.get_all();
+	TEST_EQ(std::get<0>(all_full), std::uint16_t{0xDu});
+	TEST_EQ(std::get<1>(all_full), std::uint16_t{0xCu});
+	TEST_EQ(std::get<2>(all_full), std::uint16_t{0xABu});
+}
+
+static void test_bulk_setters() {
+	using ExtraPack = bitfield_pack_bits<std::uint16_t, 4, 4>;
+	using SemanticPack = bitfield_pack<std::uint16_t, std::size_t, even_only_field, bitfield_field_spec<5>>;
+
+	ExtraPack masked;
+	masked.set_all_masked(std::uint16_t{0xDu}, std::uint16_t{0xCu});
+	TEST_EQ(masked.underlying_value(), std::uint16_t{0x00CDu});
+
+	masked.set_all_masked(std::uint16_t{0xDu}, std::uint16_t{0xCu}, std::uint16_t{0x1ABu});
+	TEST_EQ(masked.underlying_value(), std::uint16_t{0xABCDu});
+	TEST_EQ(masked.get_extra_bits(), std::uint16_t{0xABu});
+
+	ExtraPack checked;
+	TEST_TRUE(checked.set_all_if_valid(std::uint16_t{0x1u}, std::uint16_t{0x2u}, std::uint16_t{0x34u}));
+	TEST_EQ(checked.underlying_value(), std::uint16_t{0x3421u});
+	TEST_TRUE(!checked.set_all_if_valid(std::uint16_t{0x1u}, std::uint16_t{0x2u}, std::uint16_t{0x1FFu}));
+	TEST_EQ(checked.underlying_value(), std::uint16_t{0x3421u});
+
+	SemanticPack semantic;
+	TEST_TRUE(semantic.set_all_if_valid(std::uint16_t{6u}, std::uint16_t{0x1Fu}));
+	TEST_EQ(semantic.template get<0>(), std::uint16_t{6u});
+	TEST_EQ(semantic.template get<1>(), std::uint16_t{0x1Fu});
+
+	const auto before_invalid = semantic.underlying_value();
+	TEST_TRUE(!semantic.set_all_if_valid(std::uint16_t{3u}, std::uint16_t{0x1Fu}));
+	TEST_EQ(semantic.underlying_value(), before_invalid);
 }
 
 static void test_custom_descriptor_indexing() {
@@ -371,16 +443,16 @@ static void test_custom_descriptor_indexing() {
 	static_assert(P::template field_mask<sparse_field::sign>() == std::uint32_t{0x80000000u});
 
 	P p;
-	p.template set<sparse_field::mantissa>(0u);
-	p.template set<sparse_field::exponent>(127u);
-	p.template set<sparse_field::sign>(0u);
-	TEST_EQ(p.raw(), 1.0f);
-	TEST_EQ(p.raw_storage(), std::bit_cast<std::uint32_t>(1.0f));
+	p.template set_masked<sparse_field::mantissa>(0u);
+	p.template set_masked<sparse_field::exponent>(127u);
+	p.template set_masked<sparse_field::sign>(0u);
+	TEST_EQ(p.formatted_value(), 1.0f);
+	TEST_EQ(p.underlying_value(), std::bit_cast<std::uint32_t>(1.0f));
 
 	p.template set_bits<sparse_field::mantissa>(0x400000u);
 	p.template set_bits<sparse_field::exponent>(0xFFu);
 	p.template set_bits<sparse_field::sign>(0u);
-	TEST_TRUE(std::isnan(p.raw()) || std::isinf(p.raw()) == false);
+	TEST_TRUE(std::isnan(p.formatted_value()) || std::isinf(p.formatted_value()) == false);
 }
 
 static void test_biased_field_spec() {
@@ -392,8 +464,8 @@ static void test_biased_field_spec() {
 	>;
 
 	P p;
-	p.template set<0>(1);
-	p.template set<1>(0x5Au);
+	p.template set_masked<0>(1);
+	p.template set_masked<1>(0x5Au);
 
 	TEST_EQ(p.template get<0>(), 1);
 	TEST_EQ(p.template get_bits<0>(), std::uint16_t{128});
@@ -403,13 +475,14 @@ static void test_biased_field_spec() {
 }
 
 static void test_word_spec_float_roundtrip() {
-	// Raw-interface tests verify that `raw()` / `set_raw()` can expose a non-integral whole-word type
-	// while still doing all field math in the canonical unsigned storage domain.
-	// Bind raw() to float, but still pack bits in uint32_t
+	// Formatted-value tests verify that `formatted_value()` / `set_formatted_value()` can expose
+	// a non-integral whole-pack type while still doing all field math in the canonical
+	// unsigned underlying-value domain.
+	// Bind formatted_value() to float, but still pack bits in uint32_t.
 	using Word = bitfield_word_spec<std::uint32_t, float>;
 	using F = bitfield_pack_bits<Word, 1, 8, 23>;
-	static_assert(std::is_same_v<F::raw_iface_type, float>);
-	static_assert(std::is_same_v<F::storage_type, std::uint32_t>);
+	static_assert(std::is_same_v<F::formatted_value_type, float>);
+	static_assert(std::is_same_v<F::underlying_value_type, std::uint32_t>);
 
 	// Layout: sign (1), exponent (8), mantissa (23) LSB-first means:
 	// field0=sign at bit0, field1=exponent at bit1..8, field2=mantissa at bit9..31
@@ -421,8 +494,8 @@ static void test_word_spec_float_roundtrip() {
 	using IEEE = bitfield_pack_bits<Word, 23, 8, 1>;
 
 	IEEE p;
-	p.set_raw(1.0f);
-	TEST_EQ(p.raw(), 1.0f);
+	p.set_formatted_value(1.0f);
+	TEST_EQ(p.formatted_value(), 1.0f);
 
 	const auto mant = p.template get_bits<0>();
 	const auto exp  = p.template get_bits<1>();
@@ -432,54 +505,54 @@ static void test_word_spec_float_roundtrip() {
 	TEST_EQ(sign, std::uint32_t{0});
 	TEST_EQ(exp,  std::uint32_t{127});
 	TEST_EQ(mant, std::uint32_t{0});
-	TEST_EQ(p.raw_storage(), std::bit_cast<std::uint32_t>(1.0f));
+	TEST_EQ(p.underlying_value(), std::bit_cast<std::uint32_t>(1.0f));
 
 	// NaN example: exponent all ones, mantissa non-zero.
 	IEEE q;
 	q.template set_bits<2>(0);          // sign
 	q.template set_bits<1>(0xFF);       // exponent all ones
 	q.template set_bits<0>(0x400000);   // mantissa non-zero
-	float nanish = q.raw();
+	float nanish = q.formatted_value();
 	TEST_TRUE(std::isnan(nanish) || std::isinf(nanish) == false); // likely NaN; platform may vary on payload handling
-	TEST_EQ(Word::to_storage(q.raw()), q.raw_storage());
+	TEST_EQ(Word::to_underlying_value(q.formatted_value()), q.underlying_value());
 }
 
 static void test_backend_access() {
-	// Backend access exposes the backend and whole-word hooks explicitly without teaching the pack
+	// Backend access exposes the backend and whole-value hooks explicitly without teaching the pack
 	// about synchronization policy such as CAS loops.
 	struct backend_word {
 		std::uint32_t word = 0;
 	};
 
 	struct backend_spec {
-		using backend_t = backend_word;
-		using storage_t = std::uint32_t;
-		using raw_iface_t = std::uint32_t;
+		using storage_t = backend_word;
+		using underlying_value_t = std::uint32_t;
+		using formatted_value_t = std::uint32_t;
 
-		static constexpr storage_t to_storage(raw_iface_t v) noexcept { return v; }
-		static constexpr raw_iface_t from_storage(storage_t v) noexcept { return v; }
-		static constexpr storage_t load_storage(const backend_t& backend) noexcept { return backend.word; }
-		static constexpr void store_storage(backend_t& backend, storage_t v) noexcept { backend.word = v; }
+		static constexpr underlying_value_t to_underlying_value(formatted_value_t v) noexcept { return v; }
+		static constexpr formatted_value_t from_underlying_value(underlying_value_t v) noexcept { return v; }
+		static constexpr underlying_value_t load_underlying_value(const storage_t& backend) noexcept { return backend.word; }
+		static constexpr void store_underlying_value(storage_t& backend, underlying_value_t v) noexcept { backend.word = v; }
 	};
 
 	using P = bitfield_pack<backend_spec, std::size_t, bitfield_field_spec<4>, bitfield_remainder>;
-	static_assert(std::is_same_v<P::backend_type, backend_word>);
+	static_assert(std::is_same_v<P::storage_type, backend_word>);
 
 	P p(P::from_backend, backend_word{0x4321u});
 	auto sb = p.backend_access();
-	TEST_EQ(sb.load_storage_word(), std::uint32_t{0x4321u});
+	TEST_EQ(sb.load_underlying_value(), std::uint32_t{0x4321u});
 	TEST_EQ(sb.backend().word, std::uint32_t{0x4321u});
 
-	sb.store_storage_word(0x1234u);
-	TEST_EQ(p.raw_storage(), std::uint32_t{0x1234u});
+	sb.store_underlying_value(0x1234u);
+	TEST_EQ(p.underlying_value(), std::uint32_t{0x1234u});
 	TEST_EQ(sb.backend().word, std::uint32_t{0x1234u});
 
 	p.template set_bits<0>(0xFu);
-	TEST_EQ(sb.load_storage_word(), std::uint32_t{0x123Fu});
+	TEST_EQ(sb.load_underlying_value(), std::uint32_t{0x123Fu});
 
 	const P& cp = p;
 	auto csb = cp.backend_access();
-	TEST_EQ(csb.load_storage_word(), std::uint32_t{0x123Fu});
+	TEST_EQ(csb.load_underlying_value(), std::uint32_t{0x123Fu});
 	TEST_EQ(csb.backend().word, std::uint32_t{0x123Fu});
 }
 
@@ -493,17 +566,17 @@ static void test_backend_hook_mutation_semantics() {
 	};
 
 	struct counting_spec {
-		using backend_t = counting_backend;
-		using storage_t = std::uint16_t;
-		using raw_iface_t = std::uint16_t;
+		using storage_t = counting_backend;
+		using underlying_value_t = std::uint16_t;
+		using formatted_value_t = std::uint16_t;
 
-		static storage_t to_storage(raw_iface_t v) noexcept { return v; }
-		static raw_iface_t from_storage(storage_t v) noexcept { return v; }
-		static storage_t load_storage(const backend_t& backend) noexcept {
+		static underlying_value_t to_underlying_value(formatted_value_t v) noexcept { return v; }
+		static formatted_value_t from_underlying_value(underlying_value_t v) noexcept { return v; }
+		static underlying_value_t load_underlying_value(const storage_t& backend) noexcept {
 			if (backend.loads) ++*backend.loads;
 			return backend.word;
 		}
-		static void store_storage(backend_t& backend, storage_t v) noexcept {
+		static void store_underlying_value(storage_t& backend, underlying_value_t v) noexcept {
 			if (backend.stores) ++*backend.stores;
 			backend.word = v;
 		}
@@ -515,24 +588,24 @@ static void test_backend_hook_mutation_semantics() {
 	int stores = 0;
 	P p(P::from_backend, counting_backend{0x1200u, &loads, &stores});
 	auto sb = p.backend_access();
-	sb.store_storage_word(0x1234u);
+	sb.store_underlying_value(0x1234u);
 	TEST_EQ(loads, 0);
 	TEST_EQ(stores, 1);
 
-	(void)p.raw_storage();
+	(void)p.underlying_value();
 	TEST_EQ(loads, 1);
 	TEST_EQ(stores, 1);
 
 	p.template set_bits<0>(0xFu);
 	TEST_EQ(loads, 2);
 	TEST_EQ(stores, 2);
-	TEST_EQ(p.raw_storage(), std::uint16_t{0x123Fu});
+	TEST_EQ(p.underlying_value(), std::uint16_t{0x123Fu});
 	TEST_EQ(loads, 3);
 
-	p.template set<1>(std::uint16_t{0x2});
+	p.template set_masked<1>(std::uint16_t{0x2});
 	TEST_EQ(loads, 4);
 	TEST_EQ(stores, 3);
-	TEST_EQ(p.raw_storage(), std::uint16_t{0x122Fu});
+	TEST_EQ(p.underlying_value(), std::uint16_t{0x122Fu});
 	TEST_EQ(loads, 5);
 
 	TEST_EQ(sb.backend().word, std::uint16_t{0x122Fu});
@@ -548,28 +621,28 @@ static void test_word_spec_normalization() {
 		std::uint32_t word = 0;
 	};
 	struct backend_spec {
-		using backend_t = backend_word;
-		using storage_t = std::uint32_t;
-		using raw_iface_t = float;
-		static storage_t to_storage(raw_iface_t v) noexcept { return std::bit_cast<storage_t>(v); }
-		static raw_iface_t from_storage(storage_t v) noexcept { return std::bit_cast<raw_iface_t>(v); }
-		static storage_t load_storage(const backend_t& backend) noexcept { return backend.word; }
-		static void store_storage(backend_t& backend, storage_t v) noexcept { backend.word = v; }
+		using storage_t = backend_word;
+		using underlying_value_t = std::uint32_t;
+		using formatted_value_t = float;
+		static underlying_value_t to_underlying_value(formatted_value_t v) noexcept { return std::bit_cast<underlying_value_t>(v); }
+		static formatted_value_t from_underlying_value(underlying_value_t v) noexcept { return std::bit_cast<formatted_value_t>(v); }
+		static underlying_value_t load_underlying_value(const storage_t& backend) noexcept { return backend.word; }
+		static void store_underlying_value(storage_t& backend, underlying_value_t v) noexcept { backend.word = v; }
 	};
 	using BackendPack = bitfield_pack_bits<backend_spec, 23, 8, 1>;
 
-	static_assert(std::is_same_v<IntegralPack::backend_type, std::uint32_t>);
 	static_assert(std::is_same_v<IntegralPack::storage_type, std::uint32_t>);
-	static_assert(std::is_same_v<IntegralPack::raw_iface_type, std::uint32_t>);
+	static_assert(std::is_same_v<IntegralPack::underlying_value_type, std::uint32_t>);
+	static_assert(std::is_same_v<IntegralPack::formatted_value_type, std::uint32_t>);
 	static_assert(std::is_same_v<IntegralPack::indexing_spec, sw::universal::bitfield_pack_detail::bitfield_index_by_cast<std::size_t>>);
 
-	static_assert(std::is_same_v<FloatPack::backend_type, std::uint32_t>);
 	static_assert(std::is_same_v<FloatPack::storage_type, std::uint32_t>);
-	static_assert(std::is_same_v<FloatPack::raw_iface_type, float>);
+	static_assert(std::is_same_v<FloatPack::underlying_value_type, std::uint32_t>);
+	static_assert(std::is_same_v<FloatPack::formatted_value_type, float>);
 
-	static_assert(std::is_same_v<BackendPack::backend_type, backend_word>);
-	static_assert(std::is_same_v<BackendPack::storage_type, std::uint32_t>);
-	static_assert(std::is_same_v<BackendPack::raw_iface_type, float>);
+	static_assert(std::is_same_v<BackendPack::storage_type, backend_word>);
+	static_assert(std::is_same_v<BackendPack::underlying_value_type, std::uint32_t>);
+	static_assert(std::is_same_v<BackendPack::formatted_value_type, float>);
 }
 
 static void test_index_encoded_sideband() {
@@ -596,12 +669,15 @@ int main() {
 	try {
 		test_bits_alias_basic();
 		test_raw_enum_indexing();
-		test_raw_storage_constructor_and_field_isolation();
+		test_underlying_value_constructor_and_field_isolation();
 		test_semantic_field_spec_access();
 		test_nested_field_spec_shapes();
 		test_validate_hook();
 		test_width_fit_and_semantic_validity_split();
+		test_set_if_valid();
 		test_remainder_layout();
+		test_get_all_and_extra_bits();
+		test_bulk_setters();
 		test_custom_descriptor_indexing();
 		test_biased_field_spec();
 		test_word_spec_float_roundtrip();

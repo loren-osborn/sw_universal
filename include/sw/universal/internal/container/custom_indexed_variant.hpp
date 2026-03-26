@@ -405,7 +405,7 @@ struct for_index_type {
 
 		/// @brief Constructs encoded state with `std::variant_npos` and zero sideband payload.
 		constexpr index_encoded_with_sideband_data() noexcept {
-			bits_.set_raw_storage(0);
+			bits_.set_underlying_value(0);
 			bits_.template set_bits<INDEX>(npos_code);
 		}
 
@@ -438,8 +438,8 @@ struct for_index_type {
 		constexpr const_sideband_t sideband() const noexcept { return const_sideband_t(this); }
 
 		/// @brief Exposes the complete encoded word for tests and low-level adapters.
-		constexpr IndexT raw_storage() const noexcept { return bits_.raw_storage(); }
-		constexpr void set_raw_storage(IndexT v) noexcept { bits_.set_raw_storage(v); }
+		constexpr IndexT underlying_value() const noexcept { return bits_.underlying_value(); }
+		constexpr void set_underlying_value(IndexT v) noexcept { bits_.set_underlying_value(v); }
 
 	private:
 		constexpr IndexT sideband_val() const noexcept { return bits_.template get_bits<SIDEBAND>(); }

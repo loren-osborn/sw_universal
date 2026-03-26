@@ -104,36 +104,36 @@ static_assert(header_bits::template field_width<REFCOUNT>() > 0, "sso_vector: he
 
 inline constexpr header_word hdr_pack(bool shareable, std::uint64_t rc) noexcept {
 	header_bits b{};
-	b.set_raw_storage(0);
-	b.template set<SHAREABLE>(shareable ? 1u : 0u);
-	b.template set<REFCOUNT>(static_cast<header_word>(rc));
-	return b.raw_storage();
+	b.set_underlying_value(0);
+	b.template set_masked<SHAREABLE>(shareable ? 1u : 0u);
+	b.template set_masked<REFCOUNT>(static_cast<header_word>(rc));
+	return b.underlying_value();
 }
 
 inline constexpr bool hdr_shareable(header_word w) noexcept {
 	header_bits b{};
-	b.set_raw_storage(w);
+	b.set_underlying_value(w);
 	return b.template get<SHAREABLE>() != 0;
 }
 
 inline constexpr std::uint64_t hdr_refcount(header_word w) noexcept {
 	header_bits b{};
-	b.set_raw_storage(w);
+	b.set_underlying_value(w);
 	return static_cast<std::uint64_t>(b.template get<REFCOUNT>());
 }
 
 inline constexpr header_word hdr_set_shareable(header_word w, bool shareable) noexcept {
 	header_bits b{};
-	b.set_raw_storage(w);
-	b.template set<SHAREABLE>(shareable ? 1u : 0u);
-	return b.raw_storage();
+	b.set_underlying_value(w);
+	b.template set_masked<SHAREABLE>(shareable ? 1u : 0u);
+	return b.underlying_value();
 }
 
 inline constexpr header_word hdr_set_refcount(header_word w, std::uint64_t rc) noexcept {
 	header_bits b{};
-	b.set_raw_storage(w);
-	b.template set<REFCOUNT>(static_cast<header_word>(rc));
-	return b.raw_storage();
+	b.set_underlying_value(w);
+	b.template set_masked<REFCOUNT>(static_cast<header_word>(rc));
+	return b.underlying_value();
 }
 
 // ------------------------ heap block ------------------------
