@@ -74,10 +74,10 @@ constexpr Storage insert_field(Storage underlying_value, Storage value, std::siz
 // Shared assertion helper for tests that reason about both underlying whole values and decoded field slices.
 template<typename Pack>
 void check_raw_and_fields_numeric(const Pack& pack,
-                                  typename Pack::underlying_value_type expected_underlying_value,
-                                  typename Pack::underlying_value_type f0,
-                                  typename Pack::underlying_value_type f1,
-                                  typename Pack::underlying_value_type f2) {
+                                  typename Pack::underlying_val_type expected_underlying_value,
+                                  typename Pack::underlying_val_type f0,
+                                  typename Pack::underlying_val_type f1,
+                                  typename Pack::underlying_val_type f2) {
 	static_assert(std::is_same_v<typename Pack::field_key_type, std::size_t>);
 	TEST_EQ(pack.underlying_value(), expected_underlying_value);
 	TEST_EQ(pack.template get_bits<0>(), f0);
@@ -174,8 +174,8 @@ static void test_bits_alias_basic() {
 	using P = bitfield_pack_bits<std::uint16_t, 3, 5, 8>;
 	static_assert(P::size() == 3);
 	static_assert(std::is_same_v<P::storage_type, std::uint16_t>);
-	static_assert(std::is_same_v<P::underlying_value_type, std::uint16_t>);
-	static_assert(std::is_same_v<P::formatted_value_type, std::uint16_t>);
+	static_assert(std::is_same_v<P::underlying_val_type, std::uint16_t>);
+	static_assert(std::is_same_v<P::formatted_val_type, std::uint16_t>);
 	static_assert(std::is_same_v<P::field_key_type, std::size_t>);
 	static_assert(P::template field_mask<0>() == std::uint16_t{0x0007});
 	static_assert(P::template field_mask<1>() == std::uint16_t{0x00F8});
@@ -481,8 +481,8 @@ static void test_word_spec_float_roundtrip() {
 	// Bind formatted_value() to float, but still pack bits in uint32_t.
 	using Word = bitfield_word_spec<std::uint32_t, float>;
 	using F = bitfield_pack_bits<Word, 1, 8, 23>;
-	static_assert(std::is_same_v<F::formatted_value_type, float>);
-	static_assert(std::is_same_v<F::underlying_value_type, std::uint32_t>);
+	static_assert(std::is_same_v<F::formatted_val_type, float>);
+	static_assert(std::is_same_v<F::underlying_val_type, std::uint32_t>);
 
 	// Layout: sign (1), exponent (8), mantissa (23) LSB-first means:
 	// field0=sign at bit0, field1=exponent at bit1..8, field2=mantissa at bit9..31
@@ -527,13 +527,13 @@ static void test_direct_storage_and_underlying_value_access() {
 
 	struct backend_spec {
 		using storage_t = backend_word;
-		using underlying_value_t = std::uint32_t;
-		using formatted_value_t = std::uint32_t;
+		using underlying_val_t = std::uint32_t;
+		using formatted_val_t = std::uint32_t;
 
-		static constexpr underlying_value_t to_underlying_value(formatted_value_t v) noexcept { return v; }
-		static constexpr formatted_value_t from_underlying_value(underlying_value_t v) noexcept { return v; }
-		static constexpr underlying_value_t load_underlying_value(const storage_t& backend) noexcept { return backend.word; }
-		static constexpr void store_underlying_value(storage_t& backend, underlying_value_t v) noexcept { backend.word = v; }
+		static constexpr underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return v; }
+		static constexpr formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return v; }
+		static constexpr underlying_val_t load_underlying_value(const storage_t& backend) noexcept { return backend.word; }
+		static constexpr void store_underlying_value(storage_t& backend, underlying_val_t v) noexcept { backend.word = v; }
 	};
 
 	using P = bitfield_pack<backend_spec, std::size_t, bitfield_field_spec<4>, bitfield_remainder>;
@@ -555,6 +555,48 @@ static void test_direct_storage_and_underlying_value_access() {
 	TEST_EQ(cp.storage().word, std::uint32_t{0x123Fu});
 }
 
+static void test_scratch_copy() {
+	struct backend_word {
+		std::uint32_t word = 0;
+	};
+	struct backend_spec {
+		using storage_t = backend_word;
+		using underlying_val_t = std::uint32_t;
+		using formatted_val_t = float;
+		static constexpr underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return std::bit_cast<underlying_val_t>(v); }
+		static constexpr formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return std::bit_cast<formatted_val_t>(v); }
+		static constexpr underlying_val_t load_underlying_value(const storage_t& backend) noexcept { return backend.word; }
+		static constexpr void store_underlying_value(storage_t& backend, underlying_val_t v) noexcept { backend.word = v; }
+	};
+
+	using P = bitfield_pack<backend_spec, std::size_t, bitfield_field_spec<23>, bitfield_field_spec<8>, bitfield_field_spec<1>>;
+	using Scratch = P::scratch_copy_type;
+	static_assert(std::is_same_v<Scratch, bitfield_pack<bitfield_word_spec<std::uint32_t, float>, std::size_t, bitfield_field_spec<23>, bitfield_field_spec<8>, bitfield_field_spec<1>>>);
+	static_assert(std::is_same_v<typename Scratch::storage_type, std::uint32_t>);
+	static_assert(std::is_same_v<typename Scratch::underlying_val_type, std::uint32_t>);
+	static_assert(std::is_same_v<typename Scratch::formatted_val_type, float>);
+
+	P p(P::from_backend, backend_word{std::bit_cast<std::uint32_t>(1.0f)});
+	const Scratch scratch = p.scratch_copy();
+	TEST_EQ(scratch.underlying_value(), p.underlying_value());
+	TEST_EQ(scratch.formatted_value(), p.formatted_value());
+	TEST_EQ(scratch.template get_bits<0>(), p.template get_bits<0>());
+	TEST_EQ(scratch.template get_bits<1>(), p.template get_bits<1>());
+	TEST_EQ(scratch.template get_bits<2>(), p.template get_bits<2>());
+
+	using Plain = bitfield_pack_bits<std::uint16_t, 4, 4, 8>;
+	using PlainScratch = Plain::scratch_copy_type;
+	static_assert(std::is_same_v<PlainScratch, Plain>);
+
+	Plain q;
+	q.set_underlying_value(0xABCDu);
+	const PlainScratch plain_scratch = q.scratch_copy();
+	TEST_EQ(plain_scratch.underlying_value(), std::uint16_t{0xABCDu});
+	TEST_EQ(std::get<0>(plain_scratch.get_all()), std::uint16_t{0xDu});
+	TEST_EQ(std::get<1>(plain_scratch.get_all()), std::uint16_t{0xCu});
+	TEST_EQ(std::get<2>(plain_scratch.get_all()), std::uint16_t{0xABu});
+}
+
 static void test_backend_hook_mutation_semantics() {
 	// This storage type counts load/store hook traffic so ordinary mutation can be verified as
 	// whole-word load/modify/store through the spec rather than direct member access.
@@ -566,16 +608,16 @@ static void test_backend_hook_mutation_semantics() {
 
 	struct counting_spec {
 		using storage_t = counting_backend;
-		using underlying_value_t = std::uint16_t;
-		using formatted_value_t = std::uint16_t;
+		using underlying_val_t = std::uint16_t;
+		using formatted_val_t = std::uint16_t;
 
-		static underlying_value_t to_underlying_value(formatted_value_t v) noexcept { return v; }
-		static formatted_value_t from_underlying_value(underlying_value_t v) noexcept { return v; }
-		static underlying_value_t load_underlying_value(const storage_t& backend) noexcept {
+		static underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return v; }
+		static formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return v; }
+		static underlying_val_t load_underlying_value(const storage_t& backend) noexcept {
 			if (backend.loads) ++*backend.loads;
 			return backend.word;
 		}
-		static void store_underlying_value(storage_t& backend, underlying_value_t v) noexcept {
+		static void store_underlying_value(storage_t& backend, underlying_val_t v) noexcept {
 			if (backend.stores) ++*backend.stores;
 			backend.word = v;
 		}
@@ -620,27 +662,27 @@ static void test_word_spec_normalization() {
 	};
 	struct backend_spec {
 		using storage_t = backend_word;
-		using underlying_value_t = std::uint32_t;
-		using formatted_value_t = float;
-		static underlying_value_t to_underlying_value(formatted_value_t v) noexcept { return std::bit_cast<underlying_value_t>(v); }
-		static formatted_value_t from_underlying_value(underlying_value_t v) noexcept { return std::bit_cast<formatted_value_t>(v); }
-		static underlying_value_t load_underlying_value(const storage_t& backend) noexcept { return backend.word; }
-		static void store_underlying_value(storage_t& backend, underlying_value_t v) noexcept { backend.word = v; }
+		using underlying_val_t = std::uint32_t;
+		using formatted_val_t = float;
+		static underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return std::bit_cast<underlying_val_t>(v); }
+		static formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return std::bit_cast<formatted_val_t>(v); }
+		static underlying_val_t load_underlying_value(const storage_t& backend) noexcept { return backend.word; }
+		static void store_underlying_value(storage_t& backend, underlying_val_t v) noexcept { backend.word = v; }
 	};
 	using BackendPack = bitfield_pack_bits<backend_spec, 23, 8, 1>;
 
 	static_assert(std::is_same_v<IntegralPack::storage_type, std::uint32_t>);
-	static_assert(std::is_same_v<IntegralPack::underlying_value_type, std::uint32_t>);
-	static_assert(std::is_same_v<IntegralPack::formatted_value_type, std::uint32_t>);
+	static_assert(std::is_same_v<IntegralPack::underlying_val_type, std::uint32_t>);
+	static_assert(std::is_same_v<IntegralPack::formatted_val_type, std::uint32_t>);
 	static_assert(std::is_same_v<IntegralPack::indexing_spec, sw::universal::bitfield_pack_detail::bitfield_index_by_cast<std::size_t>>);
 
 	static_assert(std::is_same_v<FloatPack::storage_type, std::uint32_t>);
-	static_assert(std::is_same_v<FloatPack::underlying_value_type, std::uint32_t>);
-	static_assert(std::is_same_v<FloatPack::formatted_value_type, float>);
+	static_assert(std::is_same_v<FloatPack::underlying_val_type, std::uint32_t>);
+	static_assert(std::is_same_v<FloatPack::formatted_val_type, float>);
 
 	static_assert(std::is_same_v<BackendPack::storage_type, backend_word>);
-	static_assert(std::is_same_v<BackendPack::underlying_value_type, std::uint32_t>);
-	static_assert(std::is_same_v<BackendPack::formatted_value_type, float>);
+	static_assert(std::is_same_v<BackendPack::underlying_val_type, std::uint32_t>);
+	static_assert(std::is_same_v<BackendPack::formatted_val_type, float>);
 }
 
 static void test_index_encoded_sideband() {
@@ -680,6 +722,7 @@ int main() {
 		test_biased_field_spec();
 		test_word_spec_float_roundtrip();
 		test_direct_storage_and_underlying_value_access();
+		test_scratch_copy();
 		test_backend_hook_mutation_semantics();
 		test_word_spec_normalization();
 		test_index_encoded_sideband();
