@@ -3,7 +3,7 @@
 //
 // A std::vector-like container with:
 //  - Small-size optimization (inline storage for N elements)
-//  - Copy-on-write heap storage (shared buffer with atomic control word)
+//  - Copy-on-write heap storage (shared buffer with atomic ownership header)
 //  - Proxy element + proxy non-const iterators (vector<bool>-style)
 //  - "Shareable" state to prevent sharing when an external non-const pointer has been handed out.
 //
@@ -14,10 +14,10 @@
 //
 // Key design points:
 //  - Two-layout representation uses custom_indexed_variant with sideband size.
-//  - Heap sharing state uses bitfield_pack over a single atomic control word.
-//    Layout: [SHAREABLE:1][REFCOUNT:remainder] (no SPARE, no arbitrary bit widths).
+//  - Heap sharing state uses bitfield_pack directly over a single atomic ownership header.
+//    Layout: [UNSHAREABLE:1][REFCOUNT:remainder].
 //  - Heap capacity is stored in the heap block header.
-//  - Heap control word is mutable so refcount/shareable can change through const references.
+//  - Heap ownership header is mutable so refcount/shareability can change through const references.
 //  - N==0 degrades to std::vector.
 //  - Default N computed to match sizeof(std::vector<T, Allocator>) where possible.
 //
@@ -29,7 +29,7 @@
 //
 // Threading model (matches std::vector intent):
 //  - Like std::vector, element operations are not thread-safe against concurrent mutation.
-//  - Atomic control word is for sharing bookkeeping only.
+//  - Atomic ownership header is for shared heap bookkeeping only.
 //
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
 // SPDX-License-Identifier: MIT
@@ -80,61 +80,78 @@ inline constexpr std::size_t default_inline_elems() noexcept {
 	return bytes / sizeof(T);
 }
 
-// ------------------------ heap control word ------------------------
+// ------------------------ heap ownership header ------------------------
 
-/// @brief Atomic header word type used for COW sharing state.
-/// Bit layout (LSB-first):
-/// - field 0: shareable flag, width = 1
-/// - field 1: refcount, width = remainder (all higher bits)
-using header_word = std::uint64_t;
+using header_underlying_t = std::uint64_t;
+using header_storage_t = std::atomic<header_underlying_t>;
 
 enum header_field : std::size_t {
-	SHAREABLE = 0,
+	UNSHAREABLE = 0,
 	REFCOUNT = 1,
 };
 
+/// @brief Local word spec binding the ownership header bits directly to atomic storage.
+/// @details The pack still does all bit math in `header_underlying_t`; only load/store route through
+///          the atomic storage object. CAS loops stay local to sso_vector ownership transitions.
+struct header_word_spec {
+	using underlying_val_t = header_underlying_t;
+	using formatted_val_t = header_underlying_t;
+	using storage_t = header_storage_t;
+	static constexpr bool directly_mutable = false;
+
+	static constexpr underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return v; }
+	static constexpr formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return v; }
+
+	static underlying_val_t load_underlying_value(const storage_t& storage) noexcept {
+		return storage.load(std::memory_order_acquire);
+	}
+
+	static void store_underlying_value(storage_t& storage, underlying_val_t v) noexcept {
+		storage.store(v, std::memory_order_release);
+	}
+};
+
 using header_bits = bitfield_pack<
-	header_word,
+	header_word_spec,
 	header_field,
 	bitfield_field_spec<1>,
 	bitfield_remainder
 >;
+using header_scratch_bits = typename header_bits::template scratch_t<>;
 
 static_assert(header_bits::template field_width<REFCOUNT>() > 0, "sso_vector: header refcount remainder must be non-zero width");
 
-inline constexpr header_word hdr_pack(bool shareable, std::uint64_t rc) noexcept {
-	header_bits b{};
-	b.set_underlying_value(0);
-	b.template set_masked<SHAREABLE>(shareable ? 1u : 0u);
-	b.template set_masked<REFCOUNT>(static_cast<header_word>(rc));
-	return b.underlying_value();
+inline constexpr header_underlying_t make_header_underlying_value(bool shareable, std::uint64_t rc) noexcept {
+	header_scratch_bits header{};
+	header.set_all_masked(shareable ? 0u : 1u, static_cast<header_underlying_t>(rc));
+	return header.underlying_value();
 }
 
-inline constexpr bool hdr_shareable(header_word w) noexcept {
-	header_bits b{};
-	b.set_underlying_value(w);
-	return b.template get<SHAREABLE>() != 0;
+inline constexpr bool header_is_shareable(const header_scratch_bits& header) noexcept {
+	return header.template get<UNSHAREABLE>() == 0;
 }
 
-inline constexpr std::uint64_t hdr_refcount(header_word w) noexcept {
-	header_bits b{};
-	b.set_underlying_value(w);
-	return static_cast<std::uint64_t>(b.template get<REFCOUNT>());
+inline constexpr std::uint64_t header_refcount(const header_scratch_bits& header) noexcept {
+	return static_cast<std::uint64_t>(header.template get<REFCOUNT>());
 }
 
-inline constexpr header_word hdr_set_shareable(header_word w, bool shareable) noexcept {
-	header_bits b{};
-	b.set_underlying_value(w);
-	b.template set_masked<SHAREABLE>(shareable ? 1u : 0u);
-	return b.underlying_value();
-}
+template<class T>
+struct heap_block;
 
-inline constexpr header_word hdr_set_refcount(header_word w, std::uint64_t rc) noexcept {
-	header_bits b{};
-	b.set_underlying_value(w);
-	b.template set_masked<REFCOUNT>(static_cast<header_word>(rc));
-	return b.underlying_value();
-}
+template<class T>
+inline header_scratch_bits load_header_snapshot(const heap_block<T>* b) noexcept;
+
+template<class T>
+inline bool try_increment_refcount_if_shareable(const heap_block<T>* b) noexcept;
+
+template<class T>
+inline bool decrement_refcount(const heap_block<T>* b) noexcept;
+
+template<class T>
+inline void mark_unshareable(heap_block<T>* b) noexcept;
+
+template<class T>
+inline bool header_is_unique(const heap_block<T>* b) noexcept;
 
 // ------------------------ heap block ------------------------
 
@@ -144,7 +161,7 @@ inline constexpr header_word hdr_set_refcount(header_word w, std::uint64_t rc) n
 template<class T>
 struct heap_block {
 	static_assert(alignof(T) <= alignof(std::max_align_t), "sso_vector requires T alignment compatible with byte-rebound allocator");
-	mutable std::atomic<header_word> hdr_atomic;
+	mutable header_bits header;
 	std::size_t capacity;
 	alignas(T) std::byte data[sizeof(T)];
 };
@@ -177,11 +194,10 @@ inline heap_block<T>* allocate_block(std::size_t capacity, Allocator& alloc) {
 	byte_alloc bytes_alloc(alloc);
 	const std::size_t bytes = heap_block_bytes<T>(capacity);
 	std::byte* mem = byte_traits::allocate(bytes_alloc, bytes);
-	auto* b = ::new (mem) heap_block<T>{
-		std::atomic<header_word>(hdr_pack(true, 1)),
-		capacity,
-		{std::byte{0}}
-	};
+	auto* b = ::new (mem) heap_block<T>{};
+	header_word_spec::store_underlying_value(b->header.storage(), make_header_underlying_value(true, 1));
+	b->capacity = capacity;
+	b->data[0] = std::byte{0};
 	return b;
 }
 
@@ -197,55 +213,63 @@ inline void deallocate_block(heap_block<T>* b, Allocator& alloc) noexcept {
 }
 
 template<class T>
-inline header_word load_hdr(const heap_block<T>* b, std::memory_order order = std::memory_order_acquire) noexcept {
-	return b->hdr_atomic.load(order);
+inline header_scratch_bits load_header_snapshot(const heap_block<T>* b) noexcept {
+	return b->header.scratch_copy();
 }
 
 template<class T>
-inline void store_hdr(heap_block<T>* b, header_word v, std::memory_order order = std::memory_order_release) noexcept {
-	b->hdr_atomic.store(v, order);
+inline bool header_is_unique(const heap_block<T>* b) noexcept {
+	return header_refcount(load_header_snapshot(b)) == 1;
 }
 
 template<class T>
-inline bool try_inc_ref_if_shareable(const heap_block<T>* b) noexcept {
-	auto& a = b->hdr_atomic;
-	header_word cur = a.load(std::memory_order_acquire);
+inline bool try_increment_refcount_if_shareable(const heap_block<T>* b) noexcept {
+	auto& storage = b->header.storage();
 	for (;;) {
-		if (!hdr_shareable(cur)) return false;
-		const std::uint64_t rc = hdr_refcount(cur);
+		auto scratch = load_header_snapshot(b);
+		const std::uint64_t rc = header_refcount(scratch);
+		if (!header_is_shareable(scratch)) return false;
 		assert(rc >= 1);
 		if (rc == std::numeric_limits<std::uint64_t>::max()) return false;
-		header_word next = hdr_set_refcount(cur, rc + 1);
-		if (a.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+		const header_underlying_t before = scratch.underlying_value();
+		scratch.template set_masked<REFCOUNT>(static_cast<header_underlying_t>(rc + 1));
+		header_underlying_t expected = before;
+		if (storage.compare_exchange_weak(expected, scratch.underlying_value(), std::memory_order_acq_rel, std::memory_order_acquire)) {
 			return true;
 		}
 	}
 }
 
 template<class T>
-inline bool dec_ref(const heap_block<T>* b) noexcept {
-	auto& a = b->hdr_atomic;
-	header_word cur = a.load(std::memory_order_acquire);
+inline bool decrement_refcount(const heap_block<T>* b) noexcept {
+	auto& storage = b->header.storage();
 	for (;;) {
-		const std::uint64_t rc = hdr_refcount(cur);
+		auto scratch = load_header_snapshot(b);
+		const std::uint64_t rc = header_refcount(scratch);
 		assert(rc >= 1);
 		const std::uint64_t next_rc = rc - 1;
-		header_word next = hdr_set_refcount(cur, next_rc);
-		if (a.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
+		const header_underlying_t before = scratch.underlying_value();
+		scratch.template set_masked<REFCOUNT>(static_cast<header_underlying_t>(next_rc));
+		header_underlying_t expected = before;
+		if (storage.compare_exchange_weak(expected, scratch.underlying_value(), std::memory_order_acq_rel, std::memory_order_acquire)) {
 			return next_rc == 0;
 		}
 	}
 }
 
 template<class T>
-inline void clear_shareable(heap_block<T>* b) noexcept {
-	auto& a = b->hdr_atomic;
-	header_word cur = a.load(std::memory_order_acquire);
-	for (;;) {
-		if (!hdr_shareable(cur)) return;
-		header_word next = hdr_set_shareable(cur, false);
-		if (a.compare_exchange_weak(cur, next, std::memory_order_acq_rel, std::memory_order_acquire)) return;
-	}
+inline void mark_unshareable(heap_block<T>* b) noexcept {
+	auto& storage = b->header.storage();
+	auto scratch = load_header_snapshot(b);
+	assert(header_refcount(scratch) == 1 && "sso_vector: mark_unshareable requires unique ownership");
+	if (!header_is_shareable(scratch)) return;
+	const header_underlying_t before = scratch.underlying_value();
+	scratch.template set_masked<UNSHAREABLE>(1u);
+	header_underlying_t expected = before;
+	const bool cas_ok = storage.compare_exchange_strong(expected, scratch.underlying_value(),
+	                                                    std::memory_order_acq_rel,
+	                                                    std::memory_order_acquire);
+	assert(cas_ok && "sso_vector: mark_unshareable expected unique-owner CAS to succeed");
 }
 
 } // namespace sso_vector_detail
@@ -431,7 +455,7 @@ private:
 	///          a shared block should just decrement the refcount unless this was the last owner.
 	void release_heap_block_impl(sso_vector_detail::heap_block<T>* b, size_type constructed) noexcept {
 		if (!b) return;
-		if (sso_vector_detail::dec_ref(b)) {
+		if (sso_vector_detail::decrement_refcount(b)) {
 			T* d = sso_vector_detail::block_data(b);
 			for (size_type i = 0; i < constructed; ++i) {
 				std::allocator_traits<Allocator>::destroy(alloc_, d + i);
@@ -462,8 +486,8 @@ private:
 		auto& h = heap_storage_impl();
 		if (!h.block) return;
 
-		const auto cur = sso_vector_detail::load_hdr(h.block);
-		const std::uint64_t rc = sso_vector_detail::hdr_refcount(cur);
+		const auto cur = sso_vector_detail::load_header_snapshot(h.block);
+		const std::uint64_t rc = sso_vector_detail::header_refcount(cur);
 		assert(rc >= 1);
 		if (rc == 1) return;
 
@@ -642,7 +666,7 @@ private:
 		auto* b = other.heap_storage_impl().block;
 		assert(b);
 
-		if (sso_vector_detail::try_inc_ref_if_shareable(b)) {
+		if (sso_vector_detail::try_increment_refcount_if_shareable(b)) {
 			heap_storage_impl().block = b;
 			set_size_impl(other.size());
 			return;
@@ -678,8 +702,8 @@ private:
 			return;
 		}
 
-		const auto hdr = sso_vector_detail::load_hdr(heap_storage_impl().block);
-		if (sso_vector_detail::hdr_refcount(hdr) > 1) {
+		const auto hdr = sso_vector_detail::load_header_snapshot(heap_storage_impl().block);
+		if (sso_vector_detail::header_refcount(hdr) > 1) {
 			release_heap_impl();
 			state_.template emplace<0>();
 			set_size_impl(0);
@@ -690,13 +714,17 @@ private:
 		set_size_impl(0);
 	}
 
-	/// @brief Clears heap shareability and detaches before returning mutable raw access.
+	/// @brief Ensures the active heap block is private and then marks it unshareable.
 	/// @details This is the policy behind non-const `data()`: once a raw `T*` escapes, future copies
 	///          must not share the block because uncontrolled external mutation is now possible.
-	void clear_shareable_and_ensure_unique_impl() {
+	///          Shared blocks detach first; the low-level mark step is a unique-owner-only one-shot CAS.
+	void make_unshareable_heap_impl() {
 		if (auto* block = heap_block_impl()) {
-			ensure_unique_heap_impl();
-			sso_vector_detail::clear_shareable(heap_storage_impl().block);
+			if (!sso_vector_detail::header_is_unique(block)) {
+				ensure_unique_heap_impl();
+				block = heap_block_impl();
+			}
+			sso_vector_detail::mark_unshareable(block);
 		}
 	}
 
@@ -1113,7 +1141,7 @@ public:
 	/// @brief Returns mutable contiguous storage.
 	/// @warning This explicitly clears shareability and ensures uniqueness before handing out `T*`.
 	pointer data() {
-		clear_shareable_and_ensure_unique_impl();
+		make_unshareable_heap_impl();
 		return data_mut_no_cow_impl();
 	}
 
