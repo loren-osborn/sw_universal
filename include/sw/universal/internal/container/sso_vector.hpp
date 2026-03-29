@@ -93,7 +93,7 @@ enum header_field : std::size_t {
 /// @brief Local word spec binding the ownership header bits directly to atomic storage.
 /// @details The pack still does all bit math in `header_underlying_t`; only load/store route through
 ///          the atomic storage object. CAS loops stay local to sso_vector ownership transitions.
-struct header_word_spec {
+struct ownership_header_word_spec {
 	using underlying_val_t = header_underlying_t;
 	using formatted_val_t = header_underlying_t;
 	using storage_t = header_storage_t;
@@ -111,27 +111,27 @@ struct header_word_spec {
 	}
 };
 
-using header_bits = bitfield_pack<
-	header_word_spec,
+using ownership_header_bits = bitfield_pack<
+	ownership_header_word_spec,
 	header_field,
 	bitfield_field_spec<1>,
 	bitfield_remainder
 >;
-using header_scratch_bits = typename header_bits::template scratch_t<>;
+using ownership_header_scratch_bits = typename ownership_header_bits::template scratch_t<>;
 
-static_assert(header_bits::template field_width<REFCOUNT>() > 0, "sso_vector: header refcount remainder must be non-zero width");
+static_assert(ownership_header_bits::template field_width<REFCOUNT>() > 0, "sso_vector: header refcount remainder must be non-zero width");
 
 inline constexpr header_underlying_t make_header_underlying_value(bool shareable, std::uint64_t rc) noexcept {
-	header_scratch_bits header{};
+	ownership_header_scratch_bits header{};
 	header.set_all_masked(shareable ? 0u : 1u, static_cast<header_underlying_t>(rc));
 	return header.underlying_value();
 }
 
-inline constexpr bool header_is_shareable(const header_scratch_bits& header) noexcept {
+inline constexpr bool ownership_header_is_shareable(const ownership_header_scratch_bits& header) noexcept {
 	return header.template get<UNSHAREABLE>() == 0;
 }
 
-inline constexpr std::uint64_t header_refcount(const header_scratch_bits& header) noexcept {
+inline constexpr std::uint64_t ownership_header_share_count(const ownership_header_scratch_bits& header) noexcept {
 	return static_cast<std::uint64_t>(header.template get<REFCOUNT>());
 }
 
@@ -139,19 +139,19 @@ template<class T>
 struct heap_block;
 
 template<class T>
-inline header_scratch_bits load_header_snapshot(const heap_block<T>* b) noexcept;
+inline ownership_header_scratch_bits load_ownership_header_snapshot(const heap_block<T>* b) noexcept;
 
 template<class T>
-inline bool try_increment_refcount_if_shareable(const heap_block<T>* b) noexcept;
+inline bool try_add_shared_owner(const heap_block<T>* b) noexcept;
 
 template<class T>
-inline bool decrement_refcount(const heap_block<T>* b) noexcept;
+inline bool release_shared_owner(const heap_block<T>* b) noexcept;
 
 template<class T>
 inline void mark_unshareable(heap_block<T>* b) noexcept;
 
 template<class T>
-inline bool header_is_unique(const heap_block<T>* b) noexcept;
+inline bool ownership_header_is_unique(const heap_block<T>* b) noexcept;
 
 // ------------------------ heap block ------------------------
 
@@ -161,7 +161,7 @@ inline bool header_is_unique(const heap_block<T>* b) noexcept;
 template<class T>
 struct heap_block {
 	static_assert(alignof(T) <= alignof(std::max_align_t), "sso_vector requires T alignment compatible with byte-rebound allocator");
-	mutable header_bits header;
+	mutable ownership_header_bits ownership_header;
 	std::size_t capacity;
 	alignas(T) std::byte data[sizeof(T)];
 };
@@ -195,7 +195,7 @@ inline heap_block<T>* allocate_block(std::size_t capacity, Allocator& alloc) {
 	const std::size_t bytes = heap_block_bytes<T>(capacity);
 	std::byte* mem = byte_traits::allocate(bytes_alloc, bytes);
 	auto* b = ::new (mem) heap_block<T>{};
-	header_word_spec::store_underlying_value(b->header.storage(), make_header_underlying_value(true, 1));
+	ownership_header_word_spec::store_underlying_value(b->ownership_header.storage(), make_header_underlying_value(true, 1));
 	b->capacity = capacity;
 	b->data[0] = std::byte{0};
 	return b;
@@ -213,22 +213,22 @@ inline void deallocate_block(heap_block<T>* b, Allocator& alloc) noexcept {
 }
 
 template<class T>
-inline header_scratch_bits load_header_snapshot(const heap_block<T>* b) noexcept {
-	return b->header.scratch_copy();
+inline ownership_header_scratch_bits load_ownership_header_snapshot(const heap_block<T>* b) noexcept {
+	return b->ownership_header.scratch_copy();
 }
 
 template<class T>
-inline bool header_is_unique(const heap_block<T>* b) noexcept {
-	return header_refcount(load_header_snapshot(b)) == 1;
+inline bool ownership_header_is_unique(const heap_block<T>* b) noexcept {
+	return ownership_header_share_count(load_ownership_header_snapshot(b)) == 1;
 }
 
 template<class T>
-inline bool try_increment_refcount_if_shareable(const heap_block<T>* b) noexcept {
-	auto& storage = b->header.storage();
+inline bool try_add_shared_owner(const heap_block<T>* b) noexcept {
+	auto& storage = b->ownership_header.storage();
 	for (;;) {
-		auto scratch = load_header_snapshot(b);
-		const std::uint64_t rc = header_refcount(scratch);
-		if (!header_is_shareable(scratch)) return false;
+		auto scratch = load_ownership_header_snapshot(b);
+		const std::uint64_t rc = ownership_header_share_count(scratch);
+		if (!ownership_header_is_shareable(scratch)) return false;
 		assert(rc >= 1);
 		if (rc == std::numeric_limits<std::uint64_t>::max()) return false;
 		const header_underlying_t before = scratch.underlying_value();
@@ -241,11 +241,11 @@ inline bool try_increment_refcount_if_shareable(const heap_block<T>* b) noexcept
 }
 
 template<class T>
-inline bool decrement_refcount(const heap_block<T>* b) noexcept {
-	auto& storage = b->header.storage();
+inline bool release_shared_owner(const heap_block<T>* b) noexcept {
+	auto& storage = b->ownership_header.storage();
 	for (;;) {
-		auto scratch = load_header_snapshot(b);
-		const std::uint64_t rc = header_refcount(scratch);
+		auto scratch = load_ownership_header_snapshot(b);
+		const std::uint64_t rc = ownership_header_share_count(scratch);
 		assert(rc >= 1);
 		const std::uint64_t next_rc = rc - 1;
 		const header_underlying_t before = scratch.underlying_value();
@@ -259,10 +259,10 @@ inline bool decrement_refcount(const heap_block<T>* b) noexcept {
 
 template<class T>
 inline void mark_unshareable(heap_block<T>* b) noexcept {
-	auto& storage = b->header.storage();
-	auto scratch = load_header_snapshot(b);
-	assert(header_refcount(scratch) == 1 && "sso_vector: mark_unshareable requires unique ownership");
-	if (!header_is_shareable(scratch)) return;
+	auto& storage = b->ownership_header.storage();
+	auto scratch = load_ownership_header_snapshot(b);
+	assert(ownership_header_share_count(scratch) == 1 && "sso_vector: mark_unshareable requires unique ownership");
+	if (!ownership_header_is_shareable(scratch)) return;
 	const header_underlying_t before = scratch.underlying_value();
 	scratch.template set_masked<UNSHAREABLE>(1u);
 	header_underlying_t expected = before;
@@ -455,7 +455,7 @@ private:
 	///          a shared block should just decrement the refcount unless this was the last owner.
 	void release_heap_block_impl(sso_vector_detail::heap_block<T>* b, size_type constructed) noexcept {
 		if (!b) return;
-		if (sso_vector_detail::decrement_refcount(b)) {
+		if (sso_vector_detail::release_shared_owner(b)) {
 			T* d = sso_vector_detail::block_data(b);
 			for (size_type i = 0; i < constructed; ++i) {
 				std::allocator_traits<Allocator>::destroy(alloc_, d + i);
@@ -486,8 +486,8 @@ private:
 		auto& h = heap_storage_impl();
 		if (!h.block) return;
 
-		const auto cur = sso_vector_detail::load_header_snapshot(h.block);
-		const std::uint64_t rc = sso_vector_detail::header_refcount(cur);
+		const auto cur = sso_vector_detail::load_ownership_header_snapshot(h.block);
+		const std::uint64_t rc = sso_vector_detail::ownership_header_share_count(cur);
 		assert(rc >= 1);
 		if (rc == 1) return;
 
@@ -666,7 +666,7 @@ private:
 		auto* b = other.heap_storage_impl().block;
 		assert(b);
 
-		if (sso_vector_detail::try_increment_refcount_if_shareable(b)) {
+		if (sso_vector_detail::try_add_shared_owner(b)) {
 			heap_storage_impl().block = b;
 			set_size_impl(other.size());
 			return;
@@ -702,8 +702,8 @@ private:
 			return;
 		}
 
-		const auto hdr = sso_vector_detail::load_header_snapshot(heap_storage_impl().block);
-		if (sso_vector_detail::header_refcount(hdr) > 1) {
+		const auto hdr = sso_vector_detail::load_ownership_header_snapshot(heap_storage_impl().block);
+		if (sso_vector_detail::ownership_header_share_count(hdr) > 1) {
 			release_heap_impl();
 			state_.template emplace<0>();
 			set_size_impl(0);
@@ -718,9 +718,9 @@ private:
 	/// @details This is the policy behind non-const `data()`: once a raw `T*` escapes, future copies
 	///          must not share the block because uncontrolled external mutation is now possible.
 	///          Shared blocks detach first; the low-level mark step is a unique-owner-only one-shot CAS.
-	void make_unshareable_heap_impl() {
+	void privatize_heap_impl() {
 		if (auto* block = heap_block_impl()) {
-			if (!sso_vector_detail::header_is_unique(block)) {
+			if (!sso_vector_detail::ownership_header_is_unique(block)) {
 				ensure_unique_heap_impl();
 				block = heap_block_impl();
 			}
@@ -1141,7 +1141,7 @@ public:
 	/// @brief Returns mutable contiguous storage.
 	/// @warning This explicitly clears shareability and ensures uniqueness before handing out `T*`.
 	pointer data() {
-		make_unshareable_heap_impl();
+		privatize_heap_impl();
 		return data_mut_no_cow_impl();
 	}
 
@@ -1164,6 +1164,25 @@ public:
 
 	bool empty() const noexcept { return size() == 0; }
 	size_type size() const noexcept { return size_impl(); }
+	/// @brief Returns true when the active representation is the inline/SSO buffer.
+	bool is_inline() const noexcept { return is_inline_impl(); }
+	/// @brief Returns true when the current heap payload has more than one owner.
+	/// @note This is an instantaneous ownership snapshot, not a synchronization guarantee.
+	bool is_shared() const noexcept { return share_count() > 1; }
+	/// @brief Returns true when future sharing is currently permitted for the active state.
+	/// @details Inline storage always reports shareable. Heap-backed state reflects the ownership header.
+	bool is_shareable() const noexcept {
+		if (!is_heap_impl()) return true;
+		return sso_vector_detail::ownership_header_is_shareable(
+			sso_vector_detail::load_ownership_header_snapshot(heap_storage_impl().block));
+	}
+	/// @brief Returns the current effective owner count.
+	/// @details Inline storage reports `1`. Heap-backed storage reports the current ownership-header count.
+	size_type share_count() const noexcept {
+		if (!is_heap_impl()) return 1;
+		return static_cast<size_type>(sso_vector_detail::ownership_header_share_count(
+			sso_vector_detail::load_ownership_header_snapshot(heap_storage_impl().block)));
+	}
 
 	size_type capacity() const noexcept { return capacity_impl(); }
 

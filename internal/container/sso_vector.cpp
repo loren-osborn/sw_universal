@@ -1402,6 +1402,46 @@ void run_sso_vector_cow_behavior_suite(int& failures) {
 	TestContext ctx{"sso_vector_cow_specific", failures};
 
 	{
+		// Public observability helpers expose ownership-state snapshots without claiming any broader
+		// thread-safety guarantee. They are intended to make the representation/COW state readable.
+		LifetimeTracked::reset();
+		{
+			Vec inlined;
+			inlined.emplace_back(1);
+			inlined.emplace_back(2);
+			inlined.emplace_back(3);
+			check(ctx, inlined.is_inline(), "fresh small vector reports inline representation");
+			check(ctx, !inlined.is_shared(), "fresh inline vector is not shared");
+			check(ctx, inlined.is_shareable(), "fresh inline vector is shareable");
+			check(ctx, inlined.share_count() == 1, "fresh inline vector reports one effective owner");
+
+			Vec unique_heap = make_heap_backed_lifetime_vector<Vec>({5, 6, 7, 8, 9, 10});
+			check(ctx, !unique_heap.is_inline(), "fresh heap-backed vector reports heap representation");
+			check(ctx, !unique_heap.is_shared(), "fresh heap-backed vector is not shared");
+			check(ctx, unique_heap.is_shareable(), "fresh heap-backed vector is shareable");
+			check(ctx, unique_heap.share_count() == 1, "fresh heap-backed vector reports one owner");
+
+			Vec shared_heap = unique_heap;
+			check(ctx, unique_heap.is_shared(), "left heap sharer reports shared ownership");
+			check(ctx, shared_heap.is_shared(), "right heap sharer reports shared ownership");
+			check(ctx, unique_heap.is_shareable(), "shared heap storage remains shareable before privatization");
+			check(ctx, shared_heap.is_shareable(), "sibling shared heap storage remains shareable before privatization");
+			check(ctx, unique_heap.share_count() == 2, "left heap sharer reports two owners");
+			check(ctx, shared_heap.share_count() == 2, "right heap sharer reports two owners");
+
+			(void)unique_heap.data();
+			check(ctx, !unique_heap.is_inline(), "privatized heap vector remains heap-backed");
+			check(ctx, !unique_heap.is_shared(), "privatized heap vector is no longer shared");
+			check(ctx, !unique_heap.is_shareable(), "mutable raw access makes target unshareable");
+			check(ctx, unique_heap.share_count() == 1, "privatized heap vector reports one owner");
+			check(ctx, !shared_heap.is_shared(), "untouched sibling becomes unique after detach");
+			check(ctx, shared_heap.is_shareable(), "untouched sibling remains shareable after other branch privatizes");
+			check(ctx, shared_heap.share_count() == 1, "untouched sibling reports one owner after detach");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "public observability helper scope destruction");
+	}
+
+	{
 		// A fresh heap-backed vector should remain effectively shareable across ordinary copies.
 		LifetimeTracked::reset();
 		{
@@ -2047,51 +2087,51 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 	}
 }
 
-void run_sso_vector_header_bits_suite(int& failures) {
-	TestContext ctx{"sso_vector_header_bits", failures};
+void run_sso_vector_ownership_header_suite(int& failures) {
+	TestContext ctx{"sso_vector_ownership_header", failures};
 	namespace detail = sw::universal::internal::sso_vector_detail;
 
 	{
 		// The heap block now owns the atomic-backed bitfield pack directly. This smoke test exercises
-		// the direct header object rather than reconstructing meaning from an external integer word.
+		// the direct ownership header object rather than reconstructing meaning from an external integer word.
 		// mark_unshareable is intentionally exercised only after the header has been driven back to
 		// unique ownership; that helper is a narrow one-shot unique-owner transition, not a detach path.
 		std::allocator<int> alloc;
 		auto* block = detail::allocate_block<int>(8, alloc);
-		const auto initial = detail::load_header_snapshot(block);
-		check(ctx, detail::header_is_shareable(initial), "fresh heap header starts shareable");
-		check(ctx, detail::header_refcount(initial) == 1, "fresh heap header starts with refcount one");
-		check(ctx, block->header.load_underlying_value() == initial.underlying_value(), "header scratch snapshot matches live underlying value");
+		const auto initial = detail::load_ownership_header_snapshot(block);
+		check(ctx, detail::ownership_header_is_shareable(initial), "fresh ownership header starts shareable");
+		check(ctx, detail::ownership_header_share_count(initial) == 1, "fresh ownership header starts with one owner");
+		check(ctx, block->ownership_header.load_underlying_value() == initial.underlying_value(), "ownership-header scratch snapshot matches live underlying value");
 
-		check(ctx, detail::try_increment_refcount_if_shareable(block), "shareable heap header increments refcount");
-		const auto shared = detail::load_header_snapshot(block);
-		check(ctx, detail::header_is_shareable(shared), "incrementing refcount does not clear shareability");
-		check(ctx, detail::header_refcount(shared) == 2, "shareable increment reaches refcount two");
-		check(ctx, detail::try_increment_refcount_if_shareable(block), "shared header remains shareable until explicitly privatized");
-		const auto triply_shared = detail::load_header_snapshot(block);
-		check(ctx, detail::header_refcount(triply_shared) == 3, "shareable increment reaches refcount three");
+		check(ctx, detail::try_add_shared_owner(block), "shareable ownership header accepts a second owner");
+		const auto shared = detail::load_ownership_header_snapshot(block);
+		check(ctx, detail::ownership_header_is_shareable(shared), "adding a shared owner does not clear shareability");
+		check(ctx, detail::ownership_header_share_count(shared) == 2, "shareable ownership header reaches two owners");
+		check(ctx, detail::try_add_shared_owner(block), "shared ownership header remains shareable until explicitly privatized");
+		const auto triply_shared = detail::load_ownership_header_snapshot(block);
+		check(ctx, detail::ownership_header_share_count(triply_shared) == 3, "shareable ownership header reaches three owners");
 
-		check(ctx, !detail::decrement_refcount(block), "release from three owners does not report last owner");
-		const auto back_to_two = detail::load_header_snapshot(block);
-		check(ctx, detail::header_refcount(back_to_two) == 2, "release decrements shared refcount");
-		check(ctx, detail::header_is_shareable(back_to_two), "release from shared state preserves shareability");
-		check(ctx, !detail::decrement_refcount(block), "release from two owners does not report last owner");
-		const auto unique = detail::load_header_snapshot(block);
-		check(ctx, detail::header_refcount(unique) == 1, "releasing down to one owner restores unique state");
-		check(ctx, detail::header_is_shareable(unique), "unique state remains shareable until explicitly marked");
+		check(ctx, !detail::release_shared_owner(block), "release from three owners does not report last owner");
+		const auto back_to_two = detail::load_ownership_header_snapshot(block);
+		check(ctx, detail::ownership_header_share_count(back_to_two) == 2, "releasing a shared owner decrements the count");
+		check(ctx, detail::ownership_header_is_shareable(back_to_two), "shared-owner release preserves shareability");
+		check(ctx, !detail::release_shared_owner(block), "release from two owners does not report last owner");
+		const auto unique = detail::load_ownership_header_snapshot(block);
+		check(ctx, detail::ownership_header_share_count(unique) == 1, "releasing down to one owner restores unique state");
+		check(ctx, detail::ownership_header_is_shareable(unique), "unique ownership remains shareable until explicitly marked");
 
 		detail::mark_unshareable(block);
-		const auto unshareable = detail::load_header_snapshot(block);
-		check(ctx, !detail::header_is_shareable(unshareable), "mark_unshareable sets the ownership policy bit");
-		check(ctx, detail::header_refcount(unshareable) == 1, "mark_unshareable requires and preserves unique ownership");
-		check(ctx, !detail::try_increment_refcount_if_shareable(block), "unshareable heap header rejects new sharing");
-		const auto after_rejected_share = detail::load_header_snapshot(block);
-		check(ctx, after_rejected_share.underlying_value() == unshareable.underlying_value(), "rejected sharing leaves header unchanged");
+		const auto unshareable = detail::load_ownership_header_snapshot(block);
+		check(ctx, !detail::ownership_header_is_shareable(unshareable), "mark_unshareable sets the ownership policy bit");
+		check(ctx, detail::ownership_header_share_count(unshareable) == 1, "mark_unshareable requires and preserves unique ownership");
+		check(ctx, !detail::try_add_shared_owner(block), "unshareable ownership header rejects new sharing");
+		const auto after_rejected_share = detail::load_ownership_header_snapshot(block);
+		check(ctx, after_rejected_share.underlying_value() == unshareable.underlying_value(), "rejected sharing leaves ownership header unchanged");
 
-		check(ctx, detail::decrement_refcount(block), "final decrement reports last owner");
-		const auto after_last_release = detail::load_header_snapshot(block);
-		check(ctx, detail::header_refcount(after_last_release) == 0, "final release leaves zero refcount");
-		check(ctx, !detail::header_is_shareable(after_last_release), "final release preserves unshareable policy bit");
+		check(ctx, detail::release_shared_owner(block), "final release reports last owner");
+		const auto after_last_release = detail::load_ownership_header_snapshot(block);
+		check(ctx, detail::ownership_header_share_count(after_last_release) == 0, "final release leaves zero shared owners");
+		check(ctx, !detail::ownership_header_is_shareable(after_last_release), "final release preserves the unshareable policy bit");
 
 		detail::deallocate_block(block, alloc);
 	}
@@ -2099,7 +2139,7 @@ void run_sso_vector_header_bits_suite(int& failures) {
 
 int main() {
 	int nrOfFailedTestCases = 0;
-	run_sso_vector_header_bits_suite(nrOfFailedTestCases);
+	run_sso_vector_ownership_header_suite(nrOfFailedTestCases);
 	run_sso_proxy_suite(nrOfFailedTestCases);
 	run_sso_cow_suite(nrOfFailedTestCases);
 	run_sso_vector_cow_behavior_suite(nrOfFailedTestCases);

@@ -209,19 +209,19 @@ concept bitfield_word_spec_like =
 
 /// @brief Scratch-copy word spec preserving whole-pack conversions while rebinding storage to the
 ///        canonical underlying value type and re-enabling direct mutability.
-template <class Word>
+template <class WordSpec>
 struct scratch_copy_word_spec {
-	using underlying_val_t = typename Word::underlying_val_t;
-	using formatted_val_t = typename Word::formatted_val_t;
+	using underlying_val_t = typename WordSpec::underlying_val_t;
+	using formatted_val_t = typename WordSpec::formatted_val_t;
 	using storage_t = underlying_val_t;
 	static constexpr bool directly_mutable = true;
 
 	static constexpr underlying_val_t to_underlying_value(formatted_val_t v) noexcept {
-		return Word::to_underlying_value(v);
+		return WordSpec::to_underlying_value(v);
 	}
 
 	static constexpr formatted_val_t from_underlying_value(underlying_val_t v) noexcept {
-		return Word::from_underlying_value(v);
+		return WordSpec::from_underlying_value(v);
 	}
 
 	static constexpr underlying_val_t load_underlying_value(const storage_t& storage) noexcept {
@@ -550,7 +550,7 @@ private:
 	using layout_traits = bitfield_pack_detail::bitfield_layout_traits<underlying_val_t, FieldSpecs...>;
 	static constexpr bool kDirectlyMutable = word_spec_t::directly_mutable;
 	static constexpr bool kScratchCopyAvailable = !std::same_as<storage_t, underlying_val_t> || !kDirectlyMutable;
-	using scratch_copy_pack_t =
+	using scratch_pack_t =
 		bitfield_pack<bitfield_pack_detail::scratch_copy_word_spec<word_spec_t>, IndexingSpec, FieldSpecs...>;
 
 	static_assert(std::unsigned_integral<underlying_val_t>, "bitfield_pack: underlying_val_t must be unsigned integral");
@@ -702,10 +702,11 @@ public:
 	                                          field_values_type>;
 	/// @brief Whether the live pack supports ordinary mutating member APIs.
 	static constexpr bool directly_mutable = kDirectlyMutable;
-	/// @brief Mutable scratch-copy pack rebound to plain underlying-value storage.
+	/// @brief Mutable scratch pack rebound to plain underlying-value storage.
+	/// @details This alias participates only when scratch copies are actually useful for the live pack.
 	template <bool Enabled = kScratchCopyAvailable>
 		requires(Enabled)
-	using scratch_t = scratch_copy_pack_t;
+	using scratch_t = scratch_pack_t;
 
 	/// @brief Tag type selecting direct storage construction.
 	/// @details This allows callers with a pre-built `storage_t` to bypass the
@@ -782,12 +783,11 @@ public:
 	}
 
 	/// @brief Returns an equivalent pack rebound to plain underlying-value storage.
-	/// @details Scratch copies exist only when the live pack is not already directly mutable in plain
-	///          underlying storage. They preserve whole-pack conversions while providing a mutable
-	///          staging object for before/after state construction.
+	/// @details Live non-directly-mutable packs are for read/snapshot/storage/CAS workflows. Scratch
+	///          copies are the directly mutable staging packs used to build before/after states.
 	constexpr auto scratch_copy() const BITFIELD_PACK_NOEXCEPT
 		requires(kScratchCopyAvailable) {
-		return scratch_copy_pack_t(load_underlying_value());
+		return scratch_pack_t(load_underlying_value());
 	}
 
 	/// @brief Returns the compile-time bit width of a field key.
