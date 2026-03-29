@@ -10,6 +10,7 @@
 // narrate every assertion.
 #include <cmath>
 #include <bit>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <exception>
@@ -59,6 +60,56 @@ struct test_assert_failure : std::exception {
 } while(0)
 
 using namespace sw::universal;
+
+template<class Pack>
+concept has_scratch_copy_member = requires(const Pack& pack) {
+	pack.scratch_copy();
+};
+
+template<class Pack>
+concept has_scratch_t = requires {
+	typename Pack::template scratch_t<>;
+};
+
+template<class Pack>
+concept has_set_underlying_value = requires(Pack& pack, typename Pack::underlying_val_type value) {
+	pack.set_underlying_value(value);
+};
+
+template<class Pack>
+concept has_set_formatted_value = requires(Pack& pack, typename Pack::formatted_val_type value) {
+	pack.set_formatted_value(value);
+};
+
+template<class Pack>
+concept has_store_underlying_value = requires(Pack& pack, typename Pack::underlying_val_type value) {
+	pack.store_underlying_value(value);
+};
+
+template<class Pack, auto Field>
+concept has_set_bits = requires(Pack& pack, typename Pack::underlying_val_type value) {
+	pack.template set_bits<Field>(value);
+};
+
+template<class Pack, auto Field>
+concept has_set_masked = requires(Pack& pack, typename Pack::template value_type<Field> value) {
+	pack.template set_masked<Field>(value);
+};
+
+template<class Pack, auto Field>
+concept has_set_if_valid = requires(Pack& pack, typename Pack::template value_type<Field> value) {
+	pack.template set_if_valid<Field>(value);
+};
+
+template<class Pack, class... Values>
+concept has_set_all_masked = requires(Pack& pack, Values... values) {
+	pack.set_all_masked(values...);
+};
+
+template<class Pack, class... Values>
+concept has_set_all_if_valid = requires(Pack& pack, Values... values) {
+	pack.set_all_if_valid(values...);
+};
 
 // Helper for assembling an expected raw word by hand in the canonical storage domain.
 // Tests use this to verify pack layout independently of the production helper implementation.
@@ -529,6 +580,7 @@ static void test_direct_storage_and_underlying_value_access() {
 		using storage_t = backend_word;
 		using underlying_val_t = std::uint32_t;
 		using formatted_val_t = std::uint32_t;
+		enum : bool { directly_mutable = true };
 
 		static constexpr underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return v; }
 		static constexpr formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return v; }
@@ -556,45 +608,65 @@ static void test_direct_storage_and_underlying_value_access() {
 }
 
 static void test_scratch_copy() {
-	struct backend_word {
-		std::uint32_t word = 0;
-	};
-	struct backend_spec {
-		using storage_t = backend_word;
+	using Plain = bitfield_pack_bits<std::uint16_t, 4, 4, 8>;
+	static_assert(Plain::directly_mutable);
+	static_assert(has_set_underlying_value<Plain>);
+	static_assert(has_set_formatted_value<Plain>);
+	static_assert(has_store_underlying_value<Plain>);
+	static_assert(has_set_bits<Plain, 0>);
+	static_assert(has_set_masked<Plain, 0>);
+	static_assert(has_set_if_valid<Plain, 0>);
+	static_assert(has_set_all_masked<Plain, std::uint16_t, std::uint16_t, std::uint16_t>);
+	static_assert(has_set_all_if_valid<Plain, std::uint16_t, std::uint16_t, std::uint16_t>);
+	static_assert(!has_scratch_copy_member<Plain>);
+	static_assert(!has_scratch_t<Plain>);
+
+	Plain q;
+	q.set_underlying_value(0xABCDu);
+	TEST_EQ(q.underlying_value(), std::uint16_t{0xABCDu});
+
+	struct atomic_float_spec {
+		using storage_t = std::atomic<std::uint32_t>;
 		using underlying_val_t = std::uint32_t;
 		using formatted_val_t = float;
+		enum : bool { directly_mutable = false };
 		static constexpr underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return std::bit_cast<underlying_val_t>(v); }
 		static constexpr formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return std::bit_cast<formatted_val_t>(v); }
-		static constexpr underlying_val_t load_underlying_value(const storage_t& backend) noexcept { return backend.word; }
-		static constexpr void store_underlying_value(storage_t& backend, underlying_val_t v) noexcept { backend.word = v; }
+		static underlying_val_t load_underlying_value(const storage_t& storage) noexcept { return storage.load(std::memory_order_acquire); }
+		static void store_underlying_value(storage_t& storage, underlying_val_t v) noexcept { storage.store(v, std::memory_order_release); }
 	};
 
-	using P = bitfield_pack<backend_spec, std::size_t, bitfield_field_spec<23>, bitfield_field_spec<8>, bitfield_field_spec<1>>;
-	using Scratch = P::scratch_copy_type;
-	static_assert(std::is_same_v<Scratch, bitfield_pack<bitfield_word_spec<std::uint32_t, float>, std::size_t, bitfield_field_spec<23>, bitfield_field_spec<8>, bitfield_field_spec<1>>>);
-	static_assert(std::is_same_v<typename Scratch::storage_type, std::uint32_t>);
-	static_assert(std::is_same_v<typename Scratch::underlying_val_type, std::uint32_t>);
-	static_assert(std::is_same_v<typename Scratch::formatted_val_type, float>);
+	using AtomicPack = bitfield_pack<atomic_float_spec, std::size_t, bitfield_field_spec<23>, bitfield_field_spec<8>, bitfield_field_spec<1>>;
+	static_assert(!AtomicPack::directly_mutable);
+	static_assert(!has_set_underlying_value<AtomicPack>);
+	static_assert(!has_set_formatted_value<AtomicPack>);
+	static_assert(!has_store_underlying_value<AtomicPack>);
+	static_assert(!has_set_bits<AtomicPack, 0>);
+	static_assert(!has_set_masked<AtomicPack, 0>);
+	static_assert(!has_set_if_valid<AtomicPack, 0>);
+	static_assert(!has_set_all_masked<AtomicPack, std::uint32_t, std::uint32_t, std::uint32_t>);
+	static_assert(!has_set_all_if_valid<AtomicPack, std::uint32_t, std::uint32_t, std::uint32_t>);
+	static_assert(has_scratch_copy_member<AtomicPack>);
+	static_assert(has_scratch_t<AtomicPack>);
+	static_assert(std::is_same_v<typename AtomicPack::template scratch_t<>::storage_type, std::uint32_t>);
+	static_assert(std::is_same_v<typename AtomicPack::template scratch_t<>::underlying_val_type, std::uint32_t>);
+	static_assert(std::is_same_v<typename AtomicPack::template scratch_t<>::formatted_val_type, float>);
+	static_assert(AtomicPack::template scratch_t<>::directly_mutable);
 
-	P p(P::from_backend, backend_word{std::bit_cast<std::uint32_t>(1.0f)});
-	const Scratch scratch = p.scratch_copy();
+	AtomicPack p;
+	p.storage().store(std::bit_cast<std::uint32_t>(1.0f), std::memory_order_release);
+	const auto scratch = p.scratch_copy();
 	TEST_EQ(scratch.underlying_value(), p.underlying_value());
 	TEST_EQ(scratch.formatted_value(), p.formatted_value());
 	TEST_EQ(scratch.template get_bits<0>(), p.template get_bits<0>());
 	TEST_EQ(scratch.template get_bits<1>(), p.template get_bits<1>());
 	TEST_EQ(scratch.template get_bits<2>(), p.template get_bits<2>());
 
-	using Plain = bitfield_pack_bits<std::uint16_t, 4, 4, 8>;
-	using PlainScratch = Plain::scratch_copy_type;
-	static_assert(std::is_same_v<PlainScratch, Plain>);
-
-	Plain q;
-	q.set_underlying_value(0xABCDu);
-	const PlainScratch plain_scratch = q.scratch_copy();
-	TEST_EQ(plain_scratch.underlying_value(), std::uint16_t{0xABCDu});
-	TEST_EQ(std::get<0>(plain_scratch.get_all()), std::uint16_t{0xDu});
-	TEST_EQ(std::get<1>(plain_scratch.get_all()), std::uint16_t{0xCu});
-	TEST_EQ(std::get<2>(plain_scratch.get_all()), std::uint16_t{0xABu});
+	auto mutated = p.scratch_copy();
+	mutated.template set_masked<0>(0u);
+	mutated.template set_masked<1>(127u);
+	mutated.template set_masked<2>(0u);
+	TEST_EQ(mutated.formatted_value(), 1.0f);
 }
 
 static void test_backend_hook_mutation_semantics() {
@@ -610,6 +682,7 @@ static void test_backend_hook_mutation_semantics() {
 		using storage_t = counting_backend;
 		using underlying_val_t = std::uint16_t;
 		using formatted_val_t = std::uint16_t;
+		enum : bool { directly_mutable = true };
 
 		static underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return v; }
 		static formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return v; }
@@ -664,6 +737,7 @@ static void test_word_spec_normalization() {
 		using storage_t = backend_word;
 		using underlying_val_t = std::uint32_t;
 		using formatted_val_t = float;
+		enum : bool { directly_mutable = true };
 		static underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return std::bit_cast<underlying_val_t>(v); }
 		static formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return std::bit_cast<formatted_val_t>(v); }
 		static underlying_val_t load_underlying_value(const storage_t& backend) noexcept { return backend.word; }
