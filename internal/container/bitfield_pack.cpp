@@ -571,7 +571,7 @@ static void test_word_spec_float_roundtrip() {
 static void test_direct_storage_and_underlying_value_access() {
 	// Direct storage access and explicit whole-value hooks expose the word-spec storage object
 	// without adding an extra proxy layer or hiding the underlying-value load/store path.
-	// about synchronization policy such as CAS loops.
+	// Callers remain responsible for any higher-level mutation policy such as CAS loops.
 	struct backend_word {
 		std::uint32_t word = 0;
 	};
