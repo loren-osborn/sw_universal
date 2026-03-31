@@ -249,6 +249,10 @@ namespace custom_indexed_variant_detail {
 	struct all_nothrow_move_constructible
 	                              : std::conjunction<std::is_nothrow_move_constructible<Ts>...> {};
 
+	template<typename... Ts>
+	struct all_nothrow_move_assignable
+	                              : std::conjunction<std::is_nothrow_move_assignable<Ts>...> {};
+
 	template<typename T>
 	struct is_in_place_index : std::false_type {};
 
@@ -594,7 +598,9 @@ public:
 	}
 
 	/// @brief Move-assigns from another variant.
-	custom_indexed_variant& operator=(custom_indexed_variant&& other) noexcept(detail::all_nothrow_move_constructible<Types...>::value)
+	custom_indexed_variant& operator=(custom_indexed_variant&& other) noexcept(
+		detail::all_nothrow_move_constructible<Types...>::value &&
+		detail::all_nothrow_move_assignable<Types...>::value)
 		requires detail::all_move_constructible<Types...>::value && detail::all_move_assignable<Types...>::value {
 		if (this == &other) {
 			return *this;
