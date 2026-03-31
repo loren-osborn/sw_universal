@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include <universal/internal/container/sso_vector.hpp>
@@ -95,6 +96,20 @@ struct MoveOnly {
 };
 
 int MoveOnly::live = 0;
+
+struct PotentiallyThrowingMove {
+	int value{0};
+	PotentiallyThrowingMove() = default;
+	explicit PotentiallyThrowingMove(int v) : value(v) {}
+	PotentiallyThrowingMove(const PotentiallyThrowingMove&) = default;
+	PotentiallyThrowingMove(PotentiallyThrowingMove&& other) noexcept(false) : value(other.value) { other.value = 0; }
+	PotentiallyThrowingMove& operator=(const PotentiallyThrowingMove&) = default;
+	PotentiallyThrowingMove& operator=(PotentiallyThrowingMove&& other) noexcept(false) {
+		value = other.value;
+		other.value = 0;
+		return *this;
+	}
+};
 
 // General-purpose exception probe used for vector-style operations.
 // The various counters let tests say which operation threw without inspecting container internals.
@@ -395,16 +410,145 @@ struct AllocState {
 	std::size_t last_alloc_size = 0;
 };
 
-template<typename T>
+struct AllocationRecord {
+	std::size_t count = 0;
+	std::size_t element_size = 0;
+	int allocator_instance_id = -1;
+	bool live = false;
+};
+
+struct AllocationRegistry {
+	std::unordered_map<const void*, AllocationRecord> records;
+	std::vector<std::string> errors;
+
+	void record_allocate(const void* ptr, std::size_t count, std::size_t element_size, int allocator_instance_id) {
+		auto& record = records[ptr];
+		if (record.live) {
+			errors.push_back("allocator registry: pointer allocated twice without intervening free");
+		}
+		record = AllocationRecord{count, element_size, allocator_instance_id, true};
+	}
+
+	void record_deallocate(const void* ptr, int allocator_instance_id) {
+		const auto it = records.find(ptr);
+		if (it == records.end()) {
+			errors.push_back("allocator registry: deallocation of unknown pointer");
+			return;
+		}
+		if (!it->second.live) {
+			errors.push_back("allocator registry: double free detected");
+			return;
+		}
+		if (it->second.allocator_instance_id != allocator_instance_id) {
+			errors.push_back("allocator registry: pointer deallocated by different allocator instance");
+			return;
+		}
+		it->second.live = false;
+	}
+
+	std::size_t live_allocation_count() const {
+		std::size_t count = 0;
+		for (const auto& [_, record] : records) {
+			if (record.live) ++count;
+		}
+		return count;
+	}
+
+	std::size_t live_allocation_count_for(int allocator_instance_id) const {
+		std::size_t count = 0;
+		for (const auto& [_, record] : records) {
+			if (record.live && record.allocator_instance_id == allocator_instance_id) ++count;
+		}
+		return count;
+	}
+
+	bool has_live_allocation(const void* ptr, int allocator_instance_id) const {
+		const auto it = records.find(ptr);
+		return it != records.end() && it->second.live && it->second.allocator_instance_id == allocator_instance_id;
+	}
+};
+
+void check_registry_clean(const TestContext& ctx, const AllocationRegistry& registry, const char* label) {
+	for (const auto& error : registry.errors) {
+		check(ctx, false, error.c_str());
+	}
+	check(ctx, registry.live_allocation_count() == 0, label);
+}
+
+template<typename T,
+         bool PropagateMoveAssignment = false,
+         bool PropagateSwap = false,
+         bool AlwaysEqual = false>
+struct ProvenanceAllocator {
+	using value_type = T;
+	using propagate_on_container_copy_assignment = std::false_type;
+	using propagate_on_container_move_assignment = std::bool_constant<PropagateMoveAssignment>;
+	using propagate_on_container_swap = std::bool_constant<PropagateSwap>;
+	using is_always_equal = std::bool_constant<AlwaysEqual>;
+	template<typename U>
+	struct rebind {
+		using other = ProvenanceAllocator<U, PropagateMoveAssignment, PropagateSwap, AlwaysEqual>;
+	};
+
+	AllocationRegistry* registry = nullptr;
+	int instance_id = -1;
+
+	ProvenanceAllocator() noexcept = default;
+	ProvenanceAllocator(AllocationRegistry* r, int id) noexcept : registry(r), instance_id(id) {}
+
+	template<typename U>
+	ProvenanceAllocator(const ProvenanceAllocator<U, PropagateMoveAssignment, PropagateSwap, AlwaysEqual>& other) noexcept
+		: registry(other.registry), instance_id(other.instance_id) {}
+
+	T* allocate(std::size_t n) {
+		T* ptr = std::allocator<T>{}.allocate(n);
+		if (registry) registry->record_allocate(ptr, n, sizeof(T), instance_id);
+		return ptr;
+	}
+
+	void deallocate(T* p, std::size_t n) noexcept {
+		if (registry) registry->record_deallocate(p, instance_id);
+		std::allocator<T>{}.deallocate(p, n);
+	}
+
+	template<typename U>
+	bool operator==(const ProvenanceAllocator<U, PropagateMoveAssignment, PropagateSwap, AlwaysEqual>& other) const noexcept {
+		if constexpr (AlwaysEqual) {
+			return true;
+		} else {
+			return registry == other.registry && instance_id == other.instance_id;
+		}
+	}
+
+	template<typename U>
+	bool operator!=(const ProvenanceAllocator<U, PropagateMoveAssignment, PropagateSwap, AlwaysEqual>& other) const noexcept {
+		return !(*this == other);
+	}
+};
+
+template<typename T,
+         bool PropagateMoveAssignment = false,
+         bool PropagateSwap = false,
+         bool AlwaysEqual = false>
 struct CountingAllocator {
 	using value_type = T;
+	using propagate_on_container_copy_assignment = std::false_type;
+	using propagate_on_container_move_assignment = std::bool_constant<PropagateMoveAssignment>;
+	using propagate_on_container_swap = std::bool_constant<PropagateSwap>;
+	using is_always_equal = std::bool_constant<AlwaysEqual>;
+	template<typename U>
+	struct rebind {
+		using other = CountingAllocator<U, PropagateMoveAssignment, PropagateSwap, AlwaysEqual>;
+	};
+
 	AllocState* state = nullptr;
 
 	CountingAllocator() noexcept = default;
 	explicit CountingAllocator(AllocState* s) noexcept : state(s) {}
 
 	template<typename U>
-	CountingAllocator(const CountingAllocator<U>& other) noexcept : state(other.state) {}
+	CountingAllocator(const CountingAllocator<U, PropagateMoveAssignment, PropagateSwap, AlwaysEqual>& other) noexcept
+		: state(other.state) {}
 
 	T* allocate(std::size_t n) {
 		if (state) {
@@ -426,13 +570,17 @@ struct CountingAllocator {
 	}
 
 	template<typename U>
-	bool operator==(const CountingAllocator<U>& other) const noexcept {
-		return state == other.state;
+	bool operator==(const CountingAllocator<U, PropagateMoveAssignment, PropagateSwap, AlwaysEqual>& other) const noexcept {
+		if constexpr (AlwaysEqual) {
+			return true;
+		} else {
+			return state == other.state;
+		}
 	}
 
 	template<typename U>
-	bool operator!=(const CountingAllocator<U>& other) const noexcept {
-		return state != other.state;
+	bool operator!=(const CountingAllocator<U, PropagateMoveAssignment, PropagateSwap, AlwaysEqual>& other) const noexcept {
+		return !(*this == other);
 	}
 };
 
@@ -603,6 +751,14 @@ void assert_no_new_constructions_during_lifetime_tracked_interval(
 
 template<class T, class Alloc>
 using sso_vector_small = sw::universal::internal::sso_vector<T, 4, Alloc>;
+
+using ThrowingMoveVec = sso_vector_small<PotentiallyThrowingMove, std::allocator<PotentiallyThrowingMove>>;
+static_assert(!std::is_nothrow_move_constructible_v<ThrowingMoveVec>,
+	"sso_vector move construction must not overstate noexcept when element transfer may throw");
+static_assert(!std::is_nothrow_move_assignable_v<ThrowingMoveVec>,
+	"sso_vector move assignment must not overstate noexcept when element transfer may throw");
+static_assert(!noexcept(std::declval<ThrowingMoveVec&>().swap(std::declval<ThrowingMoveVec&>())),
+	"sso_vector swap must not overstate noexcept when element relocation may throw");
 
 // Convert any vector-like object into plain std::vector contents for parity comparison.
 template<typename Vec>
@@ -2087,6 +2243,256 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 	}
 }
 
+void run_sso_vector_allocator_and_iterator_suite(int& failures) {
+	TestContext ctx{"sso_vector_allocator_iterator", failures};
+
+	{
+		// Unequal non-propagating allocators must not transfer heap ownership directly. The destination
+		// rebuilds with its own allocator, the source releases its old block through its allocator, and the
+		// final survivor later deallocates through the destination allocator.
+		using Alloc = CountingAllocator<int, false, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocState left_state{};
+		AllocState right_state{};
+		{
+			Vec left{Alloc(&left_state)};
+			Vec right{Alloc(&right_state)};
+			for (int value : {1, 2, 3, 4, 5}) left.push_back(value);
+			for (int value : {10, 11, 12, 13, 14}) right.push_back(value);
+			const int left_allocs_before = left_state.alloc_calls;
+			const int left_deallocs_before = left_state.dealloc_calls;
+			const int right_allocs_before = right_state.alloc_calls;
+			const int right_deallocs_before = right_state.dealloc_calls;
+			left = std::move(right);
+			check(ctx, materialize(left) == std::vector<int>({10, 11, 12, 13, 14}), "unequal allocator move assignment preserves payload");
+			check(ctx, right.empty(), "unequal allocator move assignment leaves source empty");
+			check(ctx, left.get_allocator().state == &left_state, "unequal allocator move assignment preserves destination allocator");
+			check(ctx, left_state.alloc_calls == left_allocs_before + 1, "unequal allocator move assignment allocates replacement storage with destination allocator");
+			check(ctx, left_state.dealloc_calls == left_deallocs_before + 1, "unequal allocator move assignment releases old destination storage through destination allocator");
+			check(ctx, right_state.alloc_calls == right_allocs_before, "unequal allocator move assignment does not allocate with source allocator");
+			check(ctx, right_state.dealloc_calls == right_deallocs_before + 1, "unequal allocator move assignment releases source storage through source allocator");
+		}
+		check(ctx, left_state.dealloc_calls == left_state.alloc_calls, "unequal allocator move assignment balances destination allocations");
+		check(ctx, right_state.dealloc_calls == right_state.alloc_calls, "unequal allocator move assignment balances source allocations");
+	}
+
+	{
+		// Equal allocators may still transfer heap ownership directly; that path should not allocate a
+		// replacement block just to satisfy move assignment.
+		using Alloc = CountingAllocator<int, false, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocState shared_state{};
+		{
+			Vec left{Alloc(&shared_state)};
+			Vec right{Alloc(&shared_state)};
+			for (int value : {1, 2, 3, 4, 5}) left.push_back(value);
+			for (int value : {20, 21, 22, 23, 24}) right.push_back(value);
+			const int allocs_before = shared_state.alloc_calls;
+			left = std::move(right);
+			check(ctx, materialize(left) == std::vector<int>({20, 21, 22, 23, 24}), "equal allocator move assignment preserves payload");
+			check(ctx, right.empty(), "equal allocator move assignment leaves source empty");
+			check(ctx, shared_state.alloc_calls == allocs_before, "equal allocator move assignment does not allocate replacement storage");
+		}
+		check(ctx, shared_state.dealloc_calls == shared_state.alloc_calls, "equal allocator move assignment balances allocations");
+	}
+
+	{
+		// Propagating move assignment may adopt the source allocator, which makes direct heap ownership
+		// transfer correct even when allocator instances started out unequal.
+		using Alloc = CountingAllocator<int, true, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocState left_state{};
+		AllocState right_state{};
+		{
+			Vec left{Alloc(&left_state)};
+			Vec right{Alloc(&right_state)};
+			for (int value : {30, 31, 32, 33, 34}) left.push_back(value);
+			for (int value : {40, 41, 42, 43, 44}) right.push_back(value);
+			const int left_allocs_before = left_state.alloc_calls;
+			const int right_allocs_before = right_state.alloc_calls;
+			left = std::move(right);
+			check(ctx, materialize(left) == std::vector<int>({40, 41, 42, 43, 44}), "propagating move assignment preserves payload");
+			check(ctx, left.get_allocator().state == &right_state, "propagating move assignment adopts source allocator");
+			check(ctx, left_state.alloc_calls == left_allocs_before, "propagating move assignment does not allocate replacement storage with old destination allocator");
+			check(ctx, right_state.alloc_calls == right_allocs_before, "propagating move assignment reuses source allocation");
+		}
+		check(ctx, left_state.dealloc_calls == left_state.alloc_calls, "propagating move assignment balances old destination allocations");
+		check(ctx, right_state.dealloc_calls == right_state.alloc_calls, "propagating move assignment balances adopted-source allocations");
+	}
+
+	{
+		// Swap between unequal non-propagating allocators must not exchange heap blocks directly. Each side
+		// keeps allocator ownership consistent while the observable payloads trade places.
+		using Alloc = CountingAllocator<int, false, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocState left_state{};
+		AllocState right_state{};
+		{
+			Vec left{Alloc(&left_state)};
+			Vec right{Alloc(&right_state)};
+			for (int value : {1, 2, 3, 4, 5}) left.push_back(value);
+			for (int value : {7, 8, 9, 10, 11}) right.push_back(value);
+			left.swap(right);
+			check(ctx, materialize(left) == std::vector<int>({7, 8, 9, 10, 11}), "unequal allocator heap swap preserves right payload");
+			check(ctx, materialize(right) == std::vector<int>({1, 2, 3, 4, 5}), "unequal allocator heap swap preserves left payload");
+			check(ctx, left.get_allocator().state == &left_state, "unequal allocator heap swap keeps left allocator");
+			check(ctx, right.get_allocator().state == &right_state, "unequal allocator heap swap keeps right allocator");
+		}
+		check(ctx, left_state.dealloc_calls == left_state.alloc_calls, "unequal allocator heap swap balances left allocations");
+		check(ctx, right_state.dealloc_calls == right_state.alloc_calls, "unequal allocator heap swap balances right allocations");
+	}
+
+	{
+		// Inline-only swap stays a pure payload exchange and should not consult allocator bookkeeping.
+		using Alloc = CountingAllocator<int, false, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 4, Alloc>;
+		AllocState left_state{};
+		AllocState right_state{};
+		Vec left{Alloc(&left_state)};
+		Vec right{Alloc(&right_state)};
+		left.push_back(1);
+		left.push_back(2);
+		right.push_back(9);
+		right.push_back(8);
+		left.swap(right);
+		check(ctx, materialize(left) == std::vector<int>({9, 8}), "unequal allocator inline swap preserves right payload");
+		check(ctx, materialize(right) == std::vector<int>({1, 2}), "unequal allocator inline swap preserves left payload");
+		check(ctx, left_state.alloc_calls == 0 && right_state.alloc_calls == 0, "unequal allocator inline swap performs no allocations");
+	}
+
+	{
+		using Vec = sso_vector_small<int, std::allocator<int>>;
+		Vec v;
+		for (int value : {10, 20, 30, 40}) v.push_back(value);
+		auto it = v.begin() + 2;
+		check(ctx, static_cast<int>(it[-1]) == 20, "iterator operator[] handles negative offsets");
+		it += -1;
+		check(ctx, static_cast<int>(*it) == 20, "iterator += handles negative offsets");
+		it -= -1;
+		check(ctx, static_cast<int>(*it) == 30, "iterator -= handles negative offsets");
+		auto rit = v.rbegin();
+		check(ctx, static_cast<int>(*rit) == 40, "reverse iteration starts at last element");
+		++rit;
+		check(ctx, static_cast<int>(*rit) == 30, "reverse iteration advances correctly");
+	}
+}
+
+void run_sso_vector_allocator_provenance_suite(int& failures) {
+	TestContext ctx{"sso_vector_allocator_provenance", failures};
+
+	{
+		using Alloc = ProvenanceAllocator<int, false, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocationRegistry registry;
+		{
+			Vec left{Alloc(&registry, 1)};
+			Vec right{Alloc(&registry, 2)};
+			for (int value : {1, 2, 3, 4, 5}) left.push_back(value);
+			for (int value : {10, 11, 12, 13, 14}) right.push_back(value);
+			const Vec& cright = right;
+			const int* right_before = cright.data();
+			left = std::move(right);
+			const Vec& cleft = left;
+			check(ctx, materialize(left) == std::vector<int>({10, 11, 12, 13, 14}), "provenance move assignment preserves payload");
+			check(ctx, right.empty(), "provenance move assignment leaves source valid and empty");
+			check(ctx, cleft.data() != right_before, "unequal allocator move assignment rebuilds instead of stealing source storage");
+			check(ctx, registry.live_allocation_count_for(1) == 1, "rebuilt destination storage is owned by destination allocator instance");
+			check(ctx, registry.live_allocation_count_for(2) == 0, "source allocator retains no live storage after unequal move assignment");
+		}
+		check_registry_clean(ctx, registry, "unequal allocator move assignment leaves no live allocations");
+	}
+
+	{
+		using Alloc = ProvenanceAllocator<int, false, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocationRegistry registry;
+		{
+			Vec left{Alloc(&registry, 1)};
+			Vec right{Alloc(&registry, 2)};
+			for (int value : {1, 2, 3, 4, 5}) left.push_back(value);
+			for (int value : {7, 8, 9, 10, 11}) right.push_back(value);
+			const Vec& cleft = left;
+			const Vec& cright = right;
+			const int* left_before = cleft.data();
+			const int* right_before = cright.data();
+			left.swap(right);
+			check(ctx, materialize(left) == std::vector<int>({7, 8, 9, 10, 11}), "provenance swap preserves right payload");
+			check(ctx, materialize(right) == std::vector<int>({1, 2, 3, 4, 5}), "provenance swap preserves left payload");
+			check(ctx, static_cast<const Vec&>(left).data() != right_before, "unequal allocator swap does not leave left owning right's storage");
+			check(ctx, static_cast<const Vec&>(right).data() != left_before, "unequal allocator swap does not leave right owning left's storage");
+			check(ctx, registry.live_allocation_count_for(1) == 1, "left allocator still owns exactly one live heap allocation after swap");
+			check(ctx, registry.live_allocation_count_for(2) == 1, "right allocator still owns exactly one live heap allocation after swap");
+		}
+		check_registry_clean(ctx, registry, "unequal allocator swap leaves no live allocations");
+	}
+
+	{
+		using Alloc = ProvenanceAllocator<int, false, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocationRegistry registry;
+		{
+			Vec left{Alloc(&registry, 7)};
+			Vec right{Alloc(&registry, 7)};
+			for (int value : {1, 2, 3, 4, 5}) left.push_back(value);
+			for (int value : {20, 21, 22, 23, 24}) right.push_back(value);
+			const Vec& cright = right;
+			const int* right_before = cright.data();
+			left = std::move(right);
+			check(ctx, materialize(left) == std::vector<int>({20, 21, 22, 23, 24}), "equal allocator move assignment preserves payload");
+			check(ctx, static_cast<const Vec&>(left).data() == right_before, "equal allocator move assignment adopts source storage directly");
+			check(ctx, registry.live_allocation_count_for(7) == 1, "equal allocator move assignment leaves one live allocation for the shared allocator instance");
+		}
+		check_registry_clean(ctx, registry, "equal allocator move assignment leaves no live allocations");
+	}
+
+	{
+		using Alloc = ProvenanceAllocator<int, true, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocationRegistry registry;
+		{
+			Vec left{Alloc(&registry, 1)};
+			Vec right{Alloc(&registry, 2)};
+			for (int value : {30, 31, 32, 33, 34}) left.push_back(value);
+			for (int value : {40, 41, 42, 43, 44}) right.push_back(value);
+			const Vec& cright = right;
+			const int* right_before = cright.data();
+			left = std::move(right);
+			check(ctx, materialize(left) == std::vector<int>({40, 41, 42, 43, 44}), "propagating provenance move assignment preserves payload");
+			check(ctx, left.get_allocator().instance_id == 2, "propagating move assignment adopts source allocator instance");
+			check(ctx, static_cast<const Vec&>(left).data() == right_before, "propagating move assignment adopts source storage directly");
+			check(ctx, registry.live_allocation_count_for(1) == 0, "old destination allocator has no remaining live storage");
+			check(ctx, registry.live_allocation_count_for(2) == 1, "adopted allocator instance owns the surviving storage");
+		}
+		check_registry_clean(ctx, registry, "propagating move assignment leaves no live allocations");
+	}
+
+	{
+		// A shared source cannot be destructively moved from. The destination must rebuild with its own
+		// allocator while the surviving sibling keeps the original shared allocation and later frees it
+		// through the source allocator instance.
+		using Alloc = ProvenanceAllocator<int, false, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocationRegistry registry;
+		{
+			Vec left{Alloc(&registry, 1)};
+			Vec source{Alloc(&registry, 2)};
+			for (int value : {50, 51, 52, 53, 54}) left.push_back(value);
+			for (int value : {60, 61, 62, 63, 64}) source.push_back(value);
+			Vec sibling = source;
+			const Vec& csibling = sibling;
+			const int* shared_before = csibling.data();
+			left = std::move(source);
+			check(ctx, materialize(left) == std::vector<int>({60, 61, 62, 63, 64}), "shared-source fallback preserves payload");
+			check(ctx, materialize(sibling) == std::vector<int>({60, 61, 62, 63, 64}), "shared-source fallback preserves sibling payload");
+			check(ctx, static_cast<const Vec&>(left).data() != shared_before, "shared-source fallback deep-copies instead of adopting shared storage");
+			check(ctx, csibling.data() == shared_before, "shared-source fallback leaves sibling on the original shared allocation");
+			check(ctx, registry.live_allocation_count_for(1) == 1, "shared-source fallback creates one destination-owned allocation");
+			check(ctx, registry.live_allocation_count_for(2) == 1, "shared-source fallback leaves the original shared allocation with the source allocator instance");
+		}
+		check_registry_clean(ctx, registry, "shared-source fallback leaves no live allocations");
+	}
+}
+
 void run_sso_vector_ownership_header_suite(int& failures) {
 	TestContext ctx{"sso_vector_ownership_header", failures};
 	namespace detail = sw::universal::internal::sso_vector_detail;
@@ -2150,6 +2556,8 @@ int main() {
 	run_vector_lifetime_suite<std::vector>("std::vector_lifetime", nrOfFailedTestCases);
 	run_vector_lifetime_suite<sso_vector_small>("sso_vector_lifetime", nrOfFailedTestCases);
 	run_sso_vector_specific_lifetime_suite(nrOfFailedTestCases);
+	run_sso_vector_allocator_and_iterator_suite(nrOfFailedTestCases);
+	run_sso_vector_allocator_provenance_suite(nrOfFailedTestCases);
 
 	sw::universal::ReportTestResult(nrOfFailedTestCases, "sso_vector", "unit test");
 	return (nrOfFailedTestCases > 0 ? EXIT_FAILURE : EXIT_SUCCESS);

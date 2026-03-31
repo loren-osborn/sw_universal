@@ -654,6 +654,19 @@ struct NonNoexceptEncodedIndex {
 	void set_index(std::size_t) {}
 };
 
+struct NothrowMoveCtorThrowingMoveAssign {
+	int value = 0;
+	NothrowMoveCtorThrowingMoveAssign() = default;
+	explicit NothrowMoveCtorThrowingMoveAssign(int v) noexcept : value(v) {}
+	NothrowMoveCtorThrowingMoveAssign(const NothrowMoveCtorThrowingMoveAssign&) = default;
+	NothrowMoveCtorThrowingMoveAssign(NothrowMoveCtorThrowingMoveAssign&&) noexcept = default;
+	NothrowMoveCtorThrowingMoveAssign& operator=(const NothrowMoveCtorThrowingMoveAssign&) = default;
+	NothrowMoveCtorThrowingMoveAssign& operator=(NothrowMoveCtorThrowingMoveAssign&& other) noexcept(false) {
+		value = other.value;
+		return *this;
+	}
+};
+
 static_assert(sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
 	sw::universal::internal::simple_encoded_index<4>>);
 static_assert(sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
@@ -678,6 +691,9 @@ static_assert(custom_visit_const_rvalue_accepts_only_const_rvalue_visitor<Custom
 static_assert(custom_visit_const_rvalue_accepts_only_const_rvalue_visitor<SidebandVariant<int, std::string>>());
 static_assert(custom_visit_const_rvalue_rejects_wrong_overloads<CustomVariant<int, std::string>>());
 static_assert(custom_visit_const_rvalue_rejects_wrong_overloads<SidebandVariant<int, std::string>>());
+static_assert(!noexcept(std::declval<CustomVariant<NothrowMoveCtorThrowingMoveAssign>&>() =
+                        std::declval<CustomVariant<NothrowMoveCtorThrowingMoveAssign>&&>()),
+	"custom_indexed_variant move assignment must account for same-alternative move assignment");
 
 #ifdef UNIVERSAL_COMPILE_FAIL_TESTS
 struct ThrowingDestructorType {

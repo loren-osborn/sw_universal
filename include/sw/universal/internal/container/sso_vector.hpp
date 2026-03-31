@@ -528,7 +528,76 @@ private:
 		set_size_impl(0);
 	}
 
+	/// @brief Returns true when this container may directly take ownership of another heap allocation.
+	/// @details Direct heap-block transfer is only allocator-correct when allocators propagate, compare
+	///          equal, or are always interchangeable by trait.
+	bool can_adopt_heap_storage_from_impl(const sso_vector& other) const noexcept {
+		if constexpr (std::allocator_traits<Allocator>::is_always_equal::value) {
+			return true;
+		} else {
+			return alloc_ == other.alloc_;
+		}
+	}
+
+	/// @brief Rebuilds the observable state from another vector using this container's allocator.
+	/// @details This is the allocator-safe fallback when direct heap ownership transfer is not allowed.
+	///          Shared heap sources are copied so sibling sharers are unaffected; unique sources are
+	///          moved element-wise and then released through their original allocator.
+	void move_rebuild_from_impl(sso_vector&& other) {
+		const size_type n = other.size_impl();
+		if (n == 0) {
+			state_.template emplace<0>();
+			set_size_impl(0);
+			other.reset_to_inline_empty_impl();
+			return;
+		}
+
+		const bool can_move_from_source =
+			other.is_inline_impl() ||
+			(other.is_heap_impl() && other.heap_storage_impl().block &&
+			 sso_vector_detail::ownership_header_is_unique(other.heap_storage_impl().block));
+
+		if (n <= N) {
+			state_.template emplace<0>();
+			T* dst = inline_storage_impl().data();
+			try {
+				if (can_move_from_source) {
+					move_construct_range_impl(dst, other.data_mut_no_cow_impl(), n);
+				} else {
+					copy_construct_range_impl(dst, other.data_const_impl(), n);
+				}
+			} catch (...) {
+				set_size_impl(0);
+				throw;
+			}
+			set_size_impl(n);
+			other.reset_to_inline_empty_impl();
+			return;
+		}
+
+		const size_type new_cap = other.is_heap_impl() ? other.capacity_impl() : growth_capacity(n, N);
+		auto* new_block = sso_vector_detail::allocate_block<T>(new_cap, alloc_);
+		T* dst = sso_vector_detail::block_data(new_block);
+		try {
+			if (can_move_from_source) {
+				move_construct_range_impl(dst, other.data_mut_no_cow_impl(), n);
+			} else {
+				copy_construct_range_impl(dst, other.data_const_impl(), n);
+			}
+		} catch (...) {
+			sso_vector_detail::deallocate_block(new_block, alloc_);
+			throw;
+		}
+
+		state_.template emplace<1>();
+		heap_storage_impl().block = new_block;
+		set_size_impl(n);
+		other.reset_to_inline_empty_impl();
+	}
+
 	/// @brief Moves the observable state out of another vector without byte-moving live inline elements.
+	/// @warning Heap-block stealing is only allocator-correct when the caller has already established
+	///          that direct ownership transfer is allowed.
 	void move_from_impl(sso_vector&& other) {
 		const size_type n = other.size_impl();
 		if (other.is_inline_impl()) {
@@ -980,7 +1049,7 @@ public:
 
 		reference operator*() const noexcept { return reference(owner_, index_); }
 		reference operator[](difference_type n) const noexcept {
-			return reference(owner_, index_ + static_cast<size_type>(n));
+			return reference(owner_, add_offset_impl(index_, n));
 		}
 
 		iterator_proxy& operator++() noexcept { ++index_; return *this; }
@@ -988,8 +1057,8 @@ public:
 		iterator_proxy& operator--() noexcept { --index_; return *this; }
 		iterator_proxy operator--(int) noexcept { auto tmp = *this; --(*this); return tmp; }
 
-		iterator_proxy& operator+=(difference_type n) noexcept { index_ += static_cast<size_type>(n); return *this; }
-		iterator_proxy& operator-=(difference_type n) noexcept { index_ -= static_cast<size_type>(n); return *this; }
+		iterator_proxy& operator+=(difference_type n) noexcept { index_ = add_offset_impl(index_, n); return *this; }
+		iterator_proxy& operator-=(difference_type n) noexcept { index_ = subtract_offset_impl(index_, n); return *this; }
 
 		friend iterator_proxy operator+(iterator_proxy it, difference_type n) noexcept { it += n; return it; }
 		friend iterator_proxy operator+(difference_type n, iterator_proxy it) noexcept { it += n; return it; }
@@ -1008,6 +1077,18 @@ public:
 		friend bool operator>=(const iterator_proxy& a, const iterator_proxy& b) noexcept { return !(a < b); }
 
 	private:
+		static size_type add_offset_impl(size_type index, difference_type delta) noexcept {
+			const difference_type next = static_cast<difference_type>(index) + delta;
+			assert(next >= 0 && "sso_vector iterator advanced before begin()");
+			return static_cast<size_type>(next);
+		}
+
+		static size_type subtract_offset_impl(size_type index, difference_type delta) noexcept {
+			const difference_type next = static_cast<difference_type>(index) - delta;
+			assert(next >= 0 && "sso_vector iterator decremented before begin()");
+			return static_cast<size_type>(next);
+		}
+
 		sso_vector* owner_ = nullptr;
 		size_type index_ = 0;
 	};
@@ -1026,11 +1107,12 @@ public:
 	// ------------------------ ctors/dtor ------------------------
 
 	/// @brief Constructs an empty vector using a default-constructed allocator.
-	sso_vector() noexcept(noexcept(Allocator()))
+	sso_vector() noexcept(std::is_nothrow_default_constructible_v<Allocator> &&
+	                      std::is_nothrow_copy_constructible_v<Allocator>)
 		: sso_vector(Allocator()) {}
 
 	/// @brief Constructs an empty vector with the supplied allocator.
-	explicit sso_vector(const Allocator& alloc) noexcept
+	explicit sso_vector(const Allocator& alloc) noexcept(std::is_nothrow_copy_constructible_v<Allocator>)
 		: alloc_(alloc), state_(std::in_place_index<0>) {
 		set_size_impl(0);
 	}
@@ -1066,8 +1148,8 @@ public:
 		copy_from_impl(other);
 	}
 
-	/// @brief Move constructor implemented in terms of `swap`.
-	sso_vector(sso_vector&& other) noexcept
+	/// @brief Move constructor.
+	sso_vector(sso_vector&& other)
 		: alloc_(std::move(other.alloc_)), state_(std::in_place_index<0>) {
 		set_size_impl(0);
 		move_from_impl(std::move(other));
@@ -1101,14 +1183,26 @@ public:
 	}
 
 	/// @brief Move assignment with allocator propagation behavior matching allocator traits.
-	sso_vector& operator=(sso_vector&& other) noexcept(std::allocator_traits<Allocator>::is_always_equal::value) {
+	sso_vector& operator=(sso_vector&& other) {
 		if (this == &other) return *this;
 
-		reset_storage_impl();
 		if constexpr (std::allocator_traits<Allocator>::propagate_on_container_move_assignment::value) {
+			reset_storage_impl();
 			alloc_ = std::move(other.alloc_);
+			move_from_impl(std::move(other));
+			return *this;
 		}
-		move_from_impl(std::move(other));
+
+		if (can_adopt_heap_storage_from_impl(other)) {
+			reset_storage_impl();
+			move_from_impl(std::move(other));
+			return *this;
+		}
+
+		sso_vector temp(alloc_);
+		temp.move_rebuild_from_impl(std::move(other));
+		reset_storage_impl();
+		move_from_impl(std::move(temp));
 		return *this;
 	}
 
@@ -1298,10 +1392,19 @@ public:
 		             iterator(this, static_cast<size_type>(last - cbegin())));
 	}
 
-	void swap(sso_vector& other) noexcept(std::allocator_traits<Allocator>::is_always_equal::value) {
+	void swap(sso_vector& other) {
 		if (this == &other) return;
 		if constexpr (std::allocator_traits<Allocator>::propagate_on_container_swap::value) {
 			std::swap(alloc_, other.alloc_);
+		} else if (!can_adopt_heap_storage_from_impl(other) && (is_heap_impl() || other.is_heap_impl())) {
+			// When allocators do not propagate and heap ownership cannot be exchanged directly, simulate
+			// swap through allocator-aware move assignment so each container keeps allocations compatible
+			// with its own allocator.
+			sso_vector temp(alloc_);
+			temp.move_rebuild_from_impl(std::move(*this));
+			*this = std::move(other);
+			other = std::move(temp);
+			return;
 		}
 		if (is_heap_impl() && other.is_heap_impl()) {
 			std::swap(heap_storage_impl().block, other.heap_storage_impl().block);
