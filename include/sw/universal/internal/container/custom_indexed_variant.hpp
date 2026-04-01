@@ -23,12 +23,9 @@
 #include <cassert>
 #include <cstddef>
 #include <concepts>
-#include <cstdint>
-#include <exception>
 #include <functional>
 #include <initializer_list>
 #include <limits>
-#include <memory>
 #include <new>
 #include <optional>
 #include <tuple>
@@ -271,24 +268,106 @@ namespace custom_indexed_variant_detail {
 	template<typename T>
 	inline constexpr bool is_in_place_type_v = is_in_place_type<T>::value;
 
-	/// @brief Detects whether an encoded-index type exposes sideband access.
-	template<typename T, typename = void>
-	struct has_sideband : std::false_type {};
+	/// @brief State type exposed by a const sideband accessor's whole-state reader.
+	template<typename Accessor>
+	using sideband_accessor_state_t = std::remove_cvref_t<decltype(std::declval<const Accessor&>().get())>;
+
+	template<typename Getter, typename Base>
+	concept allowed_sideband_getter_type =
+		std::same_as<Getter, Base> || std::same_as<Getter, const Base&>;
+
+	template<typename Setter, typename Base>
+	concept allowed_sideband_setter_type =
+		std::same_as<Setter, Base> || std::same_as<Setter, const Base&>;
+
+	template<typename MemberFn>
+	struct sideband_setter_argument;
+
+	template<typename C, typename Arg>
+	struct sideband_setter_argument<void (C::*)(Arg)> {
+		using type = Arg;
+	};
+
+	template<typename C, typename Arg>
+	struct sideband_setter_argument<void (C::*)(Arg) noexcept> {
+		using type = Arg;
+	};
+
+	template<typename Accessor>
+	using sideband_setter_argument_t = typename sideband_setter_argument<decltype(&Accessor::set)>::type;
+
+	template<typename Accessor>
+	concept has_sideband_setter_signature =
+		requires {
+			typename sideband_setter_argument_t<Accessor>;
+		};
+
+	/// @brief Sideband accessor facade used by sideband-carrying encoded-index policies.
+	/// @details Accessors expose whole sideband state; they are not required to model a single scalar field.
+	///          Internal callers rely only on whole-state `get()` / `set(...)`, so policies remain free
+	///          to expose one field or many fields without changing the variant core.
+	template<typename Accessor>
+	concept sideband_accessor =
+		std::copy_constructible<Accessor> &&
+		has_sideband_setter_signature<Accessor> &&
+		allowed_sideband_getter_type<decltype(std::declval<const Accessor&>().get()), sideband_accessor_state_t<Accessor>> &&
+		allowed_sideband_setter_type<sideband_setter_argument_t<Accessor>, sideband_accessor_state_t<Accessor>> &&
+		requires(const Accessor accessor, Accessor mutable_accessor) {
+			typename sideband_accessor_state_t<Accessor>;
+			typename sideband_setter_argument_t<Accessor>;
+			{ accessor.get() } -> std::same_as<decltype(std::declval<const Accessor&>().get())>;
+			{ mutable_accessor.set(std::declval<sideband_setter_argument_t<Accessor>>()) } -> std::same_as<void>;
+		};
+
+	/// @brief Detects whether an encoded-index type exposes a policy-defined sideband accessor facade.
+	template<typename T>
+	concept has_sideband_accessor =
+		requires(T& value, const T& cvalue) {
+			{ value.sideband() } -> sideband_accessor;
+			{ cvalue.sideband() };
+		} &&
+		requires {
+			typename sideband_accessor_state_t<decltype(std::declval<const T&>().sideband())>;
+		} &&
+		requires(const T& cvalue) {
+			requires allowed_sideband_getter_type<
+				decltype(cvalue.sideband().get()),
+				sideband_accessor_state_t<decltype(std::declval<const T&>().sideband())>>;
+		};
 
 	template<typename T>
-	struct has_sideband<T, std::void_t<decltype(std::declval<T&>().sideband())>> : std::true_type {};
+	inline constexpr bool has_sideband_accessor_v = has_sideband_accessor<T>;
 
 	template<typename T>
-	inline constexpr bool has_sideband_v = has_sideband<T>::value;
+	concept has_copy_sideband =
+		requires(T& value, const T& other) {
+			{ value.copy_sideband_from(other) } noexcept -> std::same_as<void>;
+		};
+
+	template<typename T>
+	concept has_swap_sideband =
+		requires(T& value, T& other) {
+			{ value.swap_sideband(other) } noexcept -> std::same_as<void>;
+		};
+
+	template<typename EncodedIndex>
+	concept sideband_encoded_index_api =
+		has_sideband_accessor<EncodedIndex> &&
+		has_copy_sideband<EncodedIndex> &&
+		has_swap_sideband<EncodedIndex>;
 
 	/// @brief Concept for encoded-index storage with the noexcept API required by the variant core.
+	/// @details Policies may expose sideband or expose an empty sideband surface. When sideband is present,
+	///          they must also provide whole-sideband copy/swap hooks. Policies without sideband do not
+	///          need to define those hooks.
 	template<typename EncodedIndex>
 	concept encoded_index_noexcept_api =
 		std::default_initializable<EncodedIndex> &&
 		requires(EncodedIndex idx, const EncodedIndex cidx, std::size_t i) {
 			{ cidx.index() } noexcept -> std::convertible_to<std::size_t>;
 			{ idx.set_index(i) } noexcept -> std::same_as<void>;
-		};
+		} &&
+		(!has_sideband_accessor<EncodedIndex> || sideband_encoded_index_api<EncodedIndex>);
 
 	template<template<std::size_t NTypes> class EncodedIndex, std::size_t NTypes>
 	concept encoded_index_template_noexcept_api =
@@ -319,23 +398,23 @@ struct for_index_type {
 
 		/// @brief Encoded representation for std::variant_npos.
 		static constexpr IndexT npos_code = ~IndexT(0);
-		static_assert(npos_code >= NTypes); // Ensures npos_code is distinct from all other valid indicies
+		static_assert(npos_code >= NTypes); // Ensures npos_code is distinct from all other valid indices
 
 		/// @brief Constructs an index in the valueless state (std::variant_npos).
 		simple_encoded_index() noexcept = default;
 
 		/// @brief Returns the currently stored active index.
 		std::size_t index() const noexcept {
-			assert((index_ == npos_code) || (index_ < NTypes) || !"index_ is a valid value.");
+			assert((index_ == npos_code) || (index_ < NTypes) || !"index_ should encode npos or a valid alternative index");
 			return (index_ == npos_code) ? std::variant_npos : static_cast<std::size_t>(index_);
 		}
 
 		/// @brief Sets the active index or std::variant_npos.
 		/// @param val New index value in [0, NTypes) or std::variant_npos.
 		void set_index(std::size_t val) noexcept {
-			assert((val == std::variant_npos) || (val < NTypes) || !"val is a valid value.");
+			assert((val == std::variant_npos) || (val < NTypes) || !"val should encode npos or a valid alternative index");
 			index_ = (val == std::variant_npos) ? npos_code : static_cast<IndexT>(val);
-			assert((index() == val) || !"index was set to expected value.");
+			assert((index() == val) || !"index should round-trip after set_index");
 		}
 
 	private:
@@ -349,7 +428,7 @@ struct for_index_type {
 	///          "Custom index" in this design means the variant chooses how the discriminator is
 	///          encoded and may carry sideband payload alongside it.
 	template <std::size_t NTypes>
-	struct index_encoded_with_sideband_data {
+	struct sideband_encoded_index {
 		static_assert(std::unsigned_integral<IndexT>, "IndexT must be an unsigned integral type");
 
 		/// @brief Bit width of IndexT.
@@ -379,36 +458,61 @@ struct for_index_type {
 		static constexpr IndexT npos_code = bits_t::template field_max_bits<INDEX>();
 		static_assert(npos_code >= NTypes, "npos_code must be distinct from valid indices");
 
-		/// @brief Mutable proxy for reading or updating sideband bits without exposing index internals.
-		struct sideband_proxy {
-			sideband_proxy() = delete;
-			explicit sideband_proxy(index_encoded_with_sideband_data* src) noexcept : data_(src) {}
+		/// @brief Mutable accessor/facade over the current policy's exposed sideband state.
+		struct const_sideband_accessor;
 
-			/// @brief Returns the current sideband payload bits.
-			IndexT val() const noexcept { return data_->sideband_val(); }
-			/// @brief Stores a sideband payload value, preserving the encoded index bits.
-			void set_val(IndexT v) noexcept { data_->set_sideband_val(v); }
+		/// @brief Mutable accessor/facade over the policy-defined exposed sideband state.
+		struct sideband_accessor {
+			using exposed_state_type = IndexT;
+
+			sideband_accessor() = delete;
+			explicit sideband_accessor(sideband_encoded_index* src) noexcept : data_(src) {}
+
+			/// @brief Returns the complete exposed sideband state for this policy.
+			exposed_state_type get() const noexcept { return data_->sideband_val(); }
+			/// @brief Stores the complete exposed sideband state while preserving encoded index bits.
+			void set(exposed_state_type state) noexcept { data_->set_sideband_val(state); }
 			/// @brief Validates that a sideband value fits before masking.
-			void validate_val(IndexT v) noexcept { data_->validate_sideband_val(v); }
+			void validate(exposed_state_type state) noexcept { data_->validate_sideband_val(state); }
+
+			/// @brief Policy-specific scalar convenience for the current one-field sideband encoding.
+			exposed_state_type val() const noexcept { return get(); }
+			void set_val(exposed_state_type state) noexcept { set(state); }
+			void validate_val(exposed_state_type state) noexcept { validate(state); }
+
+			/// @brief Copies exposed sideband state from another accessor; this never rebinds the accessor.
+			sideband_accessor& operator=(const sideband_accessor& other) noexcept {
+				set(other.get());
+				return *this;
+			}
+
+			/// @brief Copies exposed sideband state from a const accessor; this never rebinds the accessor.
+			sideband_accessor& operator=(const const_sideband_accessor& other) noexcept {
+				set(other.get());
+				return *this;
+			}
 
 		private:
-			index_encoded_with_sideband_data* data_;
+			sideband_encoded_index* data_;
 		};
 
-		/// @brief Const proxy for observing sideband bits while preserving constness.
-		struct const_sideband_proxy {
-			const_sideband_proxy() = delete;
-			explicit const_sideband_proxy(const index_encoded_with_sideband_data* src) noexcept : data_(src) {}
-			IndexT val() const noexcept { return data_->sideband_val(); }
+		/// @brief Const accessor/facade for the policy-defined exposed sideband state.
+		struct const_sideband_accessor {
+			using exposed_state_type = IndexT;
+
+			const_sideband_accessor() = delete;
+			explicit const_sideband_accessor(const sideband_encoded_index* src) noexcept : data_(src) {}
+			exposed_state_type get() const noexcept { return data_->sideband_val(); }
+			exposed_state_type val() const noexcept { return get(); }
 		private:
-			const index_encoded_with_sideband_data* data_;
+			const sideband_encoded_index* data_;
 		};
 
-		using sideband_t = sideband_proxy;
-		using const_sideband_t = const_sideband_proxy;
+		using sideband_t = sideband_accessor;
+		using const_sideband_t = const_sideband_accessor;
 
 		/// @brief Constructs encoded state with `std::variant_npos` and zero sideband payload.
-		constexpr index_encoded_with_sideband_data() noexcept {
+		constexpr sideband_encoded_index() noexcept {
 			bits_.set_underlying_value(0);
 			bits_.template set_bits<INDEX>(npos_code);
 		}
@@ -437,9 +541,21 @@ struct for_index_type {
 			BITFIELD_PACK_ASSERT(index() == v);
 		}
 
-		/// @brief Returns an explicit sideband proxy.
+		/// @brief Returns the policy-defined sideband accessor facade.
 		constexpr sideband_t sideband() noexcept { return sideband_t(this); }
 		constexpr const_sideband_t sideband() const noexcept { return const_sideband_t(this); }
+
+		/// @brief Copies the complete exposed sideband state from another encoded-index object.
+		constexpr void copy_sideband_from(const sideband_encoded_index& other) noexcept {
+			set_sideband_val(other.sideband_val());
+		}
+
+		/// @brief Swaps the complete exposed sideband state with another encoded-index object.
+		constexpr void swap_sideband(sideband_encoded_index& other) noexcept {
+			const IndexT this_sideband = sideband_val();
+			set_sideband_val(other.sideband_val());
+			other.set_sideband_val(this_sideband);
+		}
 
 		/// @brief Exposes the complete encoded word for tests and low-level adapters.
 		constexpr IndexT underlying_value() const noexcept { return bits_.underlying_value(); }
@@ -468,22 +584,29 @@ template<std::size_t NTypes>
 using simple_encoded_index = for_index_type<std::size_t>::simple_encoded_index<NTypes>;
 
 template<std::size_t NTypes>
-using index_encoded_with_sideband_data = for_index_type<std::size_t>::index_encoded_with_sideband_data<NTypes>;
+using sideband_encoded_index = for_index_type<std::size_t>::sideband_encoded_index<NTypes>;
 
 /// @brief Variant-like discriminated union with pluggable encoded-index storage.
 /// @tparam EncodedIndex Template that chooses how the active index is encoded.
 /// @tparam Types Alternative types stored in the variant.
 /// @details The active alternative lives in raw aligned storage and is tracked by `encoded_index_t`.
-///          Depending on the encoded-index policy, the index word may also carry sideband bits that
-///          are preserved across ordinary variant operations.
+///          The logical value consists of the discriminator/valueless state, the active alternative
+///          object when engaged, and any sideband state carried by the encoded-index policy.
+///          Copy/move construction, copy/move assignment, and swap propagate that sideband state as
+///          part of the variant value.
 ///          Unlike `std::variant`, this type treats that index representation as a policy choice so
 ///          internal containers can piggyback metadata such as `sso_vector`'s size sideband.
+///          `sideband()` returns a policy-defined accessor/facade over the exposed sideband state.
+///          The variant core does not assume that sideband means one scalar field; policies without a
+///          sideband accessor simply expose an empty sideband surface.
 /// @note This implementation intentionally prefers a unique exact-type match before falling back to
 ///       the implicit non-narrowing overload-resolution winner for converting construction/assignment.
 template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
 	requires detail::encoded_index_template_noexcept_api<EncodedIndex, sizeof...(Types)>
 class custom_indexed_variant {
 	static_assert(sizeof...(Types) > 0, "custom_indexed_variant must have at least one alternative");
+	// Destroy-active paths are used during exception recovery and valueless transitions, so the variant
+	// requires alternative destruction to be non-throwing as a deliberate design constraint.
 	static_assert((std::is_nothrow_destructible_v<Types> && ...),
 		"custom_indexed_variant requires nothrow-destructible alternatives");
 	using storage_traits = detail::storage_traits<Types...>;
@@ -493,7 +616,7 @@ public:
 	/// @brief Encoded index storage policy bound to this variant arity.
 	using encoded_index_t = EncodedIndex<ntypes>;
 	static_assert(detail::encoded_index_noexcept_api<encoded_index_t>,
-		"EncodedIndex<NTypes> must provide noexcept default ctor, noexcept index() -> size_t, and noexcept set_index(size_t).");
+		"EncodedIndex<NTypes> must provide noexcept index state access; sideband exposure and whole-sideband operations are optional.");
 	/// @brief Sentinel value indicating the valueless state.
 	static constexpr std::size_t npos = std::variant_npos;
 
@@ -629,12 +752,12 @@ public:
 
 	/// @brief Exposes encoded-index sideband when the selected policy provides it.
 	/// @details This is intentionally absent for index policies that do not carry sideband bits.
-	template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_v<EI>>>
+	template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_accessor_v<EI>>>
 	auto sideband() noexcept(noexcept(std::declval<EI&>().sideband())) {
 		return sideband_impl();
 	}
 
-	template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_v<EI>>>
+	template<typename EI = encoded_index_t, typename = std::enable_if_t<detail::has_sideband_accessor_v<EI>>>
 	auto sideband() const noexcept(noexcept(std::declval<const EI&>().sideband())) {
 		return sideband_impl();
 	}
@@ -785,7 +908,19 @@ private:
 	/// @brief Returns true when no alternative is currently engaged.
 	bool is_valueless_impl() const noexcept { return current_index_impl() == npos; }
 
-	/// @brief Forwards explicit sideband access to the encoded-index policy.
+	void copy_sideband_from_impl(const encoded_index_t& other_index) noexcept {
+		if constexpr (detail::has_sideband_accessor<encoded_index_t>) {
+			index_obj_.copy_sideband_from(other_index);
+		}
+	}
+
+	void swap_sideband_impl(custom_indexed_variant& other) noexcept {
+		if constexpr (detail::has_sideband_accessor<encoded_index_t>) {
+			index_obj_.swap_sideband(other.index_obj_);
+		}
+	}
+
+	/// @brief Forwards explicit sideband access to the encoded-index policy's accessor facade.
 	template<typename Self>
 	static decltype(auto) sideband_impl(Self&& self) noexcept(noexcept(std::forward<Self>(self).index_obj_.sideband())) {
 		return std::forward<Self>(self).index_obj_.sideband();
@@ -942,7 +1077,7 @@ private:
 		}
 	}
 
-	/// @brief Copy-constructs from another engaged variant, preserving valueless state otherwise.
+	/// @brief Copy-constructs from another variant, importing sideband only after payload construction succeeds.
 	void copy_construct_from_impl(const custom_indexed_variant& other) {
 		if (!other.valueless_by_exception()) {
 			visit_active_impl(other, [&](auto index_tag, const auto& value) {
@@ -950,9 +1085,12 @@ private:
 				construct_active_impl<I>(value);
 			});
 		}
+		copy_sideband_from_impl(other.index_obj_);
 	}
 
-	/// @brief Move-constructs from another engaged variant, preserving valueless state otherwise.
+	/// @brief Move-constructs from another variant, importing sideband only after payload construction succeeds.
+	/// @details The payload moves, but sideband is intentionally copied from the source encoded-index state.
+	///          Sideband models logical value state, not a separately moved resource.
 	void move_construct_from_impl(custom_indexed_variant& other) {
 		if (!other.valueless_by_exception()) {
 			visit_active_impl(other, [&](auto index_tag, auto& value) {
@@ -960,6 +1098,7 @@ private:
 				construct_active_impl<I>(std::move(value));
 			});
 		}
+		copy_sideband_from_impl(other.index_obj_);
 	}
 
 	/// @brief Assigns from another variant, either reusing the current alternative or replacing it.
@@ -970,19 +1109,22 @@ private:
 	custom_indexed_variant& assign_from_variant_impl(Other&& other) {
 		if (other.valueless_by_exception()) {
 			destroy_active_impl();
+			copy_sideband_from_impl(other.index_obj_);
 			return *this;
 		}
 		if (current_index_impl() == other.current_index_impl()) {
 			visit_active_impl(*this, [&](auto index_tag, auto& value) {
 				value = std::forward<Other>(other).template get<decltype(index_tag)::value>();
 			});
+			copy_sideband_from_impl(other.index_obj_);
 			return *this;
 		}
 		destroy_active_impl();
-		visit_active_impl(other, [&](auto index_tag, auto&& value) {
+		visit_active_impl(other, [&](auto index_tag, auto&&) {
 			constexpr std::size_t I = decltype(index_tag)::value;
-			construct_active_impl<I>(std::forward<decltype(value)>(value));
+			construct_active_impl<I>(std::forward<Other>(other).template get<I>());
 		});
+		copy_sideband_from_impl(other.index_obj_);
 		return *this;
 	}
 
@@ -992,6 +1134,7 @@ private:
 			using std::swap;
 			swap(value, other.template get<decltype(index_tag)::value>());
 		});
+		swap_sideband_impl(other);
 	}
 
 	/// @brief Swaps payloads when the variants hold different alternatives.
@@ -1022,6 +1165,7 @@ private:
 			}
 			throw;
 		}
+		swap_sideband_impl(other);
 	}
 
 	/// @brief Top-level swap state machine handling valueless, same-index, and different-index cases.
@@ -1031,6 +1175,7 @@ private:
 			return;
 		}
 		if (valueless_by_exception() && other.valueless_by_exception()) {
+			swap_sideband_impl(other);
 			return;
 		}
 		if (current_index_impl() == other.current_index_impl()) {
@@ -1047,6 +1192,7 @@ private:
 			if (constructed) {
 				other.destroy_active_impl();
 			}
+			swap_sideband_impl(other);
 			return;
 		}
 		if (other.valueless_by_exception()) {
@@ -1059,6 +1205,7 @@ private:
 			if (constructed) {
 				destroy_active_impl();
 			}
+			swap_sideband_impl(other);
 			return;
 		}
 		visit_active_impl(*this, [&](auto left_tag, auto&) {
