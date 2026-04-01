@@ -2431,6 +2431,30 @@ void run_sso_vector_allocator_provenance_suite(int& failures) {
 		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
 		AllocationRegistry registry;
 		{
+			Vec left{Alloc(&registry, 1)};
+			Vec right{Alloc(&registry, 2)};
+			for (int value : {1, 2, 3, 4, 5}) left.push_back(value);
+			for (int value : {9, 8}) right.push_back(value);
+			const Vec& cleft = left;
+			const Vec& cright = right;
+			const int* left_heap_before = cleft.data();
+			const int* right_inline_before = cright.data();
+			left.swap(right);
+			check(ctx, materialize(left) == std::vector<int>({9, 8}), "mixed heap/inline provenance swap preserves inline payload");
+			check(ctx, materialize(right) == std::vector<int>({1, 2, 3, 4, 5}), "mixed heap/inline provenance swap preserves heap payload");
+			check(ctx, static_cast<const Vec&>(left).data() != left_heap_before, "mixed heap/inline unequal allocator swap does not leave inline-sized result owning old heap allocation");
+			check(ctx, static_cast<const Vec&>(left).data() != right_inline_before, "mixed heap/inline unequal allocator swap materializes the small payload in the left object's own inline storage");
+			check(ctx, registry.live_allocation_count_for(1) == 0, "mixed heap/inline unequal allocator swap leaves no live allocation owned by the original heap allocator instance");
+			check(ctx, registry.live_allocation_count_for(2) == 1, "mixed heap/inline unequal allocator swap leaves one live allocation owned by the destination allocator instance");
+		}
+		check_registry_clean(ctx, registry, "mixed heap/inline unequal allocator swap leaves no live allocations");
+	}
+
+	{
+		using Alloc = ProvenanceAllocator<int, false, false, false>;
+		using Vec = sw::universal::internal::sso_vector<int, 2, Alloc>;
+		AllocationRegistry registry;
+		{
 			Vec left{Alloc(&registry, 7)};
 			Vec right{Alloc(&registry, 7)};
 			for (int value : {1, 2, 3, 4, 5}) left.push_back(value);
