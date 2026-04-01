@@ -508,7 +508,7 @@ template<class... Ts>
 using CustomVariant = sw::universal::internal::custom_indexed_variant<sw::universal::internal::simple_encoded_index, Ts...>;
 
 template<class... Ts>
-using SidebandVariant = sw::universal::internal::custom_indexed_variant<sw::universal::internal::index_encoded_with_sideband_data, Ts...>;
+using SidebandVariant = sw::universal::internal::custom_indexed_variant<sw::universal::internal::sideband_encoded_index, Ts...>;
 
 template<typename V>
 constexpr bool variant_has_sideband() {
@@ -566,6 +566,11 @@ constexpr bool run_converting_selection_static_checks_common() {
 		static_assert(std::is_constructible_v<V, int>);
 	}
 	{
+		using V = Variant<int>;
+		static_assert(!std::is_constructible_v<V, double>);
+		static_assert(!std::is_assignable_v<V&, double>);
+	}
+	{
 		using V = Variant<AmbiguousA, AmbiguousB>;
 		static_assert(!std::is_constructible_v<V, AmbiguousSource>);
 		static_assert(!std::is_assignable_v<V&, AmbiguousSource>);
@@ -573,6 +578,10 @@ constexpr bool run_converting_selection_static_checks_common() {
 	{
 		using V = Variant<NoTokenSupport, AssignableFromAssignToken>;
 		static_assert(std::is_assignable_v<V&, AssignToken>);
+	}
+	{
+		using V = Variant<ExplicitOnlyInt>;
+		static_assert(!std::is_convertible_v<int, V>);
 	}
 	static_assert(construct_assign_traits_match_std_variant<Variant, int, int>());
 	static_assert(construct_assign_traits_match_std_variant<Variant, double, int>());
@@ -640,13 +649,119 @@ void report_custom_variant_explicit_only_conversion_sentinel() {
 
 template<typename V>
 constexpr bool const_sideband_readable() {
-	return requires(const V& v) { v.sideband().val(); };
+	return requires(const V& v) { v.sideband().get(); };
 }
 
 template<typename V>
 constexpr bool const_sideband_writable() {
-	return requires(const V& v) { v.sideband().set_val(1); };
+	return requires(const V& v) { v.sideband().set(1); };
 }
+
+template<typename V>
+constexpr bool mutable_sideband_writable() {
+	return requires(V& v) { v.sideband().set(v.sideband().get()); };
+}
+
+template<typename V>
+using sideband_accessor_t = decltype(std::declval<V&>().sideband());
+
+template<typename V>
+using const_sideband_accessor_t = decltype(std::declval<const V&>().sideband());
+
+template<typename V>
+constexpr bool sideband_accessor_assignable() {
+	return requires(sideband_accessor_t<V> a, sideband_accessor_t<V> b) {
+		a = b;
+	};
+}
+
+template<typename V>
+constexpr bool mutable_sideband_assignable_from_const_accessor() {
+	return requires(sideband_accessor_t<V> a, const_sideband_accessor_t<V> b) {
+		a = b;
+	};
+}
+
+struct AccessorByValue {
+	int get() const noexcept { return 0; }
+	void set(int) noexcept {}
+};
+
+struct AccessorByConstRef {
+	int value = 0;
+	const int& get() const noexcept { return value; }
+	void set(const int& next) noexcept { value = next; }
+};
+
+struct AccessorGetterByRef {
+	int value = 0;
+	int& get() noexcept { return value; }
+	void set(int) noexcept {}
+};
+
+struct AccessorGetterVolatile {
+	volatile int value = 0;
+	const volatile int& get() const noexcept { return value; }
+	void set(int) noexcept {}
+};
+
+struct AccessorSetterByRef {
+	int get() const noexcept { return 0; }
+	void set(int&) noexcept {}
+};
+
+struct AccessorSetterVolatileRef {
+	int get() const noexcept { return 0; }
+	void set(const volatile int&) noexcept {}
+};
+
+struct AccessorSetterMismatched {
+	int get() const noexcept { return 0; }
+	void set(long) noexcept {}
+};
+
+template<std::size_t>
+struct SidebandIndexWithoutHooks {
+	int sideband_state = 0;
+
+	struct accessor {
+		SidebandIndexWithoutHooks* owner;
+		int get() const noexcept { return owner->sideband_state; }
+		void set(int next) noexcept { owner->sideband_state = next; }
+	};
+
+	struct const_accessor {
+		const SidebandIndexWithoutHooks* owner;
+		int get() const noexcept { return owner->sideband_state; }
+	};
+
+	std::size_t index() const noexcept { return std::variant_npos; }
+	void set_index(std::size_t) noexcept {}
+	accessor sideband() noexcept { return accessor{this}; }
+	const_accessor sideband() const noexcept { return const_accessor{this}; }
+};
+
+template<std::size_t>
+struct SidebandIndexMissingSwap {
+	int sideband_state = 0;
+
+	struct accessor {
+		SidebandIndexMissingSwap* owner;
+		int get() const noexcept { return owner->sideband_state; }
+		void set(int next) noexcept { owner->sideband_state = next; }
+	};
+
+	struct const_accessor {
+		const SidebandIndexMissingSwap* owner;
+		int get() const noexcept { return owner->sideband_state; }
+	};
+
+	std::size_t index() const noexcept { return std::variant_npos; }
+	void set_index(std::size_t) noexcept {}
+	void copy_sideband_from(const SidebandIndexMissingSwap& other) noexcept { sideband_state = other.sideband_state; }
+	accessor sideband() noexcept { return accessor{this}; }
+	const_accessor sideband() const noexcept { return const_accessor{this}; }
+};
 
 template<std::size_t>
 struct NonNoexceptEncodedIndex {
@@ -670,21 +785,55 @@ struct NothrowMoveCtorThrowingMoveAssign {
 static_assert(sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
 	sw::universal::internal::simple_encoded_index<4>>);
 static_assert(sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
-	sw::universal::internal::index_encoded_with_sideband_data<4>>);
+	sw::universal::internal::sideband_encoded_index<4>>);
 static_assert(!sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
 	NonNoexceptEncodedIndex<4>>);
-static_assert(!sw::universal::internal::custom_indexed_variant_detail::has_sideband_v<
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::has_sideband_accessor_v<
 	sw::universal::internal::simple_encoded_index<1>>);
-static_assert(sw::universal::internal::custom_indexed_variant_detail::has_sideband_v<
-	sw::universal::internal::index_encoded_with_sideband_data<1>>);
+static_assert(sw::universal::internal::custom_indexed_variant_detail::has_sideband_accessor_v<
+	sw::universal::internal::sideband_encoded_index<1>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::has_copy_sideband<
+	sw::universal::internal::simple_encoded_index<1>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::has_swap_sideband<
+	sw::universal::internal::simple_encoded_index<1>>);
+static_assert(sw::universal::internal::custom_indexed_variant_detail::has_copy_sideband<
+	sw::universal::internal::sideband_encoded_index<1>>);
+static_assert(sw::universal::internal::custom_indexed_variant_detail::has_swap_sideband<
+	sw::universal::internal::sideband_encoded_index<1>>);
 static_assert(!variant_has_sideband<CustomVariant<int>>());
 static_assert(variant_has_sideband<SidebandVariant<int>>());
 static_assert(!variant_has_sideband<std::variant<int>>());
 static_assert(run_converting_selection_static_checks_common<CustomVariant>());
 static_assert(run_converting_selection_static_checks_common<SidebandVariant>());
 static_assert(run_converting_selection_static_checks_common<std::variant>());
+static_assert(sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorByValue>);
+static_assert(sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorByConstRef>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorGetterByRef>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorGetterVolatile>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterByRef>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterVolatileRef>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterMismatched>);
 static_assert(const_sideband_readable<SidebandVariant<int>>());
 static_assert(!const_sideband_writable<SidebandVariant<int>>());
+static_assert(mutable_sideband_writable<SidebandVariant<int>>());
+static_assert(sideband_accessor_assignable<SidebandVariant<int>>());
+static_assert(mutable_sideband_assignable_from_const_accessor<SidebandVariant<int>>());
+static_assert(sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<
+	decltype(std::declval<SidebandVariant<int>&>().sideband())>);
+static_assert(sw::universal::internal::custom_indexed_variant_detail::has_sideband_accessor<
+	SidebandIndexWithoutHooks<1>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::has_copy_sideband<
+	SidebandIndexWithoutHooks<1>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::has_swap_sideband<
+	SidebandIndexWithoutHooks<1>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_encoded_index_api<
+	SidebandIndexWithoutHooks<1>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
+	SidebandIndexWithoutHooks<1>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_encoded_index_api<
+	SidebandIndexMissingSwap<1>>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
+	SidebandIndexMissingSwap<1>>);
 static_assert(custom_visit_const_rvalue_is_strictly_forwarded<CustomVariant<int, std::string>>());
 static_assert(custom_visit_const_rvalue_is_strictly_forwarded<SidebandVariant<int, std::string>>());
 static_assert(custom_visit_const_rvalue_accepts_only_const_rvalue_visitor<CustomVariant<int, std::string>>());
@@ -720,41 +869,44 @@ void run_encoded_index_tests(const char* impl_name, int& failures) {
 		// Sideband-carrying encoded index: index updates must preserve the sideband payload and vice versa.
 		// This is the property `sso_vector` depends on when it stores size in the sideband while the
 		// alternative index tracks inline-vs-heap representation.
-		using Index = sw::universal::internal::index_encoded_with_sideband_data<3>;
+		using Index = sw::universal::internal::sideband_encoded_index<3>;
 		Index index{};
-		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data default index is std::variant_npos");
-		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 0, "index_encoded_with_sideband_data default sideband is 0");
+		check(ctx, index.index() == std::variant_npos, "sideband_encoded_index default index is std::variant_npos");
+		check(ctx, static_cast<std::size_t>(index.sideband().get()) == 0, "sideband_encoded_index default sideband is 0");
 		index.set_index(1);
-		check(ctx, index.index() == 1, "index_encoded_with_sideband_data stores index");
+		check(ctx, index.index() == 1, "sideband_encoded_index stores index");
 		index.set_index(2);
-		index.sideband().set_val(5);
-		check(ctx, index.index() == 2, "index_encoded_with_sideband_data sideband write preserves index");
-		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 5, "index_encoded_with_sideband_data sideband shift semantics");
+		index.sideband().set(5);
+		check(ctx, index.index() == 2, "sideband_encoded_index sideband write preserves index");
+		check(ctx, static_cast<std::size_t>(index.sideband().get()) == 5, "sideband_encoded_index sideband round trip");
 		index.set_index(std::variant_npos);
-		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data npos round trip");
-		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 5, "index_encoded_with_sideband_data npos preserves sideband");
+		check(ctx, index.index() == std::variant_npos, "sideband_encoded_index npos round trip");
+		check(ctx, static_cast<std::size_t>(index.sideband().get()) == 5, "sideband_encoded_index npos preserves sideband");
 		index.set_index(1);
-		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 5, "index_encoded_with_sideband_data index write preserves sideband");
-		index.sideband().set_val(3);
-		check(ctx, index.index() == 1, "index_encoded_with_sideband_data sideband write preserves index");
+		check(ctx, static_cast<std::size_t>(index.sideband().get()) == 5, "sideband_encoded_index index write preserves sideband");
+		index.sideband().set(3);
+		check(ctx, index.index() == 1, "sideband_encoded_index sideband write preserves index");
 
-		auto proxy_a = index.sideband();
-		auto proxy_b = index.sideband();
-		proxy_a.set_val(7);
-		check(ctx, static_cast<std::size_t>(proxy_b.val()) == 7, "index_encoded_with_sideband_data proxy coherence A->B");
-		proxy_b.set_val(2);
-		check(ctx, static_cast<std::size_t>(proxy_a.val()) == 2, "index_encoded_with_sideband_data proxy coherence B->A");
+		auto accessor_a = index.sideband();
+		auto accessor_b = index.sideband();
+		accessor_a.set(7);
+		check(ctx, static_cast<std::size_t>(accessor_b.get()) == 7, "sideband accessor coherence A->B");
+		accessor_b.set(2);
+		check(ctx, static_cast<std::size_t>(accessor_a.get()) == 2, "sideband accessor coherence B->A");
+		const Index& cindex = index;
+		accessor_a = cindex.sideband();
+		check(ctx, static_cast<std::size_t>(accessor_a.get()) == 2, "sideband accessor assignment copies exposed state");
 	}
 
 	{
 		// Repeat at a different arity so the bit-width computation is exercised again.
-		using Index = sw::universal::internal::index_encoded_with_sideband_data<7>;
+		using Index = sw::universal::internal::sideband_encoded_index<7>;
 		Index index{};
-		check(ctx, index.index() == std::variant_npos, "index_encoded_with_sideband_data(7) default index is std::variant_npos");
+		check(ctx, index.index() == std::variant_npos, "sideband_encoded_index(7) default index is std::variant_npos");
 		index.set_index(6);
-		check(ctx, index.index() == 6, "index_encoded_with_sideband_data(7) stores index");
-		index.sideband().set_val(12);
-		check(ctx, static_cast<std::size_t>(index.sideband().val()) == 12, "index_encoded_with_sideband_data(7) sideband round trip");
+		check(ctx, index.index() == 6, "sideband_encoded_index(7) stores index");
+		index.sideband().set(12);
+		check(ctx, static_cast<std::size_t>(index.sideband().get()) == 12, "sideband_encoded_index(7) sideband round trip");
 	}
 }
 
@@ -1035,20 +1187,83 @@ void run_variant_suite(const char* impl_name, int& failures) {
 	}
 
 	if constexpr (requires(VariantT& v) { v.sideband(); }) {
-		// Custom-only behavior: sideband bits belong to the encoded index policy rather than to any one
-		// payload alternative, so ordinary transitions must preserve them.
+		// Custom-only behavior: sideband is part of the variant's logical value, but same-object payload
+		// transitions preserve the current object's sideband unless they are importing state from another variant.
 		VariantT v(std::in_place_type<std::string>, "sb");
 		auto sa = v.sideband();
 		auto sb = v.sideband();
-		sa.set_val(9);
-		check(ctx, static_cast<std::size_t>(sb.val()) == 9, "sideband proxies are coherent");
+		sa.set(9);
+		check(ctx, static_cast<std::size_t>(sb.get()) == 9, "sideband accessors are coherent");
 		check(ctx, v.index() == 1, "sideband write preserves active index");
 		v.template emplace<0>(42);
-		check(ctx, static_cast<std::size_t>(v.sideband().val()) == 9, "sideband survives index update");
+		check(ctx, static_cast<std::size_t>(v.sideband().get()) == 9, "same-object emplace preserves sideband");
 		check(ctx, v.index() == 0, "emplace updates active index with sideband present");
+		v = std::string("again");
+		check(ctx, static_cast<std::size_t>(v.sideband().get()) == 9, "same-object converting assignment preserves sideband");
 		const VariantT& cv = v;
 		auto csb = cv.sideband();
-		check(ctx, static_cast<std::size_t>(csb.val()) == 9, "const sideband proxy reads sideband");
+		check(ctx, static_cast<std::size_t>(csb.get()) == 9, "const sideband accessor reads sideband");
+	}
+
+	if constexpr (requires(VariantT& v) { v.sideband(); }) {
+		VariantT src(std::in_place_type<std::string>, "copy");
+		src.sideband().set(13);
+		VariantT copy(src);
+		check(ctx, static_cast<std::size_t>(copy.sideband().get()) == 13, "copy construction copies sideband");
+
+		VariantT moved(std::move(src));
+		check(ctx, static_cast<std::size_t>(moved.sideband().get()) == 13, "move construction transfers sideband into destination");
+
+		VariantT copy_assign_dst(1);
+		copy_assign_dst.sideband().set(2);
+		copy_assign_dst = copy;
+		check(ctx, static_cast<std::size_t>(copy_assign_dst.sideband().get()) == 13, "copy assignment imports sideband");
+
+		VariantT move_assign_src(std::in_place_type<std::string>, "move");
+		move_assign_src.sideband().set(17);
+		VariantT move_assign_dst(3);
+		move_assign_dst.sideband().set(4);
+		move_assign_dst = std::move(move_assign_src);
+		check(ctx, static_cast<std::size_t>(move_assign_dst.sideband().get()) == 17, "move assignment imports sideband");
+
+		VariantT same_left(10);
+		VariantT same_right(20);
+		same_left.sideband().set(21);
+		same_right.sideband().set(22);
+		same_left.swap(same_right);
+		check(ctx, static_cast<std::size_t>(same_left.sideband().get()) == 22, "same-index swap swaps sideband");
+		check(ctx, static_cast<std::size_t>(same_right.sideband().get()) == 21, "same-index swap swaps sideband both directions");
+
+		VariantT diff_left(30);
+		VariantT diff_right(std::in_place_type<std::string>, "rhs");
+		diff_left.sideband().set(31);
+		diff_right.sideband().set(32);
+		diff_left.swap(diff_right);
+		check(ctx, static_cast<std::size_t>(diff_left.sideband().get()) == 32, "different-index swap swaps sideband");
+		check(ctx, static_cast<std::size_t>(diff_right.sideband().get()) == 31, "different-index swap swaps sideband both directions");
+
+		VariantT valueless_src(5);
+		valueless_src.sideband().set(44);
+		ThrowingType::reset();
+		ThrowingType::throw_on_default = 1;
+		expect_throw<std::runtime_error>(ctx, "force sideband source valueless", [&]() {
+			valueless_src.template emplace<ThrowingType>();
+		});
+		if (valueless_src.valueless_by_exception()) {
+			VariantT valueless_copy(valueless_src);
+			check(ctx, valueless_copy.valueless_by_exception(), "copy construction preserves valueless state with sideband policy");
+			check(ctx, static_cast<std::size_t>(valueless_copy.sideband().get()) == 44, "copy construction preserves valueless sideband state");
+
+			VariantT valueless_moved(std::move(valueless_src));
+			check(ctx, valueless_moved.valueless_by_exception(), "move construction preserves valueless state with sideband policy");
+			check(ctx, static_cast<std::size_t>(valueless_moved.sideband().get()) == 44, "move construction preserves valueless sideband state");
+
+			VariantT valueless_dst(std::in_place_type<std::string>, "dst");
+			valueless_dst.sideband().set(9);
+			valueless_dst = valueless_copy;
+			check(ctx, valueless_dst.valueless_by_exception(), "assign from valueless sideband source yields valueless destination");
+			check(ctx, static_cast<std::size_t>(valueless_dst.sideband().get()) == 44, "assign from valueless source imports sideband");
+		}
 	}
 
 	{
@@ -1239,6 +1454,72 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		check(ctx, v.index() == 0, "throw-before-destroy preserves prior index");
 		check(ctx, get<int>(v) == 77, "throw-before-destroy preserves prior value");
 		check(ctx, ThrowBeforeDestroyType::live == 0, "throw-before-destroy does not leak construction");
+	}
+
+	if constexpr (requires(VariantT& v) { v.sideband(); }) {
+		ThrowingType::reset();
+		VariantT same_assign_src(std::in_place_type<ThrowingType>, ThrowingType{7});
+		VariantT same_assign_dst(std::in_place_type<ThrowingType>, ThrowingType{8});
+		same_assign_src.sideband().set(51);
+		same_assign_dst.sideband().set(52);
+		const auto same_assign_dst_index_before = same_assign_dst.index();
+		const auto same_assign_dst_value_before = get<ThrowingType>(same_assign_dst).value;
+		ThrowingType::throw_on_copy_assign = 1;
+		expect_throw<std::runtime_error>(ctx, "same-index copy assignment sideband publication waits for success", [&]() {
+			same_assign_dst = same_assign_src;
+		});
+		check(ctx, !same_assign_dst.valueless_by_exception(), "failed same-index copy assignment keeps destination engaged");
+		check(ctx, same_assign_dst.index() == same_assign_dst_index_before, "failed same-index copy assignment keeps destination discriminator");
+		check(ctx, get<ThrowingType>(same_assign_dst).value == same_assign_dst_value_before, "failed same-index copy assignment keeps destination payload");
+		check(ctx, static_cast<std::size_t>(same_assign_dst.sideband().get()) == 52, "failed same-index copy assignment does not import sideband early");
+
+		ThrowingType::reset();
+		VariantT move_same_src(std::in_place_type<ThrowingType>, ThrowingType{9});
+		VariantT move_same_dst(std::in_place_type<ThrowingType>, ThrowingType{10});
+		move_same_src.sideband().set(61);
+		move_same_dst.sideband().set(62);
+		const auto move_same_dst_index_before = move_same_dst.index();
+		const auto move_same_dst_value_before = get<ThrowingType>(move_same_dst).value;
+		ThrowingType::throw_on_move_assign = 1;
+		expect_throw<std::runtime_error>(ctx, "same-index move assignment sideband publication waits for success", [&]() {
+			move_same_dst = std::move(move_same_src);
+		});
+		check(ctx, !move_same_dst.valueless_by_exception(), "failed same-index move assignment keeps destination engaged");
+		check(ctx, move_same_dst.index() == move_same_dst_index_before, "failed same-index move assignment keeps destination discriminator");
+		check(ctx, get<ThrowingType>(move_same_dst).value == move_same_dst_value_before, "failed same-index move assignment keeps destination payload");
+		check(ctx, static_cast<std::size_t>(move_same_dst.sideband().get()) == 62, "failed same-index move assignment does not import sideband early");
+
+		ThrowingType::reset();
+		VariantT diff_assign_src(std::in_place_type<ThrowingType>, ThrowingType{11});
+		VariantT diff_assign_dst(12);
+		diff_assign_src.sideband().set(71);
+		diff_assign_dst.sideband().set(72);
+		const auto diff_assign_dst_index_before = diff_assign_dst.index();
+		ThrowingType::throw_on_copy = 1;
+		expect_throw<std::runtime_error>(ctx, "different-index copy assignment sideband publication waits for success", [&]() {
+			diff_assign_dst = diff_assign_src;
+		});
+		check(ctx, diff_assign_dst.valueless_by_exception() || (diff_assign_dst.index() == diff_assign_dst_index_before), "failed different-index copy assignment leaves destination discriminator unchanged or valueless");
+		if (!diff_assign_dst.valueless_by_exception()) {
+			check(ctx, get<int>(diff_assign_dst) == 12, "failed different-index copy assignment keeps destination payload when still engaged");
+		}
+		check(ctx, static_cast<std::size_t>(diff_assign_dst.sideband().get()) == 72, "failed different-index copy assignment does not import sideband early");
+
+		ThrowingType::reset();
+		VariantT diff_move_src(std::in_place_type<ThrowingType>, ThrowingType{13});
+		VariantT diff_move_dst(14);
+		diff_move_src.sideband().set(81);
+		diff_move_dst.sideband().set(82);
+		const auto diff_move_dst_index_before = diff_move_dst.index();
+		ThrowingType::throw_on_move = ThrowingType::move_count + 1;
+		expect_throw<std::runtime_error>(ctx, "different-index move assignment sideband publication waits for success", [&]() {
+			diff_move_dst = std::move(diff_move_src);
+		});
+		check(ctx, diff_move_dst.valueless_by_exception() || (diff_move_dst.index() == diff_move_dst_index_before), "failed different-index move assignment leaves destination discriminator unchanged or valueless");
+		if (!diff_move_dst.valueless_by_exception()) {
+			check(ctx, get<int>(diff_move_dst) == 14, "failed different-index move assignment keeps destination payload when still engaged");
+		}
+		check(ctx, static_cast<std::size_t>(diff_move_dst.sideband().get()) == 82, "failed different-index move assignment does not import sideband early");
 	}
 
 	if constexpr (variant_test::is_custom_variant_v<VariantT>) {
@@ -1447,10 +1728,10 @@ void run_custom_variant_lifetime_suite(const char* impl_name, int& failures) {
 		A::reset();
 		B::reset();
 		V v(std::in_place_type<A>, 4);
-		v.sideband().set_val(6);
-		check(ctx, static_cast<std::size_t>(v.sideband().val()) == 6, "sideband write round-trips");
+		v.sideband().set(6);
+		check(ctx, static_cast<std::size_t>(v.sideband().get()) == 6, "sideband write round-trips");
 		v.template emplace<B>(8);
-		check(ctx, static_cast<std::size_t>(v.sideband().val()) == 6, "sideband survives alternative switch");
+		check(ctx, static_cast<std::size_t>(v.sideband().get()) == 6, "sideband survives alternative switch");
 		check(ctx, sw::universal::internal::get<B>(v).value == 8, "sideband variant keeps payload accessible");
 	}
 

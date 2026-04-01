@@ -329,7 +329,7 @@ private:
 	};
 
 	/// @brief Representation variant: inline storage plus sideband size, or heap storage plus sideband size.
-	using variant_t = custom_indexed_variant<index_encoded_with_sideband_data, inline_storage, heap_storage>;
+	using variant_t = custom_indexed_variant<sideband_encoded_index, inline_storage, heap_storage>;
 
 	/// @brief Converts encoded sideband bits into the public `size_type`.
 	static size_type sideband_to_size(std::size_t v) noexcept { return static_cast<size_type>(v); }
@@ -340,11 +340,11 @@ private:
 
 	/// @brief Reads the logical size stored in the variant sideband.
 	size_type size_impl() const noexcept {
-		return sideband_to_size(static_cast<std::size_t>(state_.sideband().val()));
+		return sideband_to_size(static_cast<std::size_t>(state_.sideband().get()));
 	}
 	/// @brief Writes the logical size into the variant sideband.
 	void set_size_impl(size_type n) noexcept {
-		state_.sideband().set_val(size_to_sideband(n));
+		state_.sideband().set(size_to_sideband(n));
 	}
 
 	/// @brief Returns true when the active representation is inline storage.
@@ -966,19 +966,6 @@ private:
 		}
 		set_size_impl(n - count);
 		return iterator(this, idx_first);
-	}
-
-	/// @brief Swaps the representation variant while manually preserving the sideband size payload.
-	/// @warning This exists because the underlying `custom_indexed_variant` swap does not yet offer
-	///          a dedicated "swap payload plus sideband" primitive.
-	void swap_state_impl(sso_vector& other) noexcept {
-		// TODO(custom_indexed_variant): move this sideband-preservation logic into a shared
-		// variant swap primitive once custom_indexed_variant guarantees sideband swap semantics.
-		const std::size_t this_size_sideband = state_.sideband().val();
-		const std::size_t other_size_sideband = other.state_.sideband().val();
-		std::swap(state_, other.state_);
-		state_.sideband().set_val(other_size_sideband);
-		other.state_.sideband().set_val(this_size_sideband);
 	}
 
 public:
