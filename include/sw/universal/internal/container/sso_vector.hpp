@@ -197,6 +197,8 @@ inline constexpr std::size_t heap_block_align() noexcept {
 
 template<class T>
 inline T* block_data(heap_block<T>* b) noexcept {
+	// Heap payload objects are repeatedly constructed into raw storage. Re-enter typed access through
+	// one laundered choke point so lifetime restarts stay visible to optimizers and provenance-aware ABIs.
 	return std::launder(reinterpret_cast<T*>(b->data));
 }
 template<class T>
@@ -344,6 +346,8 @@ private:
 #ifndef NDEBUG
 		size_type live_count = 0;
 #endif
+		// Inline elements live in raw storage and may be destroyed/reconstructed in place as the vector
+		// mutates, so typed access re-enters through `std::launder`.
 		T* data() noexcept { return std::launder(reinterpret_cast<T*>(buf)); }
 		const T* data() const noexcept { return std::launder(reinterpret_cast<const T*>(buf)); }
 
