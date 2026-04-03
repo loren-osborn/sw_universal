@@ -1479,6 +1479,27 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		check(ctx, LiveCountedType::min_live >= 0, "LiveCountedType live count never negative during emplace churn");
 	}
 
+	{
+		// Reusing the same raw variant storage for different active alternatives must keep get_if/get
+		// aligned with the current lifetime and must not leak the replaced object.
+		LiveCountedType::reset();
+		{
+			VariantT v(std::in_place_type<LiveCountedType>, LiveCountedType{21});
+			check(ctx, get_if<LiveCountedType>(&v) != nullptr, "storage reuse initial get_if finds active object");
+			check(ctx, get_if<std::string>(&v) == nullptr, "storage reuse initial inactive get_if is null");
+			v.template emplace<std::string>("reused");
+			check(ctx, get_if<LiveCountedType>(&v) == nullptr, "storage reuse get_if drops replaced object");
+			check(ctx, get_if<std::string>(&v) != nullptr, "storage reuse get_if finds replacement object");
+			check(ctx, get<std::string>(v) == "reused", "storage reuse get reads replacement object");
+			v.template emplace<LiveCountedType>(LiveCountedType{22});
+			check(ctx, get_if<std::string>(&v) == nullptr, "storage reuse second replacement clears prior alternative");
+			check(ctx, get_if<LiveCountedType>(&v) != nullptr, "storage reuse second replacement restores typed access");
+			check(ctx, get<LiveCountedType>(v).value == 22, "storage reuse second replacement stores new value");
+			check(ctx, LiveCountedType::live == 1, "storage reuse keeps exactly one live tracked alternative");
+		}
+		check(ctx, LiveCountedType::live == 0, "storage reuse final live count returns to zero");
+	}
+
 	if constexpr (variant_test::is_custom_variant_v<VariantT>) {
 		// Custom-only behavior: construction failure before destruction should preserve the old state.
 		using ThrowBeforeDestroyVariant = Variant<int, ThrowBeforeDestroyType, std::string, LiveCountedType>;

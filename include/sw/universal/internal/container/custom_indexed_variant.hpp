@@ -977,7 +977,9 @@ private:
 		using Base = detail::type_at_t<I, Types...>;
 		using CvBase = std::conditional_t<std::is_const_v<VariantNoRef>, std::add_const_t<Base>, Base>;
 		using CvVolBase = std::conditional_t<std::is_volatile_v<VariantNoRef>, std::add_volatile_t<CvBase>, CvBase>;
-		return std::launder(reinterpret_cast<CvVolBase*>(variant.storage_.buffer));
+		// Re-enter typed access through the raw-storage byte view. `std::launder` is the lifetime-aware
+		// choke point after placement construction / replacement in the variant buffer.
+		return std::launder(reinterpret_cast<CvVolBase*>(variant.storage_bytes_impl()));
 	}
 
 	// Active-alternative dispatch.
