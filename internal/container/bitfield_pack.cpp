@@ -8,7 +8,6 @@
 // This file is intentionally more direct than the container suites because the API is mostly
 // compile-time/static. The comments here explain why each scenario exists rather than trying to
 // narrate every assertion.
-#include <cmath>
 #include <bit>
 #include <atomic>
 #include <cstddef>
