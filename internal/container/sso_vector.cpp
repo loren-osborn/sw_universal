@@ -24,6 +24,7 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <utility>
 #include <unordered_map>
 #include <vector>
 
@@ -618,12 +619,13 @@ private:
 // data presence, rather than checking inline-vs-heap representation details.
 template<typename Vec>
 void check_invariants(Vec& v, const TestContext& ctx, const char* label) {
+	const Vec& cv = v;
 	check(ctx, v.size() <= v.capacity(), label);
 	if (v.size() > 0) {
-		check(ctx, v.data() != nullptr, "data non-null for non-empty");
-		if constexpr (requires(Vec& x) { &(x[0]); }) {
+		check(ctx, cv.data() != nullptr, "data non-null for non-empty");
+		if constexpr (requires(const Vec& x) { &(x[0]); }) {
 			for (std::size_t i = 0; i < v.size(); ++i) {
-				check(ctx, &v[i] == v.data() + i, "contiguous storage");
+				check(ctx, &cv[i] == cv.data() + i, "contiguous storage");
 			}
 		}
 	}
@@ -994,10 +996,23 @@ void run_sso_proxy_suite(int& failures) {
 	v.push_back(11);
 	v.push_back(22);
 	static_assert(!std::is_reference_v<decltype(v[0])>);
+	static_assert(!std::is_same_v<decltype(v[0]), int&>);
+	static_assert(!std::is_same_v<decltype(v.at(0)), int&>);
+	static_assert(!std::is_same_v<decltype(v.front()), int&>);
+	static_assert(!std::is_same_v<decltype(v.back()), int&>);
 	static_assert(!std::is_reference_v<decltype(*v.begin())>);
+	static_assert(std::is_same_v<decltype(std::declval<const Vec&>()[0]), const int&>);
+	static_assert(std::is_same_v<decltype(std::declval<const Vec&>().at(0)), const int&>);
+	static_assert(std::is_same_v<decltype(std::declval<const Vec&>().front()), const int&>);
+	static_assert(std::is_same_v<decltype(std::declval<const Vec&>().back()), const int&>);
+	static_assert(noexcept(std::declval<Vec&>()[0]));
+	static_assert(!noexcept(std::declval<Vec&>().at(0)));
 	check(ctx, static_cast<int>(v[0]) == 11, "proxy read conversion");
 	v[1] = 42;
 	check(ctx, static_cast<int>(v[1]) == 42, "proxy write assignment");
+	check(ctx, static_cast<int>(v.at(1)) == 42, "mutable at returns readable proxy");
+	expect_throw<std::out_of_range>(ctx, "mutable at throws on bounds failure", [&]() { (void)v.at(99); });
+	expect_throw<std::out_of_range>(ctx, "const at throws on bounds failure", [&]() { (void)std::as_const(v).at(99); });
 }
 
 void run_sso_cow_suite(int& failures) {
@@ -1347,6 +1362,7 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 			check_values(ctx, v, {1, 2, 3}, "append contents");
 			check(ctx, v.size() == 3, "append size");
 			check(ctx, LifetimeTracked::stats.live == 3, "append live count");
+			check_invariants(v, ctx, "append invariants");
 		}
 		check_no_leak_after_scope<TrackedVec>(ctx, "append scope destruction");
 	}
@@ -1369,6 +1385,7 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 			check_values(ctx, v, {10, 20}, "resize shrink values");
 			check(ctx, LifetimeTracked::stats.dtor - dtor_before_shrink == 3, "resize shrink destroys removed tail");
 			check(ctx, LifetimeTracked::stats.live == 2, "resize shrink live count");
+			check_invariants(v, ctx, "resize invariants");
 		}
 		check_no_leak_after_scope<TrackedVec>(ctx, "resize scope destruction");
 	}
@@ -1388,8 +1405,33 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 			v.erase(v.begin() + 2);
 			check_values(ctx, v, {1, 99, 3}, "middle erase values");
 			check(ctx, LifetimeTracked::stats.live == static_cast<int>(v.size()), "erase live count");
+			check_invariants(v, ctx, "middle insert erase invariants");
 		}
 		check_no_leak_after_scope<TrackedVec>(ctx, "insert erase scope destruction");
+	}
+
+	{
+		// Range insert/erase should preserve the same prefix-live discipline as scalar insert/erase:
+		// shift live elements by assignment, then create/destroy only the tail.
+		LifetimeTracked::reset();
+		{
+			TrackedVec v;
+			v.reserve(10);
+			v.emplace_back(1);
+			v.emplace_back(2);
+			v.emplace_back(3);
+			v.emplace_back(4);
+			v.emplace_back(5);
+			std::array<LifetimeTracked, 2> inserted = {LifetimeTracked(77), LifetimeTracked(88)};
+			v.insert(v.begin() + 2, inserted.begin(), inserted.end());
+			check_values(ctx, v, {1, 2, 77, 88, 3, 4, 5}, "range insert preserves order");
+			check(ctx, LifetimeTracked::stats.live == static_cast<int>(v.size() + inserted.size()), "range insert keeps only vector plus source-range objects live");
+			v.erase(v.begin() + 1, v.begin() + 4);
+			check_values(ctx, v, {1, 3, 4, 5}, "erase range preserves order");
+			check(ctx, LifetimeTracked::stats.live == static_cast<int>(v.size() + inserted.size()), "erase range destroys only removed vector elements");
+			check_invariants(v, ctx, "range insert erase invariants");
+		}
+		check_no_leak_after_scope<TrackedVec>(ctx, "range insert erase scope destruction");
 	}
 
 	{
@@ -1670,6 +1712,24 @@ void run_sso_vector_cow_behavior_suite(int& failures) {
 	}
 
 	{
+		// Mutable at() should follow the same proxy-based detach behavior as operator[].
+		LifetimeTracked::reset();
+		{
+			Vec a = make_heap_backed_lifetime_vector<Vec>({36, 37, 38, 39, 40, 41});
+			Vec b = a;
+			const auto before_write = LifetimeTracked::snapshot();
+			a.at(2) = LifetimeTracked(838);
+			const auto after_write = LifetimeTracked::snapshot();
+			check_values(ctx, a, {36, 37, 838, 39, 40, 41}, "at() write updates detached destination");
+			check_values(ctx, b, {36, 37, 38, 39, 40, 41}, "at() write leaves sibling untouched");
+			check(ctx, after_write.copy_ctor - before_write.copy_ctor == 6, "at() write clone copies the shared payload once");
+			check(ctx, after_write.move_assign - before_write.move_assign == 1, "at() write applies one in-place move assignment after detach");
+			assert_effectively_shareable_via_copy_probe(ctx, a, "at()-written vector stays effectively shareable via copy probe");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "at() write behavior scope destruction");
+	}
+
+	{
 		// Non-const data() should detach first, then make the target effectively unshareable for future copies.
 		LifetimeTracked::reset();
 		{
@@ -1711,6 +1771,44 @@ void run_sso_vector_cow_behavior_suite(int& failures) {
 			check(ctx, after_const_data.dtor == before_const_data.dtor, "const data does not destroy");
 		}
 		check_no_leak_after_scope<Vec>(ctx, "const data behavior scope destruction");
+	}
+
+	{
+		// Structural mutation paths should detach consistently as well: mutating one sharer must not
+		// rewrite the sibling, and the mutated branch should keep ordinary shareability when no raw T*
+		// has escaped.
+		LifetimeTracked::reset();
+		{
+			Vec inserted = make_heap_backed_lifetime_vector<Vec>({56, 57, 58, 59, 60, 61});
+			Vec inserted_sibling = inserted;
+			inserted.insert(inserted.begin() + 3, 3, LifetimeTracked(700));
+			check_values(ctx, inserted, {56, 57, 58, 700, 700, 700, 59, 60, 61}, "insert(count, value) detaches and mutates destination");
+			check_values(ctx, inserted_sibling, {56, 57, 58, 59, 60, 61}, "insert(count, value) leaves sibling untouched");
+			assert_effectively_shareable_via_copy_probe(ctx, inserted, "insert(count, value) result stays effectively shareable via copy probe");
+			check_invariants(inserted, ctx, "insert(count, value) invariants");
+
+			Vec inserted_range = make_heap_backed_lifetime_vector<Vec>({62, 63, 64, 65, 66, 67});
+			Vec inserted_range_sibling = inserted_range;
+			std::array<LifetimeTracked, 2> inserted_values = {LifetimeTracked(901), LifetimeTracked(902)};
+			inserted_range.insert(inserted_range.begin() + 2, inserted_values.begin(), inserted_values.end());
+			check_values(ctx, inserted_range, {62, 63, 901, 902, 64, 65, 66, 67}, "insert(range) detaches and mutates destination");
+			check_values(ctx, inserted_range_sibling, {62, 63, 64, 65, 66, 67}, "insert(range) leaves sibling untouched");
+			assert_effectively_shareable_via_copy_probe(ctx, inserted_range, "insert(range) result stays effectively shareable via copy probe");
+			check_invariants(inserted_range, ctx, "insert(range) invariants");
+
+			Vec assigned = make_heap_backed_lifetime_vector<Vec>({66, 67, 68, 69, 70, 71});
+			Vec assigned_sibling = assigned;
+			std::array<LifetimeTracked, 6> replacement = {
+				LifetimeTracked(801), LifetimeTracked(802), LifetimeTracked(803),
+				LifetimeTracked(804), LifetimeTracked(805), LifetimeTracked(806)
+			};
+			assigned.assign(replacement.begin(), replacement.end());
+			check_values(ctx, assigned, {801, 802, 803, 804, 805, 806}, "assign(range) detaches and replaces destination contents");
+			check_values(ctx, assigned_sibling, {66, 67, 68, 69, 70, 71}, "assign(range) leaves sibling untouched");
+			assert_effectively_shareable_via_copy_probe(ctx, assigned, "assign(range) result stays effectively shareable via copy probe");
+			check_invariants(assigned, ctx, "assign(range) invariants");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "structural detach consistency scope destruction");
 	}
 
 	{
@@ -2221,6 +2319,7 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 			move_assigned.erase(move_assigned.begin() + 2);
 			check_values(ctx, move_assigned, {7, 11, 9}, "inline erase preserves order");
 			check(ctx, LifetimeTracked::stats.dtor - dtor_before_erase >= 1, "inline erase destroys removed element");
+			check_invariants(move_assigned, ctx, "inline insert erase invariants");
 
 			// Shrinking an already-inline vector should be a near no-op for element lifetimes.
 			const LifetimeTrackedStats before_shrink = LifetimeTracked::snapshot();
@@ -2238,8 +2337,62 @@ void run_sso_vector_specific_lifetime_suite(int& failures) {
 			left.swap(right);
 			check_values(ctx, left, {9, 8}, "inline swap preserves right values");
 			check_values(ctx, right, {1, 2}, "inline swap preserves left values");
+			check_invariants(left, ctx, "inline swap left invariants");
+			check_invariants(right, ctx, "inline swap right invariants");
 		}
 		check_no_leak_after_scope<Vec>(ctx, "inline assignment and modifier scope destruction");
+	}
+
+	{
+		// Crossing the inline/heap boundary should not break the live-prefix model. Growing past `N`
+		// promotes to heap; shrinking and `shrink_to_fit()` may demote back to inline.
+		LifetimeTracked::reset();
+		{
+			Vec v;
+			v.emplace_back(1);
+			v.emplace_back(2);
+			v.emplace_back(3);
+			v.emplace_back(4);
+			check(ctx, v.is_inline(), "capacity-sized small vector stays inline");
+			v.emplace_back(5);
+			check(ctx, !v.is_inline(), "growing past inline capacity promotes to heap");
+			check_values(ctx, v, {1, 2, 3, 4, 5}, "promotion preserves values");
+			check_invariants(v, ctx, "post-promotion invariants");
+			v.resize(2);
+			check(ctx, !v.is_inline(), "resize shrink alone does not force representation demotion");
+			v.shrink_to_fit();
+			check(ctx, v.is_inline(), "shrink_to_fit may demote heap storage back to inline");
+			check_values(ctx, v, {1, 2}, "demotion preserves prefix values");
+			check_invariants(v, ctx, "post-demotion invariants");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "inline heap transition scope destruction");
+	}
+
+	{
+		// Mixed inline/heap swap should preserve vector-like contents while keeping each side internally
+		// consistent after the representation exchange.
+		LifetimeTracked::reset();
+		{
+			Vec left;
+			left.emplace_back(7);
+			left.emplace_back(8);
+			Vec right;
+			right.reserve(16);
+			right.emplace_back(20);
+			right.emplace_back(21);
+			right.emplace_back(22);
+			right.emplace_back(23);
+			right.emplace_back(24);
+			right.emplace_back(25);
+			check(ctx, left.is_inline(), "mixed swap left starts inline");
+			check(ctx, !right.is_inline(), "mixed swap right starts heap-backed");
+			left.swap(right);
+			check_values(ctx, left, {20, 21, 22, 23, 24, 25}, "mixed swap preserves heap payload");
+			check_values(ctx, right, {7, 8}, "mixed swap preserves inline payload");
+			check_invariants(left, ctx, "mixed swap left invariants");
+			check_invariants(right, ctx, "mixed swap right invariants");
+		}
+		check_no_leak_after_scope<Vec>(ctx, "mixed swap scope destruction");
 	}
 }
 

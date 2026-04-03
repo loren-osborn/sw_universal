@@ -720,6 +720,18 @@ struct AccessorSetterMismatched {
 	void set(long) noexcept {}
 };
 
+struct AccessorSetterOverloaded {
+	int get() const noexcept { return 0; }
+	void set(int) noexcept {}
+	void set(const int&) noexcept {}
+};
+
+struct AccessorSetterTemplated {
+	int get() const noexcept { return 0; }
+	template<typename U>
+	void set(U&&) noexcept {}
+};
+
 template<std::size_t>
 struct SidebandIndexWithoutHooks {
 	int sideband_state = 0;
@@ -813,6 +825,8 @@ static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_
 static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterByRef>);
 static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterVolatileRef>);
 static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterMismatched>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterOverloaded>);
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterTemplated>);
 static_assert(const_sideband_readable<SidebandVariant<int>>());
 static_assert(!const_sideband_writable<SidebandVariant<int>>());
 static_assert(mutable_sideband_writable<SidebandVariant<int>>());
@@ -1091,6 +1105,30 @@ void run_variant_std_parity_tests(int& failures) {
 		expect_throw<std::bad_variant_access>(ctx, "bad get by type parity custom", [&]() {
 			(void)get<int>(cv);
 		});
+	}
+
+	{
+		// Visiting a valueless variant is another parity boundary worth making explicit for reviewers.
+		ThrowingType::reset();
+		Std sv(123);
+		Custom cv(123);
+		ThrowingType::throw_on_default = 1;
+		expect_throw<std::runtime_error>(ctx, "force std valueless for visit parity", [&]() {
+			sv.template emplace<2>();
+		});
+		ThrowingType::reset();
+		ThrowingType::throw_on_default = 1;
+		expect_throw<std::runtime_error>(ctx, "force custom valueless for visit parity", [&]() {
+			cv.template emplace<2>();
+		});
+		if (sv.valueless_by_exception() && cv.valueless_by_exception()) {
+			expect_throw<std::bad_variant_access>(ctx, "std visit on valueless throws", [&]() {
+				(void)std::visit([](const auto&) { return 0; }, sv);
+			});
+			expect_throw<std::bad_variant_access>(ctx, "custom visit on valueless throws", [&]() {
+				(void)visit_adapter([](const auto&) { return 0; }, cv);
+			});
+		}
 	}
 }
 

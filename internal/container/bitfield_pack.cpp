@@ -400,6 +400,25 @@ static void test_set_if_valid() {
 	TEST_EQ(p.underlying_value(), after_valid);
 }
 
+static void test_truncating_vs_checked_mutation_api() {
+	using P = bitfield_pack<std::uint8_t, std::size_t, bitfield_field_spec<3>, bitfield_field_spec<5>>;
+
+	P p;
+	p.set_underlying_value(0);
+	p.template set_masked<0>(std::uint8_t{0b1111});
+	TEST_EQ(p.template get_bits<0>(), std::uint8_t{0b111});
+
+	const auto truncated = p.underlying_value();
+	TEST_TRUE(!P::is_valid<0>(std::uint8_t{0b1111}));
+
+	g_assert_enabled = true;
+	TEST_THROWS(P::validate<0>(std::uint8_t{0b1111}));
+	g_assert_enabled = false;
+
+	TEST_TRUE(!p.template set_if_valid<0>(std::uint8_t{0b1111}));
+	TEST_EQ(p.underlying_value(), truncated);
+}
+
 static void test_remainder_layout() {
 	// The trailing remainder consumes whatever bits are left after the fixed-width prefix.
 	// [4 bits][remainder]
@@ -762,7 +781,7 @@ static void test_word_spec_normalization() {
 static void test_index_encoded_sideband() {
 	// Keep one cross-component smoke test here because custom_indexed_variant's encoded index relies
 	// on bitfield_pack's sideband-friendly remainder layout.
-	using E = sw::universal::internal::index_encoded_with_sideband_data<10>;
+	using E = sw::universal::internal::sideband_encoded_index<10>;
 	E e;
 	TEST_EQ(e.index(), std::variant_npos);
 
@@ -789,6 +808,7 @@ int main() {
 		test_validate_hook();
 		test_width_fit_and_semantic_validity_split();
 		test_set_if_valid();
+		test_truncating_vs_checked_mutation_api();
 		test_remainder_layout();
 		test_get_all_and_extra_bits();
 		test_bulk_setters();

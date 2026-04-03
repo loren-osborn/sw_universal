@@ -306,6 +306,8 @@ namespace custom_indexed_variant_detail {
 	/// @details Accessors expose whole sideband state; they are not required to model a single scalar field.
 	///          Internal callers rely only on whole-state `get()` / `set(...)`, so policies remain free
 	///          to expose one field or many fields without changing the variant core.
+	///          Getter/setter shapes are intentionally strict: either `T` or `const T&`, where `T`
+	///          is the policy's whole exposed sideband-state type.
 	template<typename Accessor>
 	concept sideband_accessor =
 		std::copy_constructible<Accessor> &&
@@ -595,7 +597,8 @@ using sideband_encoded_index = for_index_type<std::size_t>::sideband_encoded_ind
 ///          Copy/move construction, copy/move assignment, and swap propagate that sideband state as
 ///          part of the variant value.
 ///          Unlike `std::variant`, this type treats that index representation as a policy choice so
-///          internal containers can piggyback metadata such as `sso_vector`'s size sideband.
+///          internal containers can piggyback metadata such as `sso_vector`'s size sideband, and it
+///          requires sideband-bearing policies to provide whole-sideband copy/swap hooks.
 ///          `sideband()` returns a policy-defined accessor/facade over the exposed sideband state.
 ///          The variant core does not assume that sideband means one scalar field; policies without a
 ///          sideband accessor simply expose an empty sideband surface.
