@@ -7,10 +7,21 @@
 //  - Proxy element + proxy non-const iterators (vector<bool>-style)
 //  - "Shareable" state to prevent sharing when an external non-const pointer has been handed out.
 //
-// The core intent is to keep small vectors in-object while still allowing large heap-backed vectors
-// to be copied cheaply until an operation needs unique mutable ownership. The mutable API is
+// The core intent is to act as a practical near-drop-in replacement for std::vector for the workloads
+// it was designed for, while deliberately differing internally to keep small vectors in-object and
+// large vectors cheaply shareable until mutation needs unique ownership. The mutable API is
 // intentionally not "ordinary std::vector<T>& everywhere": non-const element access goes through
 // proxies so reads can preserve sharing and writes can detach only when needed.
+//
+// Intentional API/semantic differences from std::vector:
+//  - non-const operator[] / at() / front() / back() return proxy references, not T&
+//  - non-const iterators are random-access proxy iterators, not contiguous iterators
+//  - mutable data() is the explicit "raw mutable pointer escapes" operation; it detaches first and
+//    then disables future sharing for that heap block
+//  - const access remains ordinary contiguous const T* / const T& observation
+//  - some bulk modifiers rebuild through a temporary vector to keep allocator/COW rules simple and
+//    exception behavior reviewable; this favors correctness and small-vector ergonomics over
+//    squeezing every last std::vector-style insertion optimization out of every iterator category
 //
 // Key design points:
 //  - Two-layout representation uses custom_indexed_variant with sideband size.
@@ -23,7 +34,9 @@
 //
 // Lifetime model:
 //  - Both inline and heap representations hold raw storage, not always-live T objects.
-//  - Elements are explicitly constructed and destroyed only for indices [0, size()).
+//  - Live elements always occupy the contiguous prefix [0, size()).
+//  - Middle insert/erase preserve that live-prefix invariant by assignment-based shifting of
+//    already-live elements; only the tail grows or shrinks object lifetime.
 //  - Future maintainers must not treat the buffers as trivially relocatable byte arrays unless T's
 //    semantics truly permit it; bytewise movement would be wrong for many non-trivial element types.
 //
@@ -65,6 +78,8 @@ inline constexpr std::size_t ceil_div(std::size_t a, std::size_t b) noexcept {
 
 template<class T, class Allocator>
 inline constexpr std::size_t default_inline_bytes() noexcept {
+	// The default inline payload budget is chosen so the production-build object size stays aligned
+	// with std::vector<T, Allocator>. Debug-only invariant fields must not feed back into this policy.
 	constexpr std::size_t vec_sz = sizeof(std::vector<T, Allocator>);
 	if constexpr (vec_sz <= 2 * sizeof(void*)) {
 		return 0;
@@ -163,7 +178,16 @@ struct heap_block {
 	static_assert(alignof(T) <= alignof(std::max_align_t), "sso_vector requires T alignment compatible with byte-rebound allocator");
 	mutable ownership_header_bits ownership_header;
 	std::size_t capacity;
+#ifndef NDEBUG
+	std::size_t live_count = 0;
+#endif
 	alignas(T) std::byte data[sizeof(T)];
+
+	~heap_block() {
+#ifndef NDEBUG
+		assert(live_count == 0 && "heap_block should not be destroyed while it still owns live elements");
+#endif
+	}
 };
 
 template<class T>
@@ -293,9 +317,10 @@ public:
 /// - alternative 0: inline storage for up to `N` elements
 /// - alternative 1: heap block with a shared reference-counted header
 ///
+/// The intent is "vector-like for intended workloads", not "internally identical to std::vector".
 /// Non-const element access uses proxy references/iterators so ordinary indexing does not
-/// immediately force a mutable raw pointer. Mutable `data()` explicitly clears shareability and
-/// ensures unique ownership before returning `T*`.
+/// immediately force a mutable raw pointer. Mutable `data()` is the explicit pointer-escape path:
+/// it detaches first, then clears future shareability before returning `T*`.
 template<typename T, std::size_t N, typename Allocator>
 class sso_vector {
 public:
@@ -316,8 +341,17 @@ private:
 	/// @brief Inline storage alternative used while `size() <= N`.
 	struct inline_storage {
 		alignas(T) std::byte buf[sizeof(T) * N]{};
+#ifndef NDEBUG
+		size_type live_count = 0;
+#endif
 		T* data() noexcept { return std::launder(reinterpret_cast<T*>(buf)); }
 		const T* data() const noexcept { return std::launder(reinterpret_cast<const T*>(buf)); }
+
+		~inline_storage() {
+#ifndef NDEBUG
+			assert(live_count == 0 && "inline_storage should not be destroyed while it still owns live elements");
+#endif
+		}
 	};
 
 	/// @brief Heap storage alternative pointing at the shared heap block.
@@ -382,68 +416,198 @@ private:
 		return is_inline_impl() ? inline_storage_impl().data() : heap_storage_impl().data();
 	}
 
+#ifndef NDEBUG
+	template<typename StorageOwner>
+	static size_type& debug_live_count_ref(StorageOwner& owner) noexcept {
+		return owner.live_count;
+	}
+
+	template<typename StorageOwner>
+	static const size_type& debug_live_count_ref(const StorageOwner& owner) noexcept {
+		return owner.live_count;
+	}
+
+	template<typename StorageOwner>
+	static void debug_assert_construct_at(const StorageOwner& owner, size_type index) noexcept {
+		assert(index == debug_live_count_ref(owner) && "new lifetimes should extend the live prefix at the end");
+	}
+
+	template<typename StorageOwner>
+	static void debug_note_construct_at(StorageOwner& owner) noexcept {
+		++debug_live_count_ref(owner);
+	}
+
+	template<typename StorageOwner>
+	static void debug_assert_destroy_at(const StorageOwner& owner, size_type index) noexcept {
+		assert(debug_live_count_ref(owner) > 0 && "destroy requires at least one live element");
+		assert(index + 1 == debug_live_count_ref(owner) && "lifetimes should be destroyed from the end of the live prefix");
+	}
+
+	template<typename StorageOwner>
+	static void debug_note_destroy_at(StorageOwner& owner) noexcept {
+		--debug_live_count_ref(owner);
+	}
+
+	template<typename StorageOwner>
+	static void debug_assert_overwrite_at(const StorageOwner& owner, size_type index) noexcept {
+		assert(index < debug_live_count_ref(owner) && "overwrite should target an already-live element");
+	}
+
+	template<typename StorageOwner>
+	static void debug_assert_shift_right(const StorageOwner& owner, size_type first, size_type last) noexcept {
+		assert(first <= last && "shift_right range should be ordered");
+		assert(last < debug_live_count_ref(owner) && "shift_right should stay within the live prefix");
+	}
+
+	template<typename StorageOwner>
+	static void debug_assert_shift_left(const StorageOwner& owner, size_type first, size_type last, size_type count) noexcept {
+		assert(first <= last && "shift_left range should be ordered");
+		assert(count <= last - first && "shift_left count should fit inside the live range");
+		assert(last <= debug_live_count_ref(owner) && "shift_left should stay within the live prefix");
+	}
+#else
+	template<typename StorageOwner>
+	static void debug_assert_construct_at(const StorageOwner&, size_type) noexcept {}
+	template<typename StorageOwner>
+	static void debug_note_construct_at(StorageOwner&) noexcept {}
+	template<typename StorageOwner>
+	static void debug_assert_destroy_at(const StorageOwner&, size_type) noexcept {}
+	template<typename StorageOwner>
+	static void debug_note_destroy_at(StorageOwner&) noexcept {}
+	template<typename StorageOwner>
+	static void debug_assert_overwrite_at(const StorageOwner&, size_type) noexcept {}
+	template<typename StorageOwner>
+	static void debug_assert_shift_right(const StorageOwner&, size_type, size_type) noexcept {}
+	template<typename StorageOwner>
+	static void debug_assert_shift_left(const StorageOwner&, size_type, size_type, size_type) noexcept {}
+#endif
+
+	/// @brief Internal mutation model.
+	/// @details Live elements must always occupy the contiguous prefix `[0, live_count)`.
+	///          New lifetimes extend that prefix only at the end; destruction shrinks it only from
+	///          the end. Overwrites and shifts operate only on already-live elements after detach /
+	///          uniqueness has been established. This keeps the COW/shareability policy centralized
+	///          while still allowing bulk loops to use raw pointers once write-safety is known.
+	const T& cref_at_unchecked(size_type index) const noexcept {
+		assert(index < size_impl() && "sso_vector index should be in range");
+		return data_const_impl()[index];
+	}
+
+	T& ref_at_unchecked(size_type index) noexcept {
+		assert(index < size_impl() && "sso_vector index should be in range");
+		return data_mut_no_cow_impl()[index];
+	}
+
+	template<class U>
+	void set_at(size_type index, U&& value) {
+		assert(index < size_impl() && "sso_vector set_at index should be in range");
+		ensure_mutable_heap_impl();
+		if (is_inline_impl()) {
+			overwrite_at_impl(inline_storage_impl(), inline_storage_impl().data(), index, std::forward<U>(value));
+		} else {
+			overwrite_at_impl(*heap_storage_impl().block, heap_storage_impl().data(), index, std::forward<U>(value));
+		}
+	}
+
+	template<typename StorageOwner, class U>
+	void overwrite_at_impl(StorageOwner& owner, T* data, size_type index, U&& value) {
+		debug_assert_overwrite_at(owner, index);
+		data[index] = std::forward<U>(value);
+	}
+
+	template<typename StorageOwner, class... Args>
+	void construct_at_impl(StorageOwner& owner, T* data, size_type index, Args&&... args) {
+		debug_assert_construct_at(owner, index);
+		std::allocator_traits<Allocator>::construct(alloc_, data + index, std::forward<Args>(args)...);
+		debug_note_construct_at(owner);
+	}
+
+	template<typename StorageOwner>
+	void destroy_at_impl(StorageOwner& owner, T* data, size_type index) noexcept {
+		debug_assert_destroy_at(owner, index);
+		std::allocator_traits<Allocator>::destroy(alloc_, data + index);
+		debug_note_destroy_at(owner);
+	}
+
+	template<typename StorageOwner>
+	void shift_right_assign_impl(StorageOwner& owner, T* data, size_type first, size_type last) {
+		debug_assert_shift_right(owner, first, last);
+		for (size_type i = last; i > first + 1; --i) {
+			overwrite_at_impl(owner, data, i - 1, std::move_if_noexcept(data[i - 2]));
+		}
+	}
+
+	template<typename StorageOwner>
+	void shift_left_assign_impl(StorageOwner& owner, T* data, size_type first, size_type last, size_type count) {
+		debug_assert_shift_left(owner, first, last, count);
+		for (size_type i = first; i + count < last; ++i) {
+			overwrite_at_impl(owner, data, i, std::move_if_noexcept(data[i + count]));
+		}
+	}
+
 	// ------------------------ lifetime helpers ------------------------
 
 	/// @brief Destroys a half-open element range `[first, last)`.
-	void destroy_range_impl(T* first, T* last) noexcept {
-		for (; first != last; ++first) {
-			std::allocator_traits<Allocator>::destroy(alloc_, first);
+	template<typename StorageOwner>
+	void destroy_range_impl(StorageOwner& owner, T* data, size_type first, size_type last) noexcept {
+		while (last > first) {
+			--last;
+			destroy_at_impl(owner, data, last);
 		}
 	}
 
 	/// @brief Copy-constructs `n` elements into uninitialized storage.
-	void copy_construct_range_impl(T* dst, const T* src, size_type n) {
+	template<typename StorageOwner>
+	void copy_construct_range_impl(StorageOwner& owner, T* dst, const T* src, size_type n) {
 		size_type constructed = 0;
 		try {
 			for (; constructed < n; ++constructed) {
-				std::allocator_traits<Allocator>::construct(alloc_, dst + constructed, src[constructed]);
+				construct_at_impl(owner, dst, constructed, src[constructed]);
 			}
 		} catch (...) {
-			destroy_range_impl(dst, dst + constructed);
+			destroy_range_impl(owner, dst, 0, constructed);
 			throw;
 		}
 	}
 
 	/// @brief Move-constructs `n` elements into uninitialized storage using `move_if_noexcept`.
-	void move_construct_range_impl(T* dst, T* src, size_type n) {
+	template<typename StorageOwner>
+	void move_construct_range_impl(StorageOwner& owner, T* dst, T* src, size_type n) {
 		size_type constructed = 0;
 		try {
 			for (; constructed < n; ++constructed) {
-				std::allocator_traits<Allocator>::construct(
-					alloc_, dst + constructed, std::move_if_noexcept(src[constructed]));
+				construct_at_impl(owner, dst, constructed, std::move_if_noexcept(src[constructed]));
 			}
 		} catch (...) {
-			destroy_range_impl(dst, dst + constructed);
+			destroy_range_impl(owner, dst, 0, constructed);
 			throw;
 		}
 	}
 
 	/// @brief Default-constructs appended elements in the half-open range `[from, to)`.
-	void default_construct_appended_impl(T* d, size_type from, size_type to) {
+	template<typename StorageOwner>
+	void default_construct_appended_impl(StorageOwner& owner, T* d, size_type from, size_type to) {
 		size_type constructed = 0;
 		try {
 			for (size_type i = from; i < to; ++i, ++constructed) {
-				std::allocator_traits<Allocator>::construct(alloc_, d + i);
+				construct_at_impl(owner, d, i);
 			}
 		} catch (...) {
-			for (size_type i = 0; i < constructed; ++i) {
-				std::allocator_traits<Allocator>::destroy(alloc_, d + (from + i));
-			}
+			destroy_range_impl(owner, d, from, from + constructed);
 			throw;
 		}
 	}
 
 	/// @brief Copy-constructs appended elements initialized from `value` in `[from, to)`.
-	void fill_construct_appended_impl(T* d, size_type from, size_type to, const T& value) {
+	template<typename StorageOwner>
+	void fill_construct_appended_impl(StorageOwner& owner, T* d, size_type from, size_type to, const T& value) {
 		size_type constructed = 0;
 		try {
 			for (size_type i = from; i < to; ++i, ++constructed) {
-				std::allocator_traits<Allocator>::construct(alloc_, d + i, value);
+				construct_at_impl(owner, d, i, value);
 			}
 		} catch (...) {
-			for (size_type i = 0; i < constructed; ++i) {
-				std::allocator_traits<Allocator>::destroy(alloc_, d + (from + i));
-			}
+			destroy_range_impl(owner, d, from, from + constructed);
 			throw;
 		}
 	}
@@ -457,9 +621,7 @@ private:
 		if (!b) return;
 		if (sso_vector_detail::release_shared_owner(b)) {
 			T* d = sso_vector_detail::block_data(b);
-			for (size_type i = 0; i < constructed; ++i) {
-				std::allocator_traits<Allocator>::destroy(alloc_, d + i);
-			}
+			destroy_range_impl(*b, d, 0, constructed);
 			sso_vector_detail::deallocate_block(b, alloc_);
 		}
 	}
@@ -500,7 +662,7 @@ private:
 		const T* src = sso_vector_detail::block_data(old_block);
 		if constexpr (std::is_copy_constructible_v<T>) {
 			try {
-				copy_construct_range_impl(dst, src, n);
+				copy_construct_range_impl(*new_block, dst, src, n);
 			} catch (...) {
 				sso_vector_detail::deallocate_block(new_block, alloc_);
 				throw;
@@ -519,7 +681,7 @@ private:
 	void reset_storage_impl() noexcept {
 		const size_type n = size_impl();
 		if (is_inline_impl()) {
-			destroy_range_impl(inline_storage_impl().data(), inline_storage_impl().data() + n);
+			destroy_range_impl(inline_storage_impl(), inline_storage_impl().data(), 0, n);
 			set_size_impl(0);
 			return;
 		}
@@ -562,9 +724,9 @@ private:
 			T* dst = inline_storage_impl().data();
 			try {
 				if (can_move_from_source) {
-					move_construct_range_impl(dst, other.data_mut_no_cow_impl(), n);
+					move_construct_range_impl(inline_storage_impl(), dst, other.data_mut_no_cow_impl(), n);
 				} else {
-					copy_construct_range_impl(dst, other.data_const_impl(), n);
+					copy_construct_range_impl(inline_storage_impl(), dst, other.data_const_impl(), n);
 				}
 			} catch (...) {
 				set_size_impl(0);
@@ -580,9 +742,9 @@ private:
 		T* dst = sso_vector_detail::block_data(new_block);
 		try {
 			if (can_move_from_source) {
-				move_construct_range_impl(dst, other.data_mut_no_cow_impl(), n);
+				move_construct_range_impl(*new_block, dst, other.data_mut_no_cow_impl(), n);
 			} else {
-				copy_construct_range_impl(dst, other.data_const_impl(), n);
+				copy_construct_range_impl(*new_block, dst, other.data_const_impl(), n);
 			}
 		} catch (...) {
 			sso_vector_detail::deallocate_block(new_block, alloc_);
@@ -605,13 +767,13 @@ private:
 			T* dst = inline_storage_impl().data();
 			T* src = other.inline_storage_impl().data();
 			try {
-				move_construct_range_impl(dst, src, n);
+				move_construct_range_impl(inline_storage_impl(), dst, src, n);
 			} catch (...) {
 				set_size_impl(0);
 				throw;
 			}
 			set_size_impl(n);
-			destroy_range_impl(src, src + n);
+			destroy_range_impl(other.inline_storage_impl(), src, 0, n);
 			other.set_size_impl(0);
 			return;
 		}
@@ -637,13 +799,13 @@ private:
 		T* src = inline_storage_impl().data();
 		const size_type n = size_impl();
 		try {
-			move_construct_range_impl(dst, src, n);
+			move_construct_range_impl(*b, dst, src, n);
 		} catch (...) {
 			sso_vector_detail::deallocate_block(b, alloc_);
 			throw;
 		}
 
-		destroy_range_impl(src, src + n);
+		destroy_range_impl(inline_storage_impl(), src, 0, n);
 
 		heap_storage h{};
 		h.block = b;
@@ -667,13 +829,13 @@ private:
 		T* dst = sso_vector_detail::block_data(new_block);
 		T* src = sso_vector_detail::block_data(old_block);
 		try {
-			move_construct_range_impl(dst, src, n);
+			move_construct_range_impl(*new_block, dst, src, n);
 		} catch (...) {
 			sso_vector_detail::deallocate_block(new_block, alloc_);
 			throw;
 		}
 
-		destroy_range_impl(src, src + n);
+		destroy_range_impl(*old_block, src, 0, n);
 		sso_vector_detail::deallocate_block(old_block, alloc_);
 
 		h.block = new_block;
@@ -722,7 +884,7 @@ private:
 			T* dst = inline_storage_impl().data();
 			const T* src = other.inline_storage_impl().data();
 			try {
-				copy_construct_range_impl(dst, src, other.size());
+				copy_construct_range_impl(inline_storage_impl(), dst, src, other.size());
 			} catch (...) {
 				set_size_impl(0);
 				throw;
@@ -745,7 +907,7 @@ private:
 		T* dst = sso_vector_detail::block_data(nb);
 		const T* src = sso_vector_detail::block_data(b);
 		try {
-			copy_construct_range_impl(dst, src, other.size());
+			copy_construct_range_impl(*nb, dst, src, other.size());
 		} catch (...) {
 			sso_vector_detail::deallocate_block(nb, alloc_);
 			throw;
@@ -766,7 +928,7 @@ private:
 		}
 
 		if (is_inline_impl()) {
-			destroy_range_impl(inline_storage_impl().data(), inline_storage_impl().data() + n);
+			destroy_range_impl(inline_storage_impl(), inline_storage_impl().data(), 0, n);
 			set_size_impl(0);
 			return;
 		}
@@ -779,7 +941,7 @@ private:
 			return;
 		}
 
-		destroy_range_impl(heap_storage_impl().data(), heap_storage_impl().data() + n);
+		destroy_range_impl(*heap_storage_impl().block, heap_storage_impl().data(), 0, n);
 		set_size_impl(0);
 	}
 
@@ -805,7 +967,11 @@ private:
 		ensure_capacity_impl(n + 1);
 		ensure_mutable_heap_impl();
 		T* d = data_mut_no_cow_impl();
-		std::allocator_traits<Allocator>::construct(alloc_, d + n, std::forward<Args>(args)...);
+		if (is_inline_impl()) {
+			construct_at_impl(inline_storage_impl(), d, n, std::forward<Args>(args)...);
+		} else {
+			construct_at_impl(*heap_storage_impl().block, d, n, std::forward<Args>(args)...);
+		}
 		set_size_impl(n + 1);
 		return reference(this, n);
 	}
@@ -816,7 +982,11 @@ private:
 		if (n == 0) return;
 		ensure_mutable_heap_impl();
 		T* d = data_mut_no_cow_impl();
-		std::allocator_traits<Allocator>::destroy(alloc_, d + (n - 1));
+		if (is_inline_impl()) {
+			destroy_at_impl(inline_storage_impl(), d, n - 1);
+		} else {
+			destroy_at_impl(*heap_storage_impl().block, d, n - 1);
+		}
 		set_size_impl(n - 1);
 	}
 
@@ -828,16 +998,16 @@ private:
 		if (count < n) {
 			ensure_mutable_heap_impl();
 			T* d = data_mut_no_cow_impl();
-			for (size_type i = count; i < n; ++i) {
-				std::allocator_traits<Allocator>::destroy(alloc_, d + i);
-			}
+			if (is_inline_impl()) destroy_range_impl(inline_storage_impl(), d, count, n);
+			else destroy_range_impl(*heap_storage_impl().block, d, count, n);
 			set_size_impl(count);
 			return;
 		}
 
 		ensure_capacity_impl(count);
 		ensure_mutable_heap_impl();
-		default_construct_appended_impl(data_mut_no_cow_impl(), n, count);
+		if (is_inline_impl()) default_construct_appended_impl(inline_storage_impl(), data_mut_no_cow_impl(), n, count);
+		else default_construct_appended_impl(*heap_storage_impl().block, data_mut_no_cow_impl(), n, count);
 		set_size_impl(count);
 	}
 
@@ -849,16 +1019,16 @@ private:
 		if (count < n) {
 			ensure_mutable_heap_impl();
 			T* d = data_mut_no_cow_impl();
-			for (size_type i = count; i < n; ++i) {
-				std::allocator_traits<Allocator>::destroy(alloc_, d + i);
-			}
+			if (is_inline_impl()) destroy_range_impl(inline_storage_impl(), d, count, n);
+			else destroy_range_impl(*heap_storage_impl().block, d, count, n);
 			set_size_impl(count);
 			return;
 		}
 
 		ensure_capacity_impl(count);
 		ensure_mutable_heap_impl();
-		fill_construct_appended_impl(data_mut_no_cow_impl(), n, count, value);
+		if (is_inline_impl()) fill_construct_appended_impl(inline_storage_impl(), data_mut_no_cow_impl(), n, count, value);
+		else fill_construct_appended_impl(*heap_storage_impl().block, data_mut_no_cow_impl(), n, count, value);
 		set_size_impl(count);
 	}
 
@@ -872,13 +1042,32 @@ private:
 		size_type constructed = 0;
 		try {
 			for (; constructed < count; ++constructed) {
-				std::allocator_traits<Allocator>::construct(alloc_, d + constructed, value);
+				if (is_inline_impl()) construct_at_impl(inline_storage_impl(), d, constructed, value);
+				else construct_at_impl(*heap_storage_impl().block, d, constructed, value);
 			}
 		} catch (...) {
-			destroy_range_impl(d, d + constructed);
+			if (is_inline_impl()) destroy_range_impl(inline_storage_impl(), d, 0, constructed);
+			else destroy_range_impl(*heap_storage_impl().block, d, 0, constructed);
 			throw;
 		}
 		set_size_impl(count);
+	}
+
+	template<typename InputIt>
+	void assign_range_impl(InputIt first, InputIt last) {
+		// Build privately, then publish in one step. This intentionally keeps allocator/COW and failure
+		// behavior easy to review. Forward-or-better iterators get a single reserve; input iterators
+		// still work, but grow incrementally inside the temporary.
+		sso_vector rebuilt(alloc_);
+		using category = typename std::iterator_traits<InputIt>::iterator_category;
+		if constexpr (std::derived_from<category, std::forward_iterator_tag>) {
+			rebuilt.reserve(static_cast<size_type>(std::distance(first, last)));
+		}
+		for (; first != last; ++first) {
+			rebuilt.emplace_back(*first);
+		}
+		reset_storage_impl();
+		move_from_impl(std::move(rebuilt));
 	}
 
 	/// @brief Attempts to discard excess capacity while preserving contents.
@@ -896,12 +1085,12 @@ private:
 			inline_storage ni{};
 			T* dst = ni.data();
 			T* src = heap_storage_impl().data();
-			move_construct_range_impl(dst, src, n);
+			move_construct_range_impl(ni, dst, src, n);
 			clear_impl();
 			release_heap_impl();
 			state_.template emplace<0>();
-			move_construct_range_impl(inline_storage_impl().data(), dst, n);
-			destroy_range_impl(dst, dst + n);
+			move_construct_range_impl(inline_storage_impl(), inline_storage_impl().data(), dst, n);
+			destroy_range_impl(ni, dst, 0, n);
 			set_size_impl(n);
 			return;
 		}
@@ -919,17 +1108,20 @@ private:
 		ensure_mutable_heap_impl();
 		T* d = data_mut_no_cow_impl();
 		if (idx == n) {
-			std::allocator_traits<Allocator>::construct(alloc_, d + n, std::forward<Args>(args)...);
+			if (is_inline_impl()) construct_at_impl(inline_storage_impl(), d, n, std::forward<Args>(args)...);
+			else construct_at_impl(*heap_storage_impl().block, d, n, std::forward<Args>(args)...);
 		} else {
-			std::allocator_traits<Allocator>::construct(alloc_, d + n, std::move_if_noexcept(d[n - 1]));
+			if (is_inline_impl()) construct_at_impl(inline_storage_impl(), d, n, std::move_if_noexcept(d[n - 1]));
+			else construct_at_impl(*heap_storage_impl().block, d, n, std::move_if_noexcept(d[n - 1]));
 			try {
-				for (size_type i = n - 1; i > idx; --i) {
-					d[i] = std::move_if_noexcept(d[i - 1]);
-				}
+				if (is_inline_impl()) shift_right_assign_impl(inline_storage_impl(), d, idx, n);
+				else shift_right_assign_impl(*heap_storage_impl().block, d, idx, n);
 				T tmp(std::forward<Args>(args)...);
-				d[idx] = std::move(tmp);
+				if (is_inline_impl()) overwrite_at_impl(inline_storage_impl(), d, idx, std::move(tmp));
+				else overwrite_at_impl(*heap_storage_impl().block, d, idx, std::move(tmp));
 			} catch (...) {
-				std::allocator_traits<Allocator>::destroy(alloc_, d + n);
+				if (is_inline_impl()) destroy_at_impl(inline_storage_impl(), d, n);
+				else destroy_at_impl(*heap_storage_impl().block, d, n);
 				throw;
 			}
 		}
@@ -943,10 +1135,13 @@ private:
 		if (idx >= n) return end();
 		ensure_mutable_heap_impl();
 		T* d = data_mut_no_cow_impl();
-		for (size_type i = idx; i + 1 < n; ++i) {
-			d[i] = std::move_if_noexcept(d[i + 1]);
+		if (is_inline_impl()) {
+			shift_left_assign_impl(inline_storage_impl(), d, idx, n, 1);
+			destroy_at_impl(inline_storage_impl(), d, n - 1);
+		} else {
+			shift_left_assign_impl(*heap_storage_impl().block, d, idx, n, 1);
+			destroy_at_impl(*heap_storage_impl().block, d, n - 1);
 		}
-		std::allocator_traits<Allocator>::destroy(alloc_, d + (n - 1));
 		set_size_impl(n - 1);
 		return iterator(this, idx);
 	}
@@ -958,14 +1153,70 @@ private:
 		const size_type count = idx_last > n ? (n - idx_first) : (idx_last - idx_first);
 		ensure_mutable_heap_impl();
 		T* d = data_mut_no_cow_impl();
-		for (size_type i = idx_first; i + count < n; ++i) {
-			d[i] = std::move_if_noexcept(d[i + count]);
-		}
-		for (size_type i = n - count; i < n; ++i) {
-			std::allocator_traits<Allocator>::destroy(alloc_, d + i);
-		}
+		if (is_inline_impl()) shift_left_assign_impl(inline_storage_impl(), d, idx_first, n, count);
+		else shift_left_assign_impl(*heap_storage_impl().block, d, idx_first, n, count);
+		if (is_inline_impl()) destroy_range_impl(inline_storage_impl(), d, n - count, n);
+		else destroy_range_impl(*heap_storage_impl().block, d, n - count, n);
 		set_size_impl(n - count);
 		return iterator(this, idx_first);
+	}
+
+	template<typename AppendInserted>
+	iterator_proxy rebuild_with_inserted_impl(size_type idx, size_type inserted_count, AppendInserted&& append_inserted) {
+		const size_type n = size_impl();
+		assert(idx <= n);
+
+		// Rebuild-through-temporary keeps the mutation path allocator-correct and COW-reviewable for the
+		// more complex insert forms. The live-prefix invariant is maintained entirely within `rebuilt`
+		// until publication.
+		sso_vector rebuilt(alloc_);
+		rebuilt.reserve(n + inserted_count);
+		for (size_type i = 0; i < idx; ++i) {
+			rebuilt.emplace_back(cref_at_unchecked(i));
+		}
+		append_inserted(rebuilt);
+		for (size_type i = idx; i < n; ++i) {
+			rebuilt.emplace_back(cref_at_unchecked(i));
+		}
+
+		reset_storage_impl();
+		move_from_impl(std::move(rebuilt));
+		return iterator(this, idx);
+	}
+
+	iterator_proxy insert_fill_impl(size_type idx, size_type count, const T& value) {
+		if (count == 0) return iterator(this, idx);
+		// This path intentionally rebuilds through a temporary. That keeps allocator/COW publication easy
+		// to reason about and avoids layering a second, more complex in-place bulk-insert algorithm on top
+		// of the live-prefix helper model.
+		return rebuild_with_inserted_impl(idx, count, [&](sso_vector& rebuilt) {
+			for (size_type i = 0; i < count; ++i) {
+				rebuilt.emplace_back(value);
+			}
+		});
+	}
+
+	template<typename InputIt>
+	iterator_proxy insert_range_impl(size_type idx, InputIt first, InputIt last) {
+		using category = typename std::iterator_traits<InputIt>::iterator_category;
+		if constexpr (std::derived_from<category, std::forward_iterator_tag>) {
+			const size_type count = static_cast<size_type>(std::distance(first, last));
+			return rebuild_with_inserted_impl(idx, count, [&](sso_vector& rebuilt) {
+				for (; first != last; ++first) {
+					rebuilt.emplace_back(*first);
+				}
+			});
+		} else {
+			std::vector<T, Allocator> buffered(alloc_);
+			for (; first != last; ++first) {
+				buffered.push_back(*first);
+			}
+			return rebuild_with_inserted_impl(idx, static_cast<size_type>(buffered.size()), [&](sso_vector& rebuilt) {
+				for (auto& value : buffered) {
+					rebuilt.emplace_back(std::move(value));
+				}
+			});
+		}
 	}
 
 public:
@@ -990,17 +1241,15 @@ public:
 
 		// Read access (no detach)
 		/// @brief Reads the referenced element by value without detaching shared storage.
-		operator T() const { return owner_->data_const_impl()[index_]; }
+		operator T() const { return owner_->cref_at_unchecked(index_); }
 
 		// Write access detaches shared heap storage first, but does not clear shareability on its own.
 		reference_proxy& operator=(const T& v) {
-			owner_->ensure_mutable_heap_impl();
-			owner_->data_mut_no_cow_impl()[index_] = v;
+			owner_->set_at(index_, v);
 			return *this;
 		}
 		reference_proxy& operator=(T&& v) {
-			owner_->ensure_mutable_heap_impl();
-			owner_->data_mut_no_cow_impl()[index_] = std::move(v);
+			owner_->set_at(index_, std::move(v));
 			return *this;
 		}
 
@@ -1020,6 +1269,7 @@ public:
 	 *
 	 * This matches the "proxy iterator" requirement: non-const iteration supports
 	 * element assignment via proxy without handing out raw non-const T*.
+	 * It is intentionally not a contiguous iterator.
 	 */
 	class iterator_proxy {
 	public:
@@ -1085,7 +1335,7 @@ public:
 
 	// const iterators are raw pointers (like std::vector)
 	using const_iterator = const T*;
-	// non-const iterators are proxy iterators
+	// non-const iterators are proxy iterators: random-access but intentionally not contiguous
 	using iterator = iterator_proxy;
 
 	using reverse_iterator = std::reverse_iterator<iterator>;
@@ -1208,8 +1458,14 @@ public:
 	/// @details Reading through the proxy does not detach. Writing through it detaches shared heap storage.
 	///          This differs intentionally from `std::vector<T>::operator[]`, whose mutable overload
 	///          returns `T&` directly.
-	reference operator[](size_type pos) noexcept { return reference(this, pos); }
-	const_reference operator[](size_type pos) const noexcept { return data_const_impl()[pos]; }
+	reference operator[](size_type pos) noexcept {
+		assert(pos < size() && "sso_vector::operator[] should be in range");
+		return reference(this, pos);
+	}
+	const_reference operator[](size_type pos) const noexcept {
+		assert(pos < size() && "sso_vector::operator[] should be in range");
+		return cref_at_unchecked(pos);
+	}
 
 	const_reference front() const noexcept { return data_const_impl()[0]; }
 	reference front() noexcept { return (*this)[0]; }
@@ -1220,7 +1476,9 @@ public:
 	const_pointer data() const noexcept { return data_const_impl(); }
 
 	/// @brief Returns mutable contiguous storage.
-	/// @warning This explicitly clears shareability and ensures uniqueness before handing out `T*`.
+	/// @warning This explicitly privatizes heap storage before handing out `T*`.
+	///          Unlike proxy-based element mutation, raw mutable access also disables future sharing
+	///          for the current heap block because external writes can no longer be tracked.
 	pointer data() {
 		privatize_heap_impl();
 		return data_mut_no_cow_impl();
@@ -1310,8 +1568,7 @@ public:
 	/// @brief Replaces the contents from an input range.
 	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	void assign(InputIt first, InputIt last) {
-		clear_impl();
-		for (; first != last; ++first) push_back(*first);
+		assign_range_impl(first, last);
 	}
 
 	void assign(std::initializer_list<T> init) { assign(init.begin(), init.end()); }
@@ -1328,21 +1585,12 @@ public:
 	iterator insert(iterator pos, const T& value) { return emplace(pos, value); }
 	iterator insert(iterator pos, T&& value) { return emplace(pos, std::move(value)); }
 	iterator insert(iterator pos, size_type count, const T& value) {
-		const size_type idx = pos.index();
-		for (size_type i = 0; i < count; ++i) {
-			(void)insert(iterator(this, idx + i), value);
-		}
-		return iterator(this, idx);
+		return insert_fill_impl(pos.index(), count, value);
 	}
 
 	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	iterator insert(iterator pos, InputIt first, InputIt last) {
-		const size_type idx = pos.index();
-		size_type inserted = 0;
-		for (; first != last; ++first, ++inserted) {
-			(void)insert(iterator(this, idx + inserted), *first);
-		}
-		return iterator(this, idx);
+		return insert_range_impl(pos.index(), first, last);
 	}
 	iterator insert(iterator pos, std::initializer_list<T> ilist) {
 		return insert(pos, ilist.begin(), ilist.end());
@@ -1410,8 +1658,8 @@ public:
 		if (is_inline_impl() && other.is_heap_impl()) {
 			inline_storage tmp{};
 			const size_type this_size = size_impl();
-			move_construct_range_impl(tmp.data(), inline_storage_impl().data(), this_size);
-			destroy_range_impl(inline_storage_impl().data(), inline_storage_impl().data() + this_size);
+			move_construct_range_impl(tmp, tmp.data(), inline_storage_impl().data(), this_size);
+			destroy_range_impl(inline_storage_impl(), inline_storage_impl().data(), 0, this_size);
 
 			auto* other_block = other.heap_storage_impl().block;
 			const size_type other_size = other.size_impl();
@@ -1421,8 +1669,8 @@ public:
 			set_size_impl(other_size);
 
 			other.state_.template emplace<0>();
-			move_construct_range_impl(other.inline_storage_impl().data(), tmp.data(), this_size);
-			destroy_range_impl(tmp.data(), tmp.data() + this_size);
+			move_construct_range_impl(other.inline_storage_impl(), other.inline_storage_impl().data(), tmp.data(), this_size);
+			destroy_range_impl(tmp, tmp.data(), 0, this_size);
 			other.set_size_impl(this_size);
 			return;
 		}

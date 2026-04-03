@@ -40,14 +40,16 @@
 
 #ifndef BITFIELD_PACK_ASSERT
 /// @brief Assertion hook.
-/// Override in unit tests to throw, ignore, etc.
+/// @details Override before including this header if tests or embedding code need a different
+///          assertion behavior. Normal builds inherit plain `assert(...)`.
 #define BITFIELD_PACK_ASSERT(expr) assert(expr)
 #endif
 
 #ifndef BITFIELD_PACK_NOEXCEPT
 /// @brief `noexcept` annotation hook.
 /// @details Tests may override this to empty so assertion hooks can throw through
-///          code paths that are `noexcept` in normal builds.
+///          code paths that are `noexcept` in normal builds. If not overridden, the header
+///          uses ordinary `noexcept`.
 #define BITFIELD_PACK_NOEXCEPT noexcept
 #endif // ndef BITFIELD_PACK_NOEXCEPT
 
