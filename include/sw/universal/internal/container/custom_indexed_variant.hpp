@@ -231,6 +231,14 @@ namespace custom_indexed_variant_detail {
 	struct all_copy_constructible : std::conjunction<std::is_copy_constructible<Ts>...> {};
 
 	template<typename... Ts>
+	struct all_copy_assignable_from_const_ref : std::conjunction<std::is_assignable<Ts&, const Ts&>...> {};
+
+	template<typename... Ts>
+	concept custom_indexed_variant_alternative_requirements =
+		all_copy_constructible<Ts...>::value &&
+		all_copy_assignable_from_const_ref<Ts...>::value;
+
+	template<typename... Ts>
 	struct all_move_constructible : std::conjunction<std::is_move_constructible<Ts>...> {};
 
 	template<typename... Ts>
@@ -608,6 +616,10 @@ template<template<std::size_t NTypes> class EncodedIndex, typename... Types>
 	requires detail::encoded_index_template_noexcept_api<EncodedIndex, sizeof...(Types)>
 class custom_indexed_variant {
 	static_assert(sizeof...(Types) > 0, "custom_indexed_variant must have at least one alternative");
+	static_assert(detail::all_copy_constructible<Types...>::value,
+		"custom_indexed_variant requires copy-constructible alternatives");
+	static_assert(detail::all_copy_assignable_from_const_ref<Types...>::value,
+		"custom_indexed_variant requires alternatives assignable from const same-type reference");
 	// Destroy-active paths are used during exception recovery and valueless transitions, so the variant
 	// requires alternative destruction to be non-throwing as a deliberate design constraint.
 	static_assert((std::is_nothrow_destructible_v<Types> && ...),

@@ -82,20 +82,19 @@ struct LiveCountedType {
 
 int LiveCountedType::live = 0;
 
-// Exercises paths that must succeed without copy construction.
-struct MoveOnly {
+struct CopyableDefault123 {
 	static int live;
 	int value;
-	MoveOnly() : value(123) { ++live; }
-	explicit MoveOnly(int v) : value(v) { ++live; }
-	MoveOnly(const MoveOnly&) = delete;
-	MoveOnly& operator=(const MoveOnly&) = delete;
-	MoveOnly(MoveOnly&& other) noexcept : value(other.value) { other.value = 0; ++live; }
-	MoveOnly& operator=(MoveOnly&& other) noexcept { value = other.value; other.value = 0; return *this; }
-	~MoveOnly() { --live; }
+	CopyableDefault123() : value(123) { ++live; }
+	explicit CopyableDefault123(int v) : value(v) { ++live; }
+	CopyableDefault123(const CopyableDefault123& other) : value(other.value) { ++live; }
+	CopyableDefault123(CopyableDefault123&& other) noexcept : value(other.value) { other.value = 0; ++live; }
+	CopyableDefault123& operator=(const CopyableDefault123& other) { value = other.value; return *this; }
+	CopyableDefault123& operator=(CopyableDefault123&& other) noexcept { value = other.value; other.value = 0; return *this; }
+	~CopyableDefault123() { --live; }
 };
 
-int MoveOnly::live = 0;
+int CopyableDefault123::live = 0;
 
 struct PotentiallyThrowingMove {
 	int value{0};
@@ -109,6 +108,22 @@ struct PotentiallyThrowingMove {
 		other.value = 0;
 		return *this;
 	}
+};
+
+struct NonCopyConstructible {
+	NonCopyConstructible() = default;
+	NonCopyConstructible(const NonCopyConstructible&) = delete;
+	NonCopyConstructible(NonCopyConstructible&&) = default;
+	NonCopyConstructible& operator=(const NonCopyConstructible&) = default;
+	NonCopyConstructible& operator=(NonCopyConstructible&&) = default;
+};
+
+struct NotAssignableFromConstRef {
+	NotAssignableFromConstRef() = default;
+	NotAssignableFromConstRef(const NotAssignableFromConstRef&) = default;
+	NotAssignableFromConstRef(NotAssignableFromConstRef&&) = default;
+	NotAssignableFromConstRef& operator=(const NotAssignableFromConstRef&) = delete;
+	NotAssignableFromConstRef& operator=(NotAssignableFromConstRef&&) = default;
 };
 
 // General-purpose exception probe used for vector-style operations.
@@ -760,6 +775,13 @@ static_assert(!std::is_nothrow_move_assignable_v<ThrowingMoveVec>,
 	"sso_vector move assignment must not overstate noexcept when element transfer may throw");
 static_assert(!noexcept(std::declval<ThrowingMoveVec&>().swap(std::declval<ThrowingMoveVec&>())),
 	"sso_vector swap must not overstate noexcept when element relocation may throw");
+static_assert(sw::universal::internal::sso_vector_detail::sso_vector_copy_constructible<int> &&
+              sw::universal::internal::sso_vector_detail::sso_vector_assignable_from_const_ref<int>,
+	"sso_vector should accept ordinary copyable/assignable value types");
+static_assert(!sw::universal::internal::sso_vector_detail::sso_vector_copy_constructible<NonCopyConstructible>,
+	"sso_vector should reject non-copy-constructible value types");
+static_assert(!sw::universal::internal::sso_vector_detail::sso_vector_assignable_from_const_ref<NotAssignableFromConstRef>,
+	"sso_vector should reject value types not assignable from const value_type&");
 
 // Convert any vector-like object into plain std::vector contents for parity comparison.
 template<typename Vec>
@@ -1190,17 +1212,17 @@ void run_vector_suite(const char* impl_name, int& failures) {
 	}
 
 	{
-		MoveOnly::live = 0;
-		VecDefaultAlloc<Vec, MoveOnly> v;
+		CopyableDefault123::live = 0;
+		VecDefaultAlloc<Vec, CopyableDefault123> v;
 		v.resize(3);
 		check(ctx, v.size() == 3, "resize default size");
 		check(ctx, v.data()[0].value == 123 && v.data()[1].value == 123 && v.data()[2].value == 123, "resize default values");
-		check(ctx, MoveOnly::live == 3, "resize default live count");
+		check(ctx, CopyableDefault123::live == 3, "resize default live count");
 		v.resize(1);
 		check(ctx, v.size() == 1, "resize shrink size");
-		check(ctx, MoveOnly::live == 1, "resize shrink live count");
+		check(ctx, CopyableDefault123::live == 1, "resize shrink live count");
 		v.clear();
-		check(ctx, MoveOnly::live == 0, "resize clear live count");
+		check(ctx, CopyableDefault123::live == 0, "resize clear live count");
 	}
 
 	{

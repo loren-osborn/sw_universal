@@ -70,6 +70,14 @@ namespace internal {
 
 namespace sso_vector_detail {
 
+template<class T>
+concept sso_vector_copy_constructible =
+	std::is_copy_constructible_v<T>;
+
+template<class T>
+concept sso_vector_assignable_from_const_ref =
+	std::is_assignable_v<T&, const T&>;
+
 // ------------------------ helpers ------------------------
 
 inline constexpr std::size_t ceil_div(std::size_t a, std::size_t b) noexcept {
@@ -327,6 +335,10 @@ template<typename T, std::size_t N, typename Allocator>
 class sso_vector {
 public:
 	static_assert(N > 0, "N==0 specialization should have been selected");
+	static_assert(sso_vector_detail::sso_vector_copy_constructible<T>,
+		"sso_vector requires copy-constructible value_type");
+	static_assert(sso_vector_detail::sso_vector_assignable_from_const_ref<T>,
+		"sso_vector requires value_type assignable from const value_type&");
 
 	using value_type = T;
 	using allocator_type = Allocator;
@@ -664,16 +676,11 @@ private:
 		auto* new_block = sso_vector_detail::allocate_block<T>(cap, alloc_);
 		T* dst = sso_vector_detail::block_data(new_block);
 		const T* src = sso_vector_detail::block_data(old_block);
-		if constexpr (std::is_copy_constructible_v<T>) {
-			try {
-				copy_construct_range_impl(*new_block, dst, src, n);
-			} catch (...) {
-				sso_vector_detail::deallocate_block(new_block, alloc_);
-				throw;
-			}
-		} else {
+		try {
+			copy_construct_range_impl(*new_block, dst, src, n);
+		} catch (...) {
 			sso_vector_detail::deallocate_block(new_block, alloc_);
-			throw std::logic_error("sso_vector: detaching shared storage requires copy-constructible value_type");
+			throw;
 		}
 
 		h.block = new_block;
