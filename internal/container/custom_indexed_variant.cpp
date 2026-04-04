@@ -101,8 +101,8 @@ struct ThrowBeforeDestroyType {
 		++live;
 	}
 
-	ThrowBeforeDestroyType(const ThrowBeforeDestroyType&) = delete;
-	ThrowBeforeDestroyType& operator=(const ThrowBeforeDestroyType&) = delete;
+	ThrowBeforeDestroyType(const ThrowBeforeDestroyType& other) : value(other.value) { ++live; }
+	ThrowBeforeDestroyType& operator=(const ThrowBeforeDestroyType& other) { value = other.value; return *this; }
 	ThrowBeforeDestroyType(ThrowBeforeDestroyType&& other) noexcept : value(other.value) { other.value = 0; ++live; }
 	ThrowBeforeDestroyType& operator=(ThrowBeforeDestroyType&& other) noexcept { value = other.value; other.value = 0; return *this; }
 	~ThrowBeforeDestroyType() { --live; }
@@ -794,6 +794,22 @@ struct NothrowMoveCtorThrowingMoveAssign {
 	}
 };
 
+struct NonCopyConstructibleAlt {
+	NonCopyConstructibleAlt() = default;
+	NonCopyConstructibleAlt(const NonCopyConstructibleAlt&) = delete;
+	NonCopyConstructibleAlt(NonCopyConstructibleAlt&&) = default;
+	NonCopyConstructibleAlt& operator=(const NonCopyConstructibleAlt&) = default;
+	NonCopyConstructibleAlt& operator=(NonCopyConstructibleAlt&&) = default;
+};
+
+struct NotAssignableFromConstRefAlt {
+	NotAssignableFromConstRefAlt() = default;
+	NotAssignableFromConstRefAlt(const NotAssignableFromConstRefAlt&) = default;
+	NotAssignableFromConstRefAlt(NotAssignableFromConstRefAlt&&) = default;
+	NotAssignableFromConstRefAlt& operator=(const NotAssignableFromConstRefAlt&) = delete;
+	NotAssignableFromConstRefAlt& operator=(NotAssignableFromConstRefAlt&&) = default;
+};
+
 static_assert(sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
 	sw::universal::internal::simple_encoded_index<4>>);
 static_assert(sw::universal::internal::custom_indexed_variant_detail::encoded_index_noexcept_api<
@@ -857,6 +873,14 @@ static_assert(custom_visit_const_rvalue_rejects_wrong_overloads<SidebandVariant<
 static_assert(!noexcept(std::declval<CustomVariant<NothrowMoveCtorThrowingMoveAssign>&>() =
                         std::declval<CustomVariant<NothrowMoveCtorThrowingMoveAssign>&&>()),
 	"custom_indexed_variant move assignment must account for same-alternative move assignment");
+static_assert(sw::universal::internal::custom_indexed_variant_detail::custom_indexed_variant_alternative_requirements<int, std::string>,
+	"custom_indexed_variant should accept ordinary copyable/assignable alternatives");
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::custom_indexed_variant_alternative_requirements<int, NonCopyConstructibleAlt>,
+	"custom_indexed_variant should reject non-copy-constructible alternatives");
+static_assert(!sw::universal::internal::custom_indexed_variant_detail::custom_indexed_variant_alternative_requirements<int, NotAssignableFromConstRefAlt>,
+	"custom_indexed_variant should reject alternatives not assignable from const same-type reference");
+static_assert(sw::universal::internal::custom_indexed_variant_detail::custom_indexed_variant_alternative_requirements<int, std::string>,
+	"custom_indexed_variant requirements should accept ordinary copyable/assignable alternatives");
 
 #ifdef UNIVERSAL_COMPILE_FAIL_TESTS
 struct ThrowingDestructorType {
