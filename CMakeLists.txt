@@ -1136,9 +1136,9 @@ add_subdirectory("static/tapered/posit1")
 add_subdirectory("static/tapered/posit1/specialized")
 endif(UNIVERSAL_BUILD_NUMBER_POSITS)
 
-if(UNIVERSAL_BUILD_NUMBER_POSITS OR UNIVERSAL_BUILD_NUMBER_QUIRES)
+if(UNIVERSAL_BUILD_NUMBER_QUIRES)
 add_subdirectory("static/quire")
-endif(UNIVERSAL_BUILD_NUMBER_POSITS OR UNIVERSAL_BUILD_NUMBER_QUIRES)
+endif(UNIVERSAL_BUILD_NUMBER_QUIRES)
 
 if(UNIVERSAL_BUILD_NUMBER_POSITOS)
 add_subdirectory("static/tapered/posito")
