@@ -1128,9 +1128,9 @@ if(UNIVERSAL_BUILD_NUMBER_POSITS)
 add_subdirectory("static/tapered/posit")
 endif(UNIVERSAL_BUILD_NUMBER_POSITS)
 
-if(UNIVERSAL_BUILD_NUMBER_POSITS OR UNIVERSAL_BUILD_NUMBER_QUIRES)
+if(UNIVERSAL_BUILD_NUMBER_QUIRES)
 add_subdirectory("static/quire")
-endif(UNIVERSAL_BUILD_NUMBER_POSITS OR UNIVERSAL_BUILD_NUMBER_QUIRES)
+endif(UNIVERSAL_BUILD_NUMBER_QUIRES)
 
 # posit1, posito, and valid are archived legacy designs (original posit + unum type III);
 # see ./archive and epic #1243. Their build wiring and options have been removed.
