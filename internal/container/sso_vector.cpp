@@ -20,6 +20,7 @@
 #include <initializer_list>
 #include <iostream>
 #include <iterator>
+#include <algorithm>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -124,6 +125,17 @@ struct NotAssignableFromConstRef {
 	NotAssignableFromConstRef(NotAssignableFromConstRef&&) = default;
 	NotAssignableFromConstRef& operator=(const NotAssignableFromConstRef&) = delete;
 	NotAssignableFromConstRef& operator=(NotAssignableFromConstRef&&) = default;
+};
+
+struct NotDefaultInitializable {
+	NotDefaultInitializable() = delete;
+	explicit NotDefaultInitializable(int v) : value(v) {}
+	NotDefaultInitializable(const NotDefaultInitializable&) = default;
+	NotDefaultInitializable(NotDefaultInitializable&&) = default;
+	NotDefaultInitializable& operator=(const NotDefaultInitializable&) = default;
+	NotDefaultInitializable& operator=(NotDefaultInitializable&&) = default;
+
+	int value = 0;
 };
 
 // General-purpose exception probe used for vector-style operations.
@@ -768,6 +780,16 @@ void assert_no_new_constructions_during_lifetime_tracked_interval(
 template<class T, class Alloc>
 using sso_vector_small = sw::universal::internal::sso_vector<T, 4, Alloc>;
 
+template<class V>
+concept has_sso_vector_count_constructor = requires {
+	V(std::size_t{3});
+};
+
+template<class V>
+concept has_sso_vector_resize_count = requires(V& v) {
+	v.resize(std::size_t{3});
+};
+
 using ThrowingMoveVec = sso_vector_small<PotentiallyThrowingMove, std::allocator<PotentiallyThrowingMove>>;
 static_assert(!std::is_nothrow_move_constructible_v<ThrowingMoveVec>,
 	"sso_vector move construction must not overstate noexcept when element transfer may throw");
@@ -782,6 +804,10 @@ static_assert(!sw::universal::internal::sso_vector_detail::sso_vector_copy_const
 	"sso_vector should reject non-copy-constructible value types");
 static_assert(!sw::universal::internal::sso_vector_detail::sso_vector_assignable_from_const_ref<NotAssignableFromConstRef>,
 	"sso_vector should reject value types not assignable from const value_type&");
+static_assert(!has_sso_vector_count_constructor<sso_vector_small<NotDefaultInitializable, std::allocator<NotDefaultInitializable>>>,
+	"sso_vector count construction should reject non-default-initializable value types");
+static_assert(!has_sso_vector_resize_count<sso_vector_small<NotDefaultInitializable, std::allocator<NotDefaultInitializable>>>,
+	"sso_vector resize(count) should reject non-default-initializable value types");
 
 // Convert any vector-like object into plain std::vector contents for parity comparison.
 template<typename Vec>
@@ -2548,6 +2574,46 @@ void run_sso_vector_allocator_and_iterator_suite(int& failures) {
 		check(ctx, static_cast<int>(*rit) == 40, "reverse iteration starts at last element");
 		++rit;
 		check(ctx, static_cast<int>(*rit) == 30, "reverse iteration advances correctly");
+	}
+
+	{
+		using Vec = sso_vector_small<int, std::allocator<int>>;
+		Vec v{7, 3, 5, 1, 9, 5};
+		check(ctx, std::distance(v.begin(), v.end()) == static_cast<std::ptrdiff_t>(v.size()), "iterator distance matches size");
+
+		auto begin = v.begin();
+		auto third = begin + 3;
+		check(ctx, third - begin == 3, "iterator subtraction reports same-container offset");
+		check(ctx, begin < third, "iterator ordering works within one container");
+		check(ctx, static_cast<int>(third[-1]) == 5, "iterator indexing uses random-access offsets");
+
+		std::sort(v.begin(), v.end());
+		check(ctx, materialize(v) == std::vector<int>({1, 3, 5, 5, 7, 9}), "std::sort works with proxy random-access iterators");
+
+		const auto lb = std::lower_bound(v.begin(), v.end(), 5);
+		check(ctx, lb != v.end(), "std::lower_bound finds an existing element");
+		check(ctx, static_cast<int>(*lb) == 5, "std::lower_bound dereferences to the matching element");
+		check(ctx, lb - v.begin() == 2, "std::lower_bound reports the expected insertion point");
+
+		const Vec& cv = v;
+		const auto cpos = std::lower_bound(cv.begin(), cv.end(), 7);
+		check(ctx, cpos != cv.end() && *cpos == 7, "std::lower_bound also works with const iterators");
+	}
+
+	{
+		using Vec = sso_vector_small<int, std::allocator<int>>;
+		Vec v{0, 1, 2, 3, 4};
+		const Vec& cv = v;
+		v.insert(cv.cbegin() + 2, 99);
+		check(ctx, materialize(v) == std::vector<int>({0, 1, 99, 2, 3, 4}), "insert(const_iterator, value) uses same-container position");
+		v.erase(cv.cbegin() + 1, cv.cbegin() + 3);
+		check(ctx, materialize(v) == std::vector<int>({0, 2, 3, 4}), "erase(const_iterator, const_iterator) removes the exact range");
+
+		// Cross-container iterator arithmetic, ordering, insert, and erase remain invalid usage.
+		// This test suite does not have death-test wiring, so the contract is documented here and
+		// enforced by debug assertions in the public entry points and iterator operators instead.
+		Vec other{8, 9};
+		check(ctx, v.begin() != other.begin(), "iterator equality remains owner-aware across containers");
 	}
 }
 

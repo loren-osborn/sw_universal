@@ -22,7 +22,10 @@
 ///   Callers that need a precondition check should use `is_valid()` or `validate()`
 ///   before storing, or `set_if_valid()` when a checked write is more convenient.
 /// - Mutation APIs perform a whole-word load/modify/store through the word spec hooks.
-///   They do not provide conditional publication or CAS-loop semantics.
+///   They do not provide conditional publication, retry, or CAS-loop semantics.
+/// - When a word spec routes those hooks through atomics, `bitfield_pack` is still only doing field
+///   extraction/insertion plus whole-word load/store publication. It is not itself a compare/exchange
+///   abstraction. Callers that need conditional atomic update semantics must provide that externally.
 /// - Remainder field supported, but if present it MUST be the final field.
 /// - No "biased" codec is shipped as live code here; the spec protocol supports it later.
 
@@ -136,7 +139,8 @@ namespace bitfield_pack_detail {
 /// @details `underlying_val_t` is always the canonical unsigned representation used for bit math.
 ///          `formatted_val_t` is the public whole-pack value type.
 ///          `storage_t` is the owned backend object and may differ from both when callers want
-///          custom load/store hooks.
+///          custom load/store hooks. Those hooks define only plain whole-word load/store behavior;
+///          compare/exchange or multi-step synchronization remains the caller's responsibility.
 template <class UnderlyingValueT, class FormattedValueT = UnderlyingValueT, class StorageT = UnderlyingValueT>
 struct bitfield_word_spec {
 	static_assert(std::unsigned_integral<UnderlyingValueT>, "UnderlyingValueT must be unsigned integral");

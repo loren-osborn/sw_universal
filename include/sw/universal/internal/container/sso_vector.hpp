@@ -43,6 +43,8 @@
 // Threading model (matches std::vector intent):
 //  - Like std::vector, element operations are not thread-safe against concurrent mutation.
 //  - Atomic ownership header is for shared heap bookkeeping only.
+//  - The bitfield hook layer publishes whole ownership-header words; it is not a general CAS
+//    abstraction. Ownership-transition compare/exchange logic stays local to sso_vector.
 //
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
 // SPDX-License-Identifier: MIT
@@ -51,7 +53,9 @@
 #include <atomic>
 #include <cassert>
 #include <cstddef>
+#include <concepts>
 #include <cstdint>
+#include <functional>
 #include <initializer_list>
 #include <iterator>
 #include <limits>
@@ -77,6 +81,10 @@ concept sso_vector_copy_constructible =
 template<class T>
 concept sso_vector_assignable_from_const_ref =
 	std::is_assignable_v<T&, const T&>;
+
+template<class T>
+concept sso_vector_default_initializable =
+	std::default_initializable<T>;
 
 // ------------------------ helpers ------------------------
 
@@ -497,6 +505,57 @@ private:
 	template<typename StorageOwner>
 	static void debug_assert_shift_left(const StorageOwner&, size_type, size_type, size_type) noexcept {}
 #endif
+
+	static bool debug_const_iterator_in_closed_range(const T* it, const T* first, const T* last) noexcept {
+		std::less<const T*> less;
+		return !less(it, first) && !less(last, it);
+	}
+
+	void debug_assert_valid_iterator_position(const iterator_proxy& pos, const char* message) const noexcept {
+		assert(pos.owner() == this && message);
+		assert(pos.index() <= size_impl() && message);
+	}
+
+	void debug_assert_valid_iterator_range(const iterator_proxy& first, const iterator_proxy& last, const char* message) const noexcept {
+		assert(first.owner() == this && message);
+		assert(last.owner() == this && message);
+		assert(first.index() <= last.index() && message);
+		assert(last.index() <= size_impl() && message);
+	}
+
+	void debug_assert_valid_const_iterator_position(const T* pos, const char* message) const noexcept {
+		assert(debug_const_iterator_in_closed_range(pos, cbegin(), cend()) && message);
+	}
+
+	void debug_assert_valid_const_iterator_range(const T* first, const T* last, const char* message) const noexcept {
+		assert(debug_const_iterator_in_closed_range(first, cbegin(), cend()) && message);
+		assert(debug_const_iterator_in_closed_range(last, cbegin(), cend()) && message);
+		std::less<const T*> less;
+		assert(!less(last, first) && message);
+	}
+
+	template<typename InputIt>
+	void debug_assert_not_self_range(InputIt, InputIt, const char*) const noexcept {}
+
+	template<typename InputIt>
+	size_type const_iterator_offset_impl(InputIt pos) const noexcept {
+		return static_cast<size_type>(pos - cbegin());
+	}
+
+	size_type iterator_index_impl(const iterator_proxy& pos, const char* message) const noexcept {
+		debug_assert_valid_iterator_position(pos, message);
+		return pos.index();
+	}
+
+	size_type const_iterator_index_impl(const T* pos, const char* message) const noexcept {
+		debug_assert_valid_const_iterator_position(pos, message);
+		return const_iterator_offset_impl(pos);
+	}
+
+	std::pair<size_type, size_type> const_iterator_range_indices_impl(const T* first, const T* last, const char* message) const noexcept {
+		debug_assert_valid_const_iterator_range(first, last, message);
+		return {const_iterator_offset_impl(first), const_iterator_offset_impl(last)};
+	}
 
 	/// @brief Internal mutation model.
 	/// @details Live elements must always occupy the contiguous prefix `[0, live_count)`.
@@ -1143,7 +1202,7 @@ private:
 	/// @brief Erases one element at index `idx`, preserving order of the remaining elements.
 	iterator_proxy erase_one_impl(size_type idx) {
 		const size_type n = size_impl();
-		if (idx >= n) return end();
+		assert(idx < n && "sso_vector::erase position must be dereferenceable and belong to this vector");
 		ensure_mutable_heap_impl();
 		T* d = data_mut_no_cow_impl();
 		if (is_inline_impl()) {
@@ -1160,8 +1219,10 @@ private:
 	/// @brief Erases a half-open index range `[idx_first, idx_last)`, preserving order.
 	iterator_proxy erase_range_impl(size_type idx_first, size_type idx_last) {
 		const size_type n = size_impl();
-		if (idx_first >= n || idx_first >= idx_last) return iterator(this, idx_first);
-		const size_type count = idx_last > n ? (n - idx_first) : (idx_last - idx_first);
+		assert(idx_first <= idx_last && "sso_vector::erase range must be ordered");
+		assert(idx_last <= n && "sso_vector::erase range must lie within this vector");
+		if (idx_first == idx_last) return iterator(this, idx_first);
+		const size_type count = idx_last - idx_first;
 		ensure_mutable_heap_impl();
 		T* d = data_mut_no_cow_impl();
 		if (is_inline_impl()) shift_left_assign_impl(inline_storage_impl(), d, idx_first, n, count);
@@ -1269,6 +1330,12 @@ public:
 			return (*this = tmp);
 		}
 
+		friend void swap(reference_proxy a, reference_proxy b) {
+			T tmp = static_cast<T>(a);
+			a = static_cast<T>(b);
+			b = std::move(tmp);
+		}
+
 	private:
 		sso_vector* owner_;
 		size_type index_;
@@ -1294,6 +1361,7 @@ public:
 		iterator_proxy(sso_vector* owner, size_type index) noexcept : owner_(owner), index_(index) {}
 		/// @brief Returns the current logical element index within the owning vector.
 		size_type index() const noexcept { return index_; }
+		sso_vector* owner() const noexcept { return owner_; }
 
 		reference operator*() const noexcept { return reference(owner_, index_); }
 		reference operator[](difference_type n) const noexcept {
@@ -1312,6 +1380,7 @@ public:
 		friend iterator_proxy operator+(difference_type n, iterator_proxy it) noexcept { it += n; return it; }
 		friend iterator_proxy operator-(iterator_proxy it, difference_type n) noexcept { it -= n; return it; }
 		friend difference_type operator-(const iterator_proxy& a, const iterator_proxy& b) noexcept {
+			assert(a.owner_ == b.owner_ && "sso_vector iterator subtraction requires iterators into the same vector");
 			return static_cast<difference_type>(a.index_) - static_cast<difference_type>(b.index_);
 		}
 
@@ -1319,7 +1388,10 @@ public:
 			return a.owner_ == b.owner_ && a.index_ == b.index_;
 		}
 		friend bool operator!=(const iterator_proxy& a, const iterator_proxy& b) noexcept { return !(a == b); }
-		friend bool operator<(const iterator_proxy& a, const iterator_proxy& b) noexcept { return a.index_ < b.index_; }
+		friend bool operator<(const iterator_proxy& a, const iterator_proxy& b) noexcept {
+			assert(a.owner_ == b.owner_ && "sso_vector iterator ordering requires iterators into the same vector");
+			return a.index_ < b.index_;
+		}
 		friend bool operator>(const iterator_proxy& a, const iterator_proxy& b) noexcept { return b < a; }
 		friend bool operator<=(const iterator_proxy& a, const iterator_proxy& b) noexcept { return !(b < a); }
 		friend bool operator>=(const iterator_proxy& a, const iterator_proxy& b) noexcept { return !(a < b); }
@@ -1340,6 +1412,21 @@ public:
 		sso_vector* owner_ = nullptr;
 		size_type index_ = 0;
 	};
+
+	void debug_assert_not_self_range(const iterator_proxy& first, const iterator_proxy& last, const char* message) const noexcept {
+		if (first.owner() == this || last.owner() == this) {
+			assert(first.owner() == this && last.owner() == this && message);
+			assert(false && message);
+		}
+	}
+
+	void debug_assert_not_self_range(const T* first, const T* last, const char* message) const noexcept {
+		if (debug_const_iterator_in_closed_range(first, cbegin(), cend()) ||
+		    debug_const_iterator_in_closed_range(last, cbegin(), cend())) {
+			debug_assert_valid_const_iterator_range(first, last, message);
+			assert(false && message);
+		}
+	}
 
 	// ------------------------ public types ------------------------
 	using reference = reference_proxy;
@@ -1367,6 +1454,7 @@ public:
 
 	/// @brief Constructs `count` value-initialized elements.
 	sso_vector(size_type count, const Allocator& alloc = Allocator())
+		requires sso_vector_detail::sso_vector_default_initializable<T>
 		: sso_vector(alloc) {
 		resize(count);
 	}
@@ -1568,7 +1656,10 @@ public:
 	void pop_back() { pop_back_impl(); }
 
 	/// @brief Resizes using value-initialization when growing.
-	void resize(size_type count) { resize_impl(count); }
+	void resize(size_type count)
+		requires sso_vector_detail::sso_vector_default_initializable<T> {
+		resize_impl(count);
+	}
 
 	/// @brief Resizes using copies of `value` when growing.
 	void resize(size_type count, const T& value) { resize_impl(count, value); }
@@ -1579,6 +1670,7 @@ public:
 	/// @brief Replaces the contents from an input range.
 	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	void assign(InputIt first, InputIt last) {
+		debug_assert_not_self_range(first, last, "sso_vector::assign(range) does not accept iterators into *this");
 		assign_range_impl(first, last);
 	}
 
@@ -1590,52 +1682,56 @@ public:
 	/// exact prior element ordering is not guaranteed to be restored.
 	template<class... Args>
 	iterator emplace(iterator pos, Args&&... args) {
-		return emplace_at_impl(pos.index(), std::forward<Args>(args)...);
+		return emplace_at_impl(iterator_index_impl(pos, "sso_vector::emplace position must belong to this vector"), std::forward<Args>(args)...);
 	}
 
 	iterator insert(iterator pos, const T& value) { return emplace(pos, value); }
 	iterator insert(iterator pos, T&& value) { return emplace(pos, std::move(value)); }
 	iterator insert(iterator pos, size_type count, const T& value) {
-		return insert_fill_impl(pos.index(), count, value);
+		return insert_fill_impl(iterator_index_impl(pos, "sso_vector::insert position must belong to this vector"), count, value);
 	}
 
 	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	iterator insert(iterator pos, InputIt first, InputIt last) {
-		return insert_range_impl(pos.index(), first, last);
+		debug_assert_not_self_range(first, last, "sso_vector::insert(range) does not accept iterators into *this");
+		return insert_range_impl(iterator_index_impl(pos, "sso_vector::insert position must belong to this vector"), first, last);
 	}
 	iterator insert(iterator pos, std::initializer_list<T> ilist) {
 		return insert(pos, ilist.begin(), ilist.end());
 	}
 
 	iterator insert(const_iterator pos, const T& value) {
-		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), value);
+		return insert(iterator(this, const_iterator_index_impl(pos, "sso_vector::insert const_iterator position must belong to this vector")), value);
 	}
 	iterator insert(const_iterator pos, T&& value) {
-		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), std::move(value));
+		return insert(iterator(this, const_iterator_index_impl(pos, "sso_vector::insert const_iterator position must belong to this vector")), std::move(value));
 	}
 	iterator insert(const_iterator pos, size_type count, const T& value) {
-		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), count, value);
+		return insert(iterator(this, const_iterator_index_impl(pos, "sso_vector::insert const_iterator position must belong to this vector")), count, value);
 	}
 	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
 	iterator insert(const_iterator pos, InputIt first, InputIt last) {
-		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), first, last);
+		debug_assert_not_self_range(first, last, "sso_vector::insert(range) does not accept iterators into *this");
+		return insert(iterator(this, const_iterator_index_impl(pos, "sso_vector::insert const_iterator position must belong to this vector")), first, last);
 	}
 	iterator insert(const_iterator pos, std::initializer_list<T> ilist) {
-		return insert(iterator(this, static_cast<size_type>(pos - cbegin())), ilist);
+		return insert(iterator(this, const_iterator_index_impl(pos, "sso_vector::insert const_iterator position must belong to this vector")), ilist);
 	}
 
 	iterator erase(iterator pos) {
-		return erase_one_impl(pos.index());
+		return erase_one_impl(iterator_index_impl(pos, "sso_vector::erase position must belong to this vector"));
 	}
 	iterator erase(iterator first, iterator last) {
+		debug_assert_valid_iterator_range(first, last, "sso_vector::erase range must belong to this vector and be ordered");
 		return erase_range_impl(first.index(), last.index());
 	}
 	iterator erase(const_iterator pos) {
-		return erase(iterator(this, static_cast<size_type>(pos - cbegin())));
+		return erase(iterator(this, const_iterator_index_impl(pos, "sso_vector::erase const_iterator position must belong to this vector")));
 	}
 	iterator erase(const_iterator first, const_iterator last) {
-		return erase(iterator(this, static_cast<size_type>(first - cbegin())),
-		             iterator(this, static_cast<size_type>(last - cbegin())));
+		const auto [first_index, last_index] =
+			const_iterator_range_indices_impl(first, last, "sso_vector::erase const_iterator range must belong to this vector and be ordered");
+		return erase(iterator(this, first_index), iterator(this, last_index));
 	}
 
 	void swap(sso_vector& other) {

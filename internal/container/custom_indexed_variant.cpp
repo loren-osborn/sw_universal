@@ -1577,15 +1577,12 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		VariantT diff_assign_dst(12);
 		diff_assign_src.sideband().set(71);
 		diff_assign_dst.sideband().set(72);
-		const auto diff_assign_dst_index_before = diff_assign_dst.index();
 		ThrowingType::throw_on_copy = 1;
 		expect_throw<std::runtime_error>(ctx, "different-index copy assignment sideband publication waits for success", [&]() {
 			diff_assign_dst = diff_assign_src;
 		});
-		check(ctx, diff_assign_dst.valueless_by_exception() || (diff_assign_dst.index() == diff_assign_dst_index_before), "failed different-index copy assignment leaves destination discriminator unchanged or valueless");
-		if (!diff_assign_dst.valueless_by_exception()) {
-			check(ctx, get<int>(diff_assign_dst) == 12, "failed different-index copy assignment keeps destination payload when still engaged");
-		}
+		check(ctx, diff_assign_dst.valueless_by_exception(), "failed different-index copy assignment becomes valueless");
+		check(ctx, diff_assign_dst.index() == std::variant_npos, "failed different-index copy assignment publishes npos");
 		check(ctx, static_cast<std::size_t>(diff_assign_dst.sideband().get()) == 72, "failed different-index copy assignment does not import sideband early");
 
 		ThrowingType::reset();
@@ -1593,16 +1590,35 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		VariantT diff_move_dst(14);
 		diff_move_src.sideband().set(81);
 		diff_move_dst.sideband().set(82);
-		const auto diff_move_dst_index_before = diff_move_dst.index();
 		ThrowingType::throw_on_move = ThrowingType::move_count + 1;
 		expect_throw<std::runtime_error>(ctx, "different-index move assignment sideband publication waits for success", [&]() {
 			diff_move_dst = std::move(diff_move_src);
 		});
-		check(ctx, diff_move_dst.valueless_by_exception() || (diff_move_dst.index() == diff_move_dst_index_before), "failed different-index move assignment leaves destination discriminator unchanged or valueless");
-		if (!diff_move_dst.valueless_by_exception()) {
-			check(ctx, get<int>(diff_move_dst) == 14, "failed different-index move assignment keeps destination payload when still engaged");
-		}
+		check(ctx, diff_move_dst.valueless_by_exception(), "failed different-index move assignment becomes valueless");
+		check(ctx, diff_move_dst.index() == std::variant_npos, "failed different-index move assignment publishes npos");
 		check(ctx, static_cast<std::size_t>(diff_move_dst.sideband().get()) == 82, "failed different-index move assignment does not import sideband early");
+
+		ThrowingType::reset();
+		VariantT diff_assign_success_src(std::in_place_type<ThrowingType>, ThrowingType{21});
+		VariantT diff_assign_success_dst(22);
+		diff_assign_success_src.sideband().set(91);
+		diff_assign_success_dst.sideband().set(92);
+		diff_assign_success_dst = diff_assign_success_src;
+		check(ctx, !diff_assign_success_dst.valueless_by_exception(), "successful different-index copy assignment stays engaged");
+		check(ctx, holds_alternative<ThrowingType>(diff_assign_success_dst), "successful different-index copy assignment activates source alternative");
+		check(ctx, get<ThrowingType>(diff_assign_success_dst).value == 21, "successful different-index copy assignment transfers payload");
+		check(ctx, static_cast<std::size_t>(diff_assign_success_dst.sideband().get()) == 91, "successful different-index copy assignment imports sideband after success");
+
+		ThrowingType::reset();
+		VariantT diff_move_success_src(std::in_place_type<ThrowingType>, ThrowingType{31});
+		VariantT diff_move_success_dst(32);
+		diff_move_success_src.sideband().set(101);
+		diff_move_success_dst.sideband().set(102);
+		diff_move_success_dst = std::move(diff_move_success_src);
+		check(ctx, !diff_move_success_dst.valueless_by_exception(), "successful different-index move assignment stays engaged");
+		check(ctx, holds_alternative<ThrowingType>(diff_move_success_dst), "successful different-index move assignment activates source alternative");
+		check(ctx, get<ThrowingType>(diff_move_success_dst).value == 31, "successful different-index move assignment transfers payload");
+		check(ctx, static_cast<std::size_t>(diff_move_success_dst.sideband().get()) == 101, "successful different-index move assignment imports sideband after success");
 	}
 
 	if constexpr (variant_test::is_custom_variant_v<VariantT>) {
