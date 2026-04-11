@@ -1120,8 +1120,12 @@ private:
 
 	/// @brief Assigns from another variant, either reusing the current alternative or replacing it.
 	/// @details The important invariant is "assign in place only when both sides currently hold the
-	///          same alternative". Otherwise the old alternative must be destroyed exactly once before
-	///          the new lifetime begins.
+	///          same alternative". Otherwise the old alternative is destroyed exactly once before the
+	///          new lifetime begins. Unlike `emplace_impl` / staged `assign_value_impl`, the differing-
+	///          index variant-to-variant path intentionally does not stage the incoming alternative in a
+	///          temporary first. If construction of the replacement alternative then throws, the
+	///          destination becomes valueless-by-exception and sideband publication is intentionally
+	///          deferred until successful construction.
 	template<typename Other>
 	custom_indexed_variant& assign_from_variant_impl(Other&& other) {
 		if (other.valueless_by_exception()) {
