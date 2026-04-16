@@ -842,7 +842,7 @@ static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_
 static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterVolatileRef>);
 static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterMismatched>);
 static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterOverloaded>);
-static_assert(!sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterTemplated>);
+static_assert(sw::universal::internal::custom_indexed_variant_detail::sideband_accessor<AccessorSetterTemplated>);
 static_assert(const_sideband_readable<SidebandVariant<int>>());
 static_assert(!const_sideband_writable<SidebandVariant<int>>());
 static_assert(mutable_sideband_writable<SidebandVariant<int>>());
@@ -1578,6 +1578,9 @@ void run_variant_suite(const char* impl_name, int& failures) {
 		diff_assign_src.sideband().set(71);
 		diff_assign_dst.sideband().set(72);
 		ThrowingType::throw_on_copy = 1;
+		// Different-index assignment destroys the old alternative before attempting to construct the
+		// new one, so this failure path intentionally exercises valueless-by-exception with sideband
+		// publication still deferred.
 		expect_throw<std::runtime_error>(ctx, "different-index copy assignment sideband publication waits for success", [&]() {
 			diff_assign_dst = diff_assign_src;
 		});

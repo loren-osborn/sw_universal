@@ -21,8 +21,8 @@
 ///   This is intentional: `set_masked()` is a masked store, not a checked transaction.
 ///   Callers that need a precondition check should use `is_valid()` or `validate()`
 ///   before storing, or `set_if_valid()` when a checked write is more convenient.
-/// - Mutation APIs perform a whole-word load/modify/store through the word spec hooks.
-///   They do not provide conditional publication, retry, or CAS-loop semantics.
+/// - Mutation APIs perform an ordinary whole-word load/modify/store through the word spec hooks.
+///   They do not imply conditional publication, retry, or CAS-loop semantics.
 /// - When a word spec routes those hooks through atomics, `bitfield_pack` is still only doing field
 ///   extraction/insertion plus whole-word load/store publication. It is not itself a compare/exchange
 ///   abstraction. Callers that need conditional atomic update semantics must provide that externally.
@@ -333,7 +333,7 @@ using tuple_append_t = typename tuple_append<Tuple, T>::type;
 /// `bitfield_pack::is_valid()` after `encode(decoded)`. Custom codecs should keep that
 /// split in mind, especially for signed decoded domains or non-identity encodings.
 template <class FieldSpec, class StorageUInt>
-concept bitfield_field_spec =
+concept bitfield_field_descriptor =
 	std::unsigned_integral<StorageUInt> &&
 	requires {
 		typename FieldSpec::template for_storage_t<StorageUInt>;
@@ -566,8 +566,8 @@ private:
 	              "bitfield_pack: IndexingSpec must normalize to a descriptor with field_key and to_index()");
 
 	// Validate that each FieldSpec conforms.
-	static_assert((bitfield_pack_detail::bitfield_field_spec<FieldSpecs, underlying_val_t> && ...),
-	              "bitfield_pack: all FieldSpecs must satisfy the bitfield_field_spec concept");
+	static_assert((bitfield_pack_detail::bitfield_field_descriptor<FieldSpecs, underlying_val_t> && ...),
+	              "bitfield_pack: all FieldSpecs must satisfy the bitfield field-descriptor protocol");
 
 	static constexpr std::size_t kUnderlyingValueBits = layout_traits::storage_bits;
 	static constexpr std::size_t kFieldCount = layout_traits::field_count;
@@ -905,7 +905,7 @@ public:
 	}
 
 	template <std::size_t... Is>
-	constexpr all_values_type get_all_impl(std::index_sequence<Is...>) const BITFIELD_PACK_NOEXCEPT {
+	constexpr all_values_type collect_all_values_impl(std::index_sequence<Is...>) const BITFIELD_PACK_NOEXCEPT {
 		const underlying_val_t current_underlying_value = load_underlying_value();
 		if constexpr (kHasExtraBits) {
 			return all_values_type{get_value_by_index<Is>(current_underlying_value)..., get_extra_bits()};
@@ -919,7 +919,7 @@ public:
 	///          `get_all()` appends one final trailing element containing the residual
 	///          unclaimed bits packed down into the low bits of `underlying_val_t`.
 	constexpr all_values_type get_all() const BITFIELD_PACK_NOEXCEPT {
-		return get_all_impl(std::make_index_sequence<kFieldCount>{});
+		return collect_all_values_impl(std::make_index_sequence<kFieldCount>{});
 	}
 
 	/// @brief Returns residual unclaimed bits packed into the low bits.
