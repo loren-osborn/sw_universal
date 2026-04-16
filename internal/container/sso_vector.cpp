@@ -426,6 +426,8 @@ template<class V>
 constexpr bool has_using_sso = requires(const V& v) { v.using_sso(); };
 
 static_assert(!has_using_sso<sw::universal::internal::sso_vector_default<int>>);
+static_assert(!std::is_base_of_v<std::vector<int>, sw::universal::internal::sso_vector<int, 0>>,
+	"sso_vector<T,0> should use composition instead of inheriting from std::vector");
 
 template<class T, class Allocator>
 using sso_vector_auto = sw::universal::internal::sso_vector_default<T, Allocator>;
@@ -1717,7 +1719,8 @@ void run_sso_vector_cow_behavior_suite(int& failures) {
 	}
 
 	{
-		// clear() on shared storage should release this owner without cloning just to destroy.
+		// clear() on shared storage is an owner-release operation: this vector becomes empty while a
+		// still-sharing sibling continues to observe the existing payload.
 		LifetimeTracked::reset();
 		{
 			Vec a = make_heap_backed_lifetime_vector<Vec>({20, 21, 22, 23, 24, 25});

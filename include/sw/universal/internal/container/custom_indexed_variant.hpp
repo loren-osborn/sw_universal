@@ -284,49 +284,49 @@ namespace custom_indexed_variant_detail {
 	concept allowed_sideband_getter_type =
 		std::same_as<Getter, Base> || std::same_as<Getter, const Base&>;
 
-	template<typename Setter, typename Base>
-	concept allowed_sideband_setter_type =
-		std::same_as<Setter, Base> || std::same_as<Setter, const Base&>;
-
-	template<typename MemberFn>
-	struct sideband_setter_argument;
-
-	template<typename C, typename Arg>
-	struct sideband_setter_argument<void (C::*)(Arg)> {
-		using type = Arg;
-	};
-
-	template<typename C, typename Arg>
-	struct sideband_setter_argument<void (C::*)(Arg) noexcept> {
-		using type = Arg;
-	};
-
-	template<typename Accessor>
-	using sideband_setter_argument_t = typename sideband_setter_argument<decltype(&Accessor::set)>::type;
-
-	template<typename Accessor>
-	concept has_sideband_setter_signature =
+	template<typename Accessor, typename State>
+	concept sideband_setter_by_value =
 		requires {
-			typename sideband_setter_argument_t<Accessor>;
+			[] (void (Accessor::*)(State)) {} (&Accessor::set);
+		} ||
+		requires {
+			[] (void (Accessor::*)(State) noexcept) {} (&Accessor::set);
+		};
+
+	template<typename Accessor, typename State>
+	concept sideband_setter_by_const_ref =
+		requires {
+			[] (void (Accessor::*)(const State&)) {} (&Accessor::set);
+		} ||
+		requires {
+			[] (void (Accessor::*)(const State&) noexcept) {} (&Accessor::set);
 		};
 
 	/// @brief Sideband accessor facade used by sideband-carrying encoded-index policies.
 	/// @details Accessors expose whole sideband state; they are not required to model a single scalar field.
 	///          Internal callers rely only on whole-state `get()` / `set(...)`, so policies remain free
 	///          to expose one field or many fields without changing the variant core.
-	///          Getter/setter shapes are intentionally strict: either `T` or `const T&`, where `T`
-	///          is the policy's whole exposed sideband-state type.
+	///          Getter shapes remain intentionally strict: either `T` or `const T&`, where `T`
+	///          is the policy's whole exposed sideband-state type. Setter lookup checks the usable
+	///          call forms directly, which keeps overload/templated-set diagnostics localized to this
+	///          concept instead of relying on fragile extracted member-pointer signatures.
 	template<typename Accessor>
 	concept sideband_accessor =
 		std::copy_constructible<Accessor> &&
-		has_sideband_setter_signature<Accessor> &&
 		allowed_sideband_getter_type<decltype(std::declval<const Accessor&>().get()), sideband_accessor_state_t<Accessor>> &&
-		allowed_sideband_setter_type<sideband_setter_argument_t<Accessor>, sideband_accessor_state_t<Accessor>> &&
+		(sideband_setter_by_value<Accessor, sideband_accessor_state_t<Accessor>> ||
+		 sideband_setter_by_const_ref<Accessor, sideband_accessor_state_t<Accessor>>) &&
 		requires(const Accessor accessor, Accessor mutable_accessor) {
 			typename sideband_accessor_state_t<Accessor>;
-			typename sideband_setter_argument_t<Accessor>;
 			{ accessor.get() } -> std::same_as<decltype(std::declval<const Accessor&>().get())>;
-			{ mutable_accessor.set(std::declval<sideband_setter_argument_t<Accessor>>()) } -> std::same_as<void>;
+			requires (
+				requires(sideband_accessor_state_t<Accessor> state) {
+					{ mutable_accessor.set(state) } -> std::same_as<void>;
+				} ||
+				requires(const sideband_accessor_state_t<Accessor>& state) {
+					{ mutable_accessor.set(state) } -> std::same_as<void>;
+				}
+			);
 		};
 
 	/// @brief Detects whether an encoded-index type exposes a policy-defined sideband accessor facade.
@@ -463,6 +463,8 @@ struct for_index_type {
 	public:
 		/// @brief Underlying layout: [ index_bits | sideband(remainder) ].
 		using bits_t = bitfield_pack<IndexT, field_index, bitfield_field_spec<index_bits>, bitfield_remainder>;
+		static constexpr std::size_t sideband_bits = bits_t::template field_width<SIDEBAND>();
+		static constexpr IndexT sideband_max = bits_t::template field_max_bits<SIDEBAND>();
 
 		/// @brief Encoded representation for std::variant_npos: all ones in the index field.
 		static constexpr IndexT npos_code = bits_t::template field_max_bits<INDEX>();
@@ -556,6 +558,8 @@ struct for_index_type {
 		constexpr const_sideband_t sideband() const noexcept { return const_sideband_t(this); }
 
 		/// @brief Copies the complete exposed sideband state from another encoded-index object.
+		/// @note This does not publish any payload/discriminator change by itself; callers decide when
+		///       importing sideband becomes part of the larger operation's visible state.
 		constexpr void copy_sideband_from(const sideband_encoded_index& other) noexcept {
 			set_sideband_val(other.sideband_val());
 		}
@@ -1123,9 +1127,11 @@ private:
 	///          same alternative". Otherwise the old alternative is destroyed exactly once before the
 	///          new lifetime begins. Unlike `emplace_impl` / staged `assign_value_impl`, the differing-
 	///          index variant-to-variant path intentionally does not stage the incoming alternative in a
-	///          temporary first. If construction of the replacement alternative then throws, the
-	///          destination becomes valueless-by-exception and sideband publication is intentionally
-	///          deferred until successful construction.
+	///          temporary first. The old payload is therefore gone before replacement construction is
+	///          attempted. If that construction then throws, the destination becomes
+	///          valueless-by-exception. Sideband publication is intentionally deferred until the new
+	///          alternative has been constructed successfully, so a failed differing-index assignment
+	///          leaves both the discriminator and the sideband in the pre-publication state.
 	template<typename Other>
 	custom_indexed_variant& assign_from_variant_impl(Other&& other) {
 		if (other.valueless_by_exception()) {

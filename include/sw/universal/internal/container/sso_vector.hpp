@@ -95,7 +95,9 @@ inline constexpr std::size_t ceil_div(std::size_t a, std::size_t b) noexcept {
 template<class T, class Allocator>
 inline constexpr std::size_t default_inline_bytes() noexcept {
 	// The default inline payload budget is chosen so the production-build object size stays aligned
-	// with std::vector<T, Allocator>. Debug-only invariant fields must not feed back into this policy.
+	// with std::vector<T, Allocator>. This is best-effort and ABI-sensitive: different standard
+	// library layouts, allocators, or debug modes may legitimately change the heuristic result.
+	// Debug-only invariant fields must not feed back into this policy.
 	constexpr std::size_t vec_sz = sizeof(std::vector<T, Allocator>);
 	if constexpr (vec_sz <= 2 * sizeof(void*)) {
 		return 0;
@@ -106,6 +108,8 @@ inline constexpr std::size_t default_inline_bytes() noexcept {
 
 template<class T, class Allocator>
 inline constexpr std::size_t default_inline_elems() noexcept {
+	// This simply converts the ABI-sensitive byte budget above into a count of whole T objects.
+	// The resulting inline capacity is therefore heuristic as well, not a standard-mandated parity point.
 	constexpr std::size_t bytes = default_inline_bytes<T, Allocator>();
 	if constexpr (bytes == 0) return 0;
 	return bytes / sizeof(T);
@@ -197,7 +201,6 @@ struct heap_block {
 #ifndef NDEBUG
 	std::size_t live_count = 0;
 #endif
-	alignas(T) std::byte data[sizeof(T)];
 
 	~heap_block() {
 #ifndef NDEBUG
@@ -208,26 +211,54 @@ struct heap_block {
 
 template<class T>
 inline constexpr std::size_t heap_block_align() noexcept {
-	return (std::max)(alignof(heap_block<T>), alignof(T));
+	return alignof(heap_block<T>);
+}
+
+template<class T>
+inline constexpr std::size_t heap_block_payload_offset() noexcept {
+	// Heap blocks are allocated as [header object][trailing raw bytes...]. Round the payload start up
+	// to `alignof(T)` so the trailing storage may be re-entered as `T*` through `block_data()`.
+	return ceil_div(sizeof(heap_block<T>), alignof(T)) * alignof(T);
 }
 
 template<class T>
 inline T* block_data(heap_block<T>* b) noexcept {
 	// Heap payload objects are repeatedly constructed into raw storage. Re-enter typed access through
 	// one laundered choke point so lifetime restarts stay visible to optimizers and provenance-aware ABIs.
-	return std::launder(reinterpret_cast<T*>(b->data));
+	auto* payload = reinterpret_cast<std::byte*>(b) + heap_block_payload_offset<T>();
+	return std::launder(reinterpret_cast<T*>(payload));
 }
 template<class T>
 inline const T* block_data(const heap_block<T>* b) noexcept {
-	return std::launder(reinterpret_cast<const T*>(b->data));
+	auto* payload = reinterpret_cast<const std::byte*>(b) + heap_block_payload_offset<T>();
+	return std::launder(reinterpret_cast<const T*>(payload));
 }
 
 template<class T>
-inline std::size_t heap_block_bytes(std::size_t capacity) noexcept {
+inline constexpr std::size_t heap_block_bytes(std::size_t capacity) noexcept {
 	const std::size_t capped_capacity = (capacity == 0 ? 1 : capacity);
-	const std::size_t header_bytes = sizeof(heap_block<T>);
-	return header_bytes + (capped_capacity - 1) * sizeof(T);
+	const std::size_t payload_bytes = capped_capacity * sizeof(T);
+	return heap_block_payload_offset<T>() + payload_bytes;
 }
+
+template<class T>
+inline constexpr bool heap_block_payload_is_aligned() noexcept {
+	return (heap_block_payload_offset<T>() % alignof(T)) == 0;
+}
+
+template<class T>
+inline constexpr bool heap_block_payload_follows_header() noexcept {
+	return heap_block_payload_offset<T>() >= sizeof(heap_block<T>);
+}
+
+template<class T>
+inline constexpr bool heap_block_payload_formula_is_consistent() noexcept {
+	return heap_block_bytes<T>(1) == heap_block_payload_offset<T>() + sizeof(T);
+}
+
+static_assert(heap_block_payload_is_aligned<int>(), "sso_vector heap payload offset must preserve T alignment");
+static_assert(heap_block_payload_follows_header<int>(), "sso_vector heap payload must start after the header object");
+static_assert(heap_block_payload_formula_is_consistent<int>(), "sso_vector heap byte formula must match header-plus-payload layout");
 
 template<class T, class Allocator>
 inline heap_block<T>* allocate_block(std::size_t capacity, Allocator& alloc) {
@@ -239,7 +270,6 @@ inline heap_block<T>* allocate_block(std::size_t capacity, Allocator& alloc) {
 	auto* b = ::new (mem) heap_block<T>{};
 	ownership_header_word_spec::store_underlying_value(b->ownership_header.storage(), make_header_underlying_value(true, 1));
 	b->capacity = capacity;
-	b->data[0] = std::byte{0};
 	return b;
 }
 
@@ -308,6 +338,9 @@ inline void mark_unshareable(heap_block<T>* b) noexcept {
 	const header_underlying_t before = scratch.underlying_value();
 	scratch.template set_masked<UNSHAREABLE>(1u);
 	header_underlying_t expected = before;
+	// Under the documented precondition (`refcount == 1` on a uniquely owned block), no other owner
+	// may legally race a refcount/shareability transition on this header. The single strong CAS is
+	// therefore an invariant check on the unique-owner assumption, not a retry-based state transition.
 	const bool cas_ok = storage.compare_exchange_strong(expected, scratch.underlying_value(),
 	                                                    std::memory_order_acq_rel,
 	                                                    std::memory_order_acquire);
@@ -321,10 +354,94 @@ class sso_vector;
 
 /// @brief `N == 0` specialization that falls back directly to `std::vector`.
 template<typename T, typename Allocator>
-class sso_vector<T, 0, Allocator> : public std::vector<T, Allocator> {
+class sso_vector<T, 0, Allocator> {
 	using base = std::vector<T, Allocator>;
 public:
-	using base::base;
+	using value_type = typename base::value_type;
+	using allocator_type = typename base::allocator_type;
+	using size_type = typename base::size_type;
+	using difference_type = typename base::difference_type;
+	using reference = typename base::reference;
+	using const_reference = typename base::const_reference;
+	using pointer = typename base::pointer;
+	using const_pointer = typename base::const_pointer;
+	using iterator = typename base::iterator;
+	using const_iterator = typename base::const_iterator;
+	using reverse_iterator = typename base::reverse_iterator;
+	using const_reverse_iterator = typename base::const_reverse_iterator;
+
+	sso_vector() = default;
+	explicit sso_vector(const Allocator& alloc) : storage_(alloc) {}
+	sso_vector(size_type count, const Allocator& alloc = Allocator()) : storage_(count, alloc) {}
+	sso_vector(size_type count, const T& value, const Allocator& alloc = Allocator()) : storage_(count, value, alloc) {}
+	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
+	sso_vector(InputIt first, InputIt last, const Allocator& alloc = Allocator()) : storage_(first, last, alloc) {}
+	sso_vector(std::initializer_list<T> init, const Allocator& alloc = Allocator()) : storage_(init, alloc) {}
+	sso_vector(const sso_vector&) = default;
+	sso_vector(sso_vector&&) noexcept = default;
+	sso_vector& operator=(const sso_vector&) = default;
+	sso_vector& operator=(sso_vector&&) noexcept = default;
+	sso_vector& operator=(std::initializer_list<T> init) {
+		storage_ = init;
+		return *this;
+	}
+
+	const_reference at(size_type pos) const { return storage_.at(pos); }
+	reference at(size_type pos) { return storage_.at(pos); }
+	reference operator[](size_type pos) noexcept { return storage_[pos]; }
+	const_reference operator[](size_type pos) const noexcept { return storage_[pos]; }
+	reference front() noexcept { return storage_.front(); }
+	const_reference front() const noexcept { return storage_.front(); }
+	reference back() noexcept { return storage_.back(); }
+	const_reference back() const noexcept { return storage_.back(); }
+	pointer data() noexcept { return storage_.data(); }
+	const_pointer data() const noexcept { return storage_.data(); }
+
+	iterator begin() noexcept { return storage_.begin(); }
+	iterator end() noexcept { return storage_.end(); }
+	const_iterator begin() const noexcept { return storage_.begin(); }
+	const_iterator end() const noexcept { return storage_.end(); }
+	const_iterator cbegin() const noexcept { return storage_.cbegin(); }
+	const_iterator cend() const noexcept { return storage_.cend(); }
+	reverse_iterator rbegin() noexcept { return storage_.rbegin(); }
+	reverse_iterator rend() noexcept { return storage_.rend(); }
+	const_reverse_iterator rbegin() const noexcept { return storage_.rbegin(); }
+	const_reverse_iterator rend() const noexcept { return storage_.rend(); }
+
+	bool empty() const noexcept { return storage_.empty(); }
+	size_type size() const noexcept { return storage_.size(); }
+	size_type max_size() const noexcept { return storage_.max_size(); }
+	size_type capacity() const noexcept { return storage_.capacity(); }
+	void reserve(size_type new_cap) { storage_.reserve(new_cap); }
+	void shrink_to_fit() { storage_.shrink_to_fit(); }
+
+	void clear() noexcept { storage_.clear(); }
+	void push_back(const T& value) { storage_.push_back(value); }
+	void push_back(T&& value) { storage_.push_back(std::move(value)); }
+	template<class... Args>
+	reference emplace_back(Args&&... args) { return storage_.emplace_back(std::forward<Args>(args)...); }
+	void pop_back() { storage_.pop_back(); }
+	void resize(size_type count) { storage_.resize(count); }
+	void resize(size_type count, const T& value) { storage_.resize(count, value); }
+	void assign(size_type count, const T& value) { storage_.assign(count, value); }
+	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
+	void assign(InputIt first, InputIt last) { storage_.assign(first, last); }
+	void assign(std::initializer_list<T> init) { storage_.assign(init); }
+	template<class... Args>
+	iterator emplace(const_iterator pos, Args&&... args) { return storage_.emplace(pos, std::forward<Args>(args)...); }
+	iterator insert(const_iterator pos, const T& value) { return storage_.insert(pos, value); }
+	iterator insert(const_iterator pos, T&& value) { return storage_.insert(pos, std::move(value)); }
+	iterator insert(const_iterator pos, size_type count, const T& value) { return storage_.insert(pos, count, value); }
+	template<typename InputIt, typename = std::enable_if_t<!std::is_integral_v<InputIt>>>
+	iterator insert(const_iterator pos, InputIt first, InputIt last) { return storage_.insert(pos, first, last); }
+	iterator insert(const_iterator pos, std::initializer_list<T> ilist) { return storage_.insert(pos, ilist); }
+	iterator erase(const_iterator pos) { return storage_.erase(pos); }
+	iterator erase(const_iterator first, const_iterator last) { return storage_.erase(first, last); }
+	void swap(sso_vector& other) noexcept(noexcept(storage_.swap(other.storage_))) { storage_.swap(other.storage_); }
+	allocator_type get_allocator() const noexcept { return storage_.get_allocator(); }
+
+private:
+	base storage_{};
 };
 
 /// @brief Vector-like container with inline storage plus copy-on-write heap storage.
@@ -388,11 +505,21 @@ private:
 
 	/// @brief Representation variant: inline storage plus sideband size, or heap storage plus sideband size.
 	using variant_t = custom_indexed_variant<sideband_encoded_index, inline_storage, heap_storage>;
+	using size_sideband_encoded_index = sideband_encoded_index<2>;
+	static constexpr size_type max_encoded_size =
+		static_cast<size_type>(size_sideband_encoded_index::sideband_max);
+	static_assert(size_sideband_encoded_index::sideband_bits > 0,
+		"sso_vector requires at least one sideband bit for logical size");
+	static_assert(max_encoded_size >= static_cast<size_type>(N),
+		"sso_vector sideband size encoding must at least represent the full inline range");
 
 	/// @brief Converts encoded sideband bits into the public `size_type`.
 	static size_type sideband_to_size(std::size_t v) noexcept { return static_cast<size_type>(v); }
 	/// @brief Converts public `size_type` into encoded sideband bits.
-	static std::size_t size_to_sideband(size_type v) noexcept { return static_cast<std::size_t>(v); }
+	static std::size_t size_to_sideband(size_type v) noexcept {
+		assert(v <= max_encoded_size && "sso_vector logical size exceeds representable sideband range");
+		return static_cast<std::size_t>(v);
+	}
 
 	// ------------------------ representation inspection ------------------------
 
@@ -1639,6 +1766,12 @@ public:
 	// ------------------------ modifiers ------------------------
 
 	/// @brief Destroys all elements while retaining the representation shell.
+	/// @details On shared heap storage this is a pure owner-release operation: the clearing vector
+	///          drops its logical size to zero and releases its shared ownership without first
+	///          detaching/cloning the payload solely so it can destroy the old elements itself.
+	///          Other vectors still sharing that heap block may therefore continue to observe the
+	///          pre-clear elements. This matches the copy-on-write ownership model rather than a
+	///          naive "every observer of the old buffer must be emptied together" mental model.
 	void clear() noexcept { clear_impl(); }
 
 	/// @brief Appends one copy of `value`.

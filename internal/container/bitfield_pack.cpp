@@ -689,7 +689,8 @@ static void test_scratch_copy() {
 
 static void test_backend_hook_mutation_semantics() {
 	// This storage type counts load/store hook traffic so ordinary mutation can be verified as
-	// whole-word load/modify/store through the spec rather than direct member access.
+	// whole-word load/modify/store through the spec rather than direct member access. The test is
+	// intentionally about hook traffic only; it does not imply any conditional publication or CAS semantics.
 	struct counting_backend {
 		std::uint16_t word = 0;
 		int* loads = nullptr;
