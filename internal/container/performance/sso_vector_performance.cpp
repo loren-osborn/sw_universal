@@ -23,7 +23,6 @@
 namespace {
 
 using sw::universal::internal::sso_vector;
-using sw::universal::internal::sso_vector_default;
 
 template<typename T>
 struct payload_ops;
@@ -152,17 +151,6 @@ std::uint64_t workload_reuse_pool(std::size_t iterations, std::size_t inline_cap
 	return acc;
 }
 
-template<typename Container>
-std::uint64_t run_all_workloads(std::size_t iterations, std::size_t inline_capacity) {
-	std::uint64_t acc = 0;
-	acc ^= workload_ephemeral<Container>(iterations, inline_capacity);
-	acc ^= workload_copy_read_mostly<Container>(iterations / 2u, inline_capacity);
-	acc ^= workload_copy_then_mutate<Container>(iterations / 2u, inline_capacity);
-	acc ^= workload_inline_threshold<Container>((std::max)(std::size_t{1}, iterations / 4u), inline_capacity);
-	acc ^= workload_reuse_pool<Container>(iterations, inline_capacity);
-	return acc;
-}
-
 template<typename Fn>
 double measure_seconds(Fn&& fn) {
 	const auto begin = std::chrono::steady_clock::now();
@@ -173,45 +161,139 @@ double measure_seconds(Fn&& fn) {
 
 volatile std::uint64_t g_sink = 0;
 
+struct scenario_spec {
+	std::string_view label;
+	std::size_t iteration_divisor;
+};
+
+struct measurement {
+	double seconds = 0.0;
+	double ops_per_sec = 0.0;
+};
+
+struct scenario_results {
+	std::string_view label;
+	std::size_t iterations = 0;
+	measurement std_vector;
+	measurement sso_inline;
+	measurement sso_double_inline;
+};
+
 template<typename Container>
-double benchmark_case(std::size_t iterations, std::size_t inline_capacity) {
+measurement benchmark_case(std::size_t iterations, std::size_t inline_capacity,
+                           std::uint64_t (*workload)(std::size_t, std::size_t)) {
 	std::uint64_t result = 0;
 	const double seconds = measure_seconds([&] {
-		result = run_all_workloads<Container>(iterations, inline_capacity);
+		result = workload(iterations, inline_capacity);
 	});
 	g_sink ^= result;
-	return seconds;
+	return measurement{seconds, static_cast<double>(iterations) / seconds};
 }
 
 template<typename T, std::size_t DefaultInlineElems>
 void run_payload_benchmark(std::string_view payload_name, std::size_t iterations) {
 	using std_vector_t = std::vector<T>;
-	using sso_default_t = sso_vector_default<T>;
-	using sso_double_t = sso_vector<T, DefaultInlineElems * 2u>;
-
 	constexpr std::size_t default_inline = DefaultInlineElems;
-	constexpr std::size_t doubled_inline = DefaultInlineElems * 2u;
+	constexpr std::size_t benchmark_inline = (std::max)(std::size_t{2}, default_inline);
+	constexpr std::size_t benchmark_double_inline = benchmark_inline * 2u;
+	using sso_inline_t = sso_vector<T, benchmark_inline>;
+	using sso_double_t = sso_vector<T, benchmark_double_inline>;
+
+	constexpr std::array<scenario_spec, 5> scenarios{{
+		{"ephemeral churn", 1u},
+		{"copy/read-mostly", 2u},
+		{"copy-then-mutate", 2u},
+		{"inline-threshold transitions", 4u},
+		{"pooled reuse", 1u},
+	}};
 
 	std::cout << "\nPayload: " << payload_name << '\n';
-	std::cout << "Default inline elems : " << default_inline << '\n';
-	std::cout << "Doubled inline elems : " << doubled_inline << '\n';
-	std::cout << std::left << std::setw(28) << "Container"
-	          << std::right << std::setw(16) << "Time(s)"
-	          << std::setw(16) << "Ops/sec"
-	          << '\n';
-	std::cout << std::string(60, '-') << '\n';
+	std::cout << "Default inline elems      : " << default_inline << '\n';
+	std::cout << "Benchmark inline elems    : " << benchmark_inline << '\n';
+	std::cout << "Benchmark 2x inline elems : " << benchmark_double_inline << '\n';
 
-	const auto print_row = [iterations](std::string_view label, double seconds) {
-		const double ops_per_sec = static_cast<double>(iterations) / seconds;
-		std::cout << std::left << std::setw(28) << label
-		          << std::right << std::setw(16) << std::fixed << std::setprecision(6) << seconds
-		          << std::setw(16) << std::setprecision(0) << ops_per_sec
+	const auto inline_label = "sso_vector inline=" + std::to_string(benchmark_inline);
+	const auto double_inline_label = "sso_vector inline=" + std::to_string(benchmark_double_inline);
+
+	const auto print_header = [] {
+		std::cout << std::left << std::setw(32) << "Container"
+		          << std::right << std::setw(16) << "Time(s)"
+		          << std::setw(16) << "Ops/sec"
+		          << std::setw(20) << "Rel vs std::vector"
+		          << '\n';
+	};
+	const auto print_row = [](std::string_view label, const measurement& result, const measurement& baseline) {
+		const double ratio = result.seconds / baseline.seconds;
+		std::cout << std::left << std::setw(32) << label
+		          << std::right << std::setw(16) << std::fixed << std::setprecision(6) << result.seconds
+		          << std::setw(16) << std::setprecision(0) << result.ops_per_sec
+		          << std::setw(20) << std::setprecision(2) << ratio << 'x'
 		          << '\n';
 	};
 
-	print_row("std::vector", benchmark_case<std_vector_t>(iterations, default_inline));
-	print_row("sso_vector default", benchmark_case<sso_default_t>(iterations, default_inline));
-	print_row("sso_vector 2x inline", benchmark_case<sso_double_t>(iterations, doubled_inline));
+	std::array<scenario_results, 5> results{};
+
+	for (std::size_t i = 0; i < results.size(); ++i) {
+		results[i].label = scenarios[i].label;
+		results[i].iterations = (std::max)(std::size_t{1}, iterations / scenarios[i].iteration_divisor);
+	}
+
+	results[0].std_vector = benchmark_case<std_vector_t>(results[0].iterations, benchmark_inline, workload_ephemeral<std_vector_t>);
+	results[0].sso_inline = benchmark_case<sso_inline_t>(results[0].iterations, benchmark_inline, workload_ephemeral<sso_inline_t>);
+	results[0].sso_double_inline = benchmark_case<sso_double_t>(results[0].iterations, benchmark_double_inline, workload_ephemeral<sso_double_t>);
+
+	results[1].std_vector = benchmark_case<std_vector_t>(results[1].iterations, benchmark_inline, workload_copy_read_mostly<std_vector_t>);
+	results[1].sso_inline = benchmark_case<sso_inline_t>(results[1].iterations, benchmark_inline, workload_copy_read_mostly<sso_inline_t>);
+	results[1].sso_double_inline = benchmark_case<sso_double_t>(results[1].iterations, benchmark_double_inline, workload_copy_read_mostly<sso_double_t>);
+
+	results[2].std_vector = benchmark_case<std_vector_t>(results[2].iterations, benchmark_inline, workload_copy_then_mutate<std_vector_t>);
+	results[2].sso_inline = benchmark_case<sso_inline_t>(results[2].iterations, benchmark_inline, workload_copy_then_mutate<sso_inline_t>);
+	results[2].sso_double_inline = benchmark_case<sso_double_t>(results[2].iterations, benchmark_double_inline, workload_copy_then_mutate<sso_double_t>);
+
+	results[3].std_vector = benchmark_case<std_vector_t>(results[3].iterations, benchmark_inline, workload_inline_threshold<std_vector_t>);
+	results[3].sso_inline = benchmark_case<sso_inline_t>(results[3].iterations, benchmark_inline, workload_inline_threshold<sso_inline_t>);
+	results[3].sso_double_inline = benchmark_case<sso_double_t>(results[3].iterations, benchmark_double_inline, workload_inline_threshold<sso_double_t>);
+
+	results[4].std_vector = benchmark_case<std_vector_t>(results[4].iterations, benchmark_inline, workload_reuse_pool<std_vector_t>);
+	results[4].sso_inline = benchmark_case<sso_inline_t>(results[4].iterations, benchmark_inline, workload_reuse_pool<sso_inline_t>);
+	results[4].sso_double_inline = benchmark_case<sso_double_t>(results[4].iterations, benchmark_double_inline, workload_reuse_pool<sso_double_t>);
+
+	for (const auto& scenario : results) {
+		std::cout << "\nScenario: " << scenario.label << '\n';
+		print_header();
+		std::cout << std::string(84, '-') << '\n';
+		print_row("std::vector", scenario.std_vector, scenario.std_vector);
+		print_row(inline_label, scenario.sso_inline, scenario.std_vector);
+		print_row(double_inline_label, scenario.sso_double_inline, scenario.std_vector);
+	}
+
+	const auto sum_seconds = [](const auto& result_set, auto member) {
+		double total = 0.0;
+		for (const auto& result : result_set) {
+			total += (result.*member).seconds;
+		}
+		return total;
+	};
+
+	const measurement overall_std{
+		sum_seconds(results, &scenario_results::std_vector),
+		static_cast<double>(iterations) / sum_seconds(results, &scenario_results::std_vector)
+	};
+	const measurement overall_inline{
+		sum_seconds(results, &scenario_results::sso_inline),
+		static_cast<double>(iterations) / sum_seconds(results, &scenario_results::sso_inline)
+	};
+	const measurement overall_double{
+		sum_seconds(results, &scenario_results::sso_double_inline),
+		static_cast<double>(iterations) / sum_seconds(results, &scenario_results::sso_double_inline)
+	};
+
+	std::cout << "\nOverall summary\n";
+	print_header();
+	std::cout << std::string(84, '-') << '\n';
+	print_row("std::vector", overall_std, overall_std);
+	print_row(inline_label, overall_inline, overall_std);
+	print_row(double_inline_label, overall_double, overall_std);
 }
 
 } // namespace
