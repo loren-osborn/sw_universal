@@ -426,11 +426,17 @@ template<class V>
 constexpr bool has_using_sso = requires(const V& v) { v.using_sso(); };
 
 static_assert(!has_using_sso<sw::universal::internal::sso_vector_default<int>>);
-static_assert(!std::is_base_of_v<std::vector<int>, sw::universal::internal::sso_vector<int, 0>>,
-	"sso_vector<T,0> should use composition instead of inheriting from std::vector");
+
+static_assert(sw::universal::internal::zero_inline_policy_matches_v<0, sw::universal::internal::zero_inline_policy::allow>);
+static_assert(sw::universal::internal::zero_inline_policy_matches_v<4, sw::universal::internal::zero_inline_policy::disallow>);
+static_assert(!sw::universal::internal::zero_inline_policy_matches_v<0, sw::universal::internal::zero_inline_policy::disallow>);
+static_assert(!sw::universal::internal::zero_inline_policy_matches_v<4, sw::universal::internal::zero_inline_policy::allow>);
 
 template<class T, class Allocator>
 using sso_vector_auto = sw::universal::internal::sso_vector_default<T, Allocator>;
+
+template<class T, class Allocator>
+using sso_cow_vector_auto = sw::universal::internal::sso_cow_vector_default<T, Allocator>;
 
 struct AllocState {
 	int alloc_calls = 0;
@@ -782,6 +788,9 @@ void assert_no_new_constructions_during_lifetime_tracked_interval(
 template<class T, class Alloc>
 using sso_vector_small = sw::universal::internal::sso_vector<T, 4, Alloc>;
 
+template<class T, class Alloc>
+using sso_cow_vector_small = sw::universal::internal::sso_cow_vector<T, 4, Alloc>;
+
 template<class V>
 concept has_sso_vector_count_constructor = requires {
 	V(std::size_t{3});
@@ -1036,7 +1045,7 @@ void run_vector_std_parity_suite(int& failures) {
 }
 
 void run_sso_proxy_suite(int& failures) {
-	using Vec = sw::universal::internal::sso_vector_default<int>;
+	using Vec = sw::universal::internal::sso_cow_vector_default<int>;
 	TestContext ctx{"sso_vector(proxy)", failures};
 
 	// Custom-only behavior: non-const indexing/iteration uses proxy objects instead of raw references.
@@ -1065,7 +1074,7 @@ void run_sso_proxy_suite(int& failures) {
 }
 
 void run_sso_cow_suite(int& failures) {
-	using Vec = sw::universal::internal::sso_vector_default<int>;
+	using Vec = sw::universal::internal::sso_cow_vector_default<int>;
 	TestContext ctx{"sso_vector(cow)", failures};
 
 	{
@@ -1144,6 +1153,50 @@ void run_sso_cow_suite(int& failures) {
 		t2.join();
 		check(ctx, shared.size() == 8, "concurrency smoke preserves source state");
 	}
+
+	{
+		using ZeroVec = sw::universal::internal::sso_cow_vector<std::string, 0, std::allocator<std::string>, sw::universal::internal::zero_inline_policy::allow>;
+		ZeroVec left;
+		left.push_back("cow");
+		left.push_back("zero");
+		ZeroVec right = left;
+		check(ctx, static_cast<const ZeroVec&>(left).data() == static_cast<const ZeroVec&>(right).data(),
+			"zero-inline cow vectors still share heap-backed copies");
+		right[1] = std::string("detached");
+		check(ctx, static_cast<std::string>(left[1]) == "zero", "zero-inline cow detach preserves source");
+		check(ctx, static_cast<std::string>(right[1]) == "detached", "zero-inline cow detach updates destination");
+	}
+}
+
+void run_sso_vector_non_cow_suite(int& failures) {
+	using Vec = sw::universal::internal::sso_vector<int, 4>;
+	TestContext ctx{"sso_vector(non_cow)", failures};
+
+	Vec v;
+	v.push_back(11);
+	v.push_back(22);
+	static_assert(std::is_same_v<decltype(v[0]), int&>);
+	static_assert(std::is_same_v<decltype(v.at(0)), int&>);
+	static_assert(std::is_same_v<decltype(v.front()), int&>);
+	static_assert(std::is_same_v<decltype(v.back()), int&>);
+	static_assert(std::is_same_v<decltype(v.begin()), int*>);
+	static_assert(std::is_same_v<decltype(*v.begin()), int&>);
+	check(ctx, &v[0] == v.data(), "mutable indexing returns direct references");
+
+	v.reserve(32);
+	for (int i = 2; i < 12; ++i) v.push_back(i);
+	Vec copy = v;
+	check(ctx, copy.data() != v.data(), "non-cow copies do not share heap storage");
+	copy[0] = 99;
+	check(ctx, v[0] == 11, "non-cow copy mutation leaves source untouched");
+	check(ctx, copy[0] == 99, "non-cow copy mutation updates destination");
+
+	using ZeroVec = sw::universal::internal::sso_vector<std::string, 0, std::allocator<std::string>, sw::universal::internal::zero_inline_policy::allow>;
+	ZeroVec zero;
+	zero.push_back("alpha");
+	zero.push_back("beta");
+	check(ctx, zero.size() == 2, "zero-inline non-cow vector remains usable");
+	check(ctx, zero[1] == "beta", "zero-inline non-cow vector preserves contents");
 }
 
 } // namespace
@@ -1644,8 +1697,8 @@ void run_vector_lifetime_suite(const char* impl_name, int& failures) {
 }
 
 void run_sso_vector_cow_behavior_suite(int& failures) {
-	using Vec = sso_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
-	using ThrowVec = sso_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
+	using Vec = sso_cow_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
+	using ThrowVec = sso_cow_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
 	TestContext ctx{"sso_vector_cow_specific", failures};
 
 	{
@@ -1922,8 +1975,8 @@ void run_sso_vector_cow_behavior_suite(int& failures) {
 }
 
 void run_sso_vector_cow_destructor_and_reuse_suite(int& failures) {
-	using Vec = sso_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
-	using ThrowVec = sso_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
+	using Vec = sso_cow_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
+	using ThrowVec = sso_cow_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
 	TestContext ctx{"sso_vector_cow_destructor_reuse", failures};
 
 	{
@@ -2160,8 +2213,8 @@ void run_sso_vector_cow_destructor_and_reuse_suite(int& failures) {
 }
 
 void run_sso_vector_specific_lifetime_suite(int& failures) {
-	using Vec = sso_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
-	using ThrowVec = sso_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
+	using Vec = sso_cow_vector_small<LifetimeTracked, std::allocator<LifetimeTracked>>;
+	using ThrowVec = sso_cow_vector_small<LifetimeThrowingTracked, std::allocator<LifetimeThrowingTracked>>;
 	TestContext ctx{"sso_vector_lifetime_specific", failures};
 
 	{
@@ -2770,7 +2823,7 @@ void run_sso_vector_ownership_header_suite(int& failures) {
 		// mark_unshareable is intentionally exercised only after the header has been driven back to
 		// unique ownership; that helper is a narrow one-shot unique-owner transition, not a detach path.
 		std::allocator<int> alloc;
-		auto* block = detail::allocate_block<int>(8, alloc);
+		auto* block = detail::allocate_block<int, true>(8, alloc);
 		const auto initial = detail::load_ownership_header_snapshot(block);
 		check(ctx, detail::ownership_header_is_shareable(initial), "fresh ownership header starts shareable");
 		check(ctx, detail::ownership_header_share_count(initial) == 1, "fresh ownership header starts with one owner");
@@ -2815,6 +2868,7 @@ int main() {
 	run_sso_vector_ownership_header_suite(nrOfFailedTestCases);
 	run_sso_proxy_suite(nrOfFailedTestCases);
 	run_sso_cow_suite(nrOfFailedTestCases);
+	run_sso_vector_non_cow_suite(nrOfFailedTestCases);
 	run_sso_vector_cow_behavior_suite(nrOfFailedTestCases);
 	run_sso_vector_cow_destructor_and_reuse_suite(nrOfFailedTestCases);
 	run_vector_std_parity_suite(nrOfFailedTestCases);
