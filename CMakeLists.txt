@@ -738,9 +738,70 @@ execute_process(
   OUTPUT_STRIP_TRAILING_WHITESPACE
 )
 
+set(BENCH_BUILD_CONFIG "${CMAKE_BUILD_TYPE}")
+if("${BENCH_BUILD_CONFIG}" STREQUAL "")
+  set(BENCH_BUILD_CONFIG "Unknown")
+endif()
+
+set(BENCH_PROVENANCE_STATUS "unknown")
+set(BENCH_PROVENANCE_REASON "git state unavailable")
+set(BENCH_PROVENANCE_COMMIT_HASH "")
+
+execute_process(
+  COMMAND git rev-parse HEAD
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  RESULT_VARIABLE BENCH_GIT_HEAD_RESULT
+  OUTPUT_VARIABLE BENCH_GIT_HEAD_HASH
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+execute_process(
+  COMMAND git status --porcelain=v1 --untracked-files=all
+  WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}
+  RESULT_VARIABLE BENCH_GIT_STATUS_RESULT
+  OUTPUT_VARIABLE BENCH_GIT_STATUS_OUTPUT
+  OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET
+)
+
+if(BENCH_GIT_HEAD_RESULT EQUAL 0 AND BENCH_GIT_STATUS_RESULT EQUAL 0)
+  set(BENCH_PROVENANCE_STATUS "valid")
+  set(BENCH_PROVENANCE_REASON "clean HEAD")
+  string(REPLACE "\n" ";" BENCH_GIT_STATUS_LINES "${BENCH_GIT_STATUS_OUTPUT}")
+  foreach(BENCH_GIT_STATUS_LINE IN LISTS BENCH_GIT_STATUS_LINES)
+    if("${BENCH_GIT_STATUS_LINE}" STREQUAL "")
+      continue()
+    endif()
+
+    if(BENCH_GIT_STATUS_LINE MATCHES "^\\?\\? ")
+      string(SUBSTRING "${BENCH_GIT_STATUS_LINE}" 3 -1 BENCH_UNTRACKED_PATH)
+      if(BENCH_UNTRACKED_PATH MATCHES "(^|/)CMakeLists\\.txt$" OR
+         BENCH_UNTRACKED_PATH MATCHES "\\.(cpp|cc|c|hpp|hh|h|cmake)$")
+        set(BENCH_PROVENANCE_STATUS "dirty")
+        set(BENCH_PROVENANCE_REASON "untracked source-like files present")
+        break()
+      endif()
+    elseif(NOT BENCH_GIT_STATUS_LINE MATCHES "^!! ")
+      set(BENCH_PROVENANCE_STATUS "dirty")
+      set(BENCH_PROVENANCE_REASON "tracked changes present")
+      break()
+    endif()
+  endforeach()
+
+  if(BENCH_PROVENANCE_STATUS STREQUAL "valid")
+    set(BENCH_PROVENANCE_COMMIT_HASH "${BENCH_GIT_HEAD_HASH}")
+  endif()
+endif()
+
 # propagate the git information to any executables that might want to use it
 add_definitions("-DGIT_COMMIT_HASH=${GIT_COMMIT_HASH}")
 add_definitions("-DGIT_BRANCH=${GIT_BRANCH}")
+
+configure_file(
+  "${CMAKE_CURRENT_SOURCE_DIR}/tools/cmake/Templates/BenchmarkProvenance.hpp.in"
+  "${CMAKE_BINARY_DIR}/generated/BenchmarkProvenance.hpp"
+  @ONLY
+)
 
 set(PROJECT_VERSION "${PROJECT_VERSION}.${GIT_COMMIT_HASH}")
 
@@ -755,6 +816,10 @@ message(STATUS "CMAKE_CURRENT_SOURCE_DIR    = ${CMAKE_CURRENT_SOURCE_DIR}")
 message(STATUS "CMAKE_CURRENT_BINARY_DIR    = ${CMAKE_CURRENT_BINARY_DIR}")
 message(STATUS "GIT_COMMIT_HASH             = ${GIT_COMMIT_HASH}")
 message(STATUS "GIT_BRANCH                  = ${GIT_BRANCH}")
+message(STATUS "BENCH_BUILD_CONFIG          = ${BENCH_BUILD_CONFIG}")
+message(STATUS "BENCH_PROVENANCE_STATUS     = ${BENCH_PROVENANCE_STATUS}")
+message(STATUS "BENCH_PROVENANCE_REASON     = ${BENCH_PROVENANCE_REASON}")
+message(STATUS "BENCH_PROVENANCE_COMMIT     = ${BENCH_PROVENANCE_COMMIT_HASH}")
 message(STATUS "include_install_dir         = ${include_install_dir}")
 message(STATUS "include_install_dir_full    = ${include_install_dir_full}")
 message(STATUS "config_install_dir          = ${config_install_dir}")
