@@ -21,6 +21,12 @@ namespace {
 
 namespace perf = sw::universal::internal::sso_vector_perf_detail;
 
+enum class comparison_mode {
+	none,
+	clean_match,
+	dirty_match,
+};
+
 #if defined(_WIN32)
 #define popen _popen
 #define pclose _pclose
@@ -57,8 +63,18 @@ bool parse_metadata_output(const std::string& text, perf::benchmark_metadata& me
 			metadata.provenance_status = line.substr(std::string("provenance_status=").size());
 		} else if (line.rfind("provenance_reason=", 0) == 0) {
 			metadata.provenance_reason = line.substr(std::string("provenance_reason=").size());
+		} else if (line.rfind("provenance_publishable=", 0) == 0) {
+			metadata.provenance_publishable = line.substr(std::string("provenance_publishable=").size()) == "true";
+		} else if (line.rfind("base_commit_hash=", 0) == 0) {
+			metadata.base_commit_hash = line.substr(std::string("base_commit_hash=").size());
 		} else if (line.rfind("commit_hash=", 0) == 0) {
-			metadata.commit_hash = line.substr(std::string("commit_hash=").size());
+			if (metadata.base_commit_hash.empty()) {
+				metadata.base_commit_hash = line.substr(std::string("commit_hash=").size());
+			}
+		} else if (line.rfind("dirty_fingerprint=", 0) == 0) {
+			metadata.dirty_fingerprint = line.substr(std::string("dirty_fingerprint=").size());
+		} else if (line.rfind("summary_schema=", 0) == 0) {
+			metadata.summary_schema = std::stoi(line.substr(std::string("summary_schema=").size()));
 		} else if (line.rfind("benchmark_binary=", 0) == 0) {
 			metadata.binary_path = line.substr(std::string("benchmark_binary=").size());
 		} else if (line.rfind("summary_path=", 0) == 0) {
@@ -133,8 +149,20 @@ bool summary_is_stale(const perf::persisted_summary& summary,
 		reason = "provenance status mismatch";
 		return true;
 	}
-	if (summary.commit_hash != metadata.commit_hash) {
-		reason = "commit hash mismatch";
+	if (summary.provenance_publishable != metadata.provenance_publishable) {
+		reason = "provenance publishable flag mismatch";
+		return true;
+	}
+	if (summary.base_commit_hash != metadata.base_commit_hash) {
+		reason = "base commit hash mismatch";
+		return true;
+	}
+	if (summary.dirty_fingerprint != metadata.dirty_fingerprint) {
+		reason = "dirty fingerprint mismatch";
+		return true;
+	}
+	if (summary.schema_version != metadata.summary_schema) {
+		reason = "benchmark metadata schema mismatch";
 		return true;
 	}
 	if (!std::filesystem::exists(metadata.summary_path)) {
@@ -188,12 +216,78 @@ bool ensure_current_summary(const perf::benchmark_metadata& metadata,
 	return true;
 }
 
+bool determine_comparison_mode(const perf::benchmark_metadata& debug_meta,
+                               const perf::benchmark_metadata& release_meta,
+                               comparison_mode& mode,
+                               std::string& reason) {
+	mode = comparison_mode::none;
+	reason.clear();
+
+	const bool debug_clean = debug_meta.clean_publishable();
+	const bool release_clean = release_meta.clean_publishable();
+	const bool debug_dirty = debug_meta.dirty_matchable();
+	const bool release_dirty = release_meta.dirty_matchable();
+
+	if (debug_meta.provenance_status == "dirty_matchable" && !debug_dirty) {
+		reason = "Cannot compare: Debug dirty build has no fingerprint";
+		return false;
+	}
+	if (release_meta.provenance_status == "dirty_matchable" && !release_dirty) {
+		reason = "Cannot compare: Release dirty build has no fingerprint";
+		return false;
+	}
+
+	if (debug_clean && release_clean) {
+		if (debug_meta.base_commit_hash != release_meta.base_commit_hash) {
+			reason = "Debug and Release benchmark binaries were built from different commits";
+			return false;
+		}
+		mode = comparison_mode::clean_match;
+		return true;
+	}
+
+	if (debug_dirty && release_dirty) {
+		if (debug_meta.base_commit_hash != release_meta.base_commit_hash) {
+			reason = "Cannot compare: base commits differ";
+			return false;
+		}
+		if (debug_meta.dirty_fingerprint != release_meta.dirty_fingerprint) {
+			reason = "Cannot compare: dirty fingerprints differ";
+			return false;
+		}
+		mode = comparison_mode::dirty_match;
+		return true;
+	}
+
+	if ((!debug_clean && !debug_dirty) || (!release_clean && !release_dirty)) {
+		reason = "Cannot compare: provenance unavailable";
+		return false;
+	}
+
+	if (debug_clean != release_clean || debug_dirty != release_dirty) {
+		reason = "Cannot compare: one build is clean and the other is dirty";
+		return false;
+	}
+
+	reason = "Cannot compare: provenance unavailable";
+	return false;
+}
+
 void print_combined_report(const perf::benchmark_metadata& debug_meta,
                            const perf::persisted_summary& debug_summary,
                            const perf::benchmark_metadata& release_meta,
-                           const perf::persisted_summary& release_summary) {
+                           const perf::persisted_summary& release_summary,
+                           comparison_mode mode) {
 	std::cout << "sso_vector Debug vs Release benchmark comparison\n";
-	std::cout << "Commit hash: " << debug_meta.commit_hash << '\n';
+	if (mode == comparison_mode::clean_match) {
+		std::cout << "Comparison mode: CLEAN MATCH\n";
+		std::cout << "Commit hash     : " << debug_meta.base_commit_hash << '\n';
+	} else {
+		std::cout << "Comparison mode: DIRTY MATCH (unpublished/internal only)\n";
+		std::cout << "Base commit     : " << debug_meta.base_commit_hash << '\n';
+		std::cout << "Fingerprint     : " << debug_meta.dirty_fingerprint << '\n';
+		std::cout << "Provenance note : same base commit + same dirty working-tree fingerprint\n";
+	}
 	std::cout << "Debug summary   : " << debug_meta.summary_path.string() << '\n';
 	std::cout << "Release summary : " << release_meta.summary_path.string() << '\n';
 	std::cout << '\n';
@@ -281,24 +375,25 @@ try {
 		return EXIT_FAILURE;
 	}
 
-	if (!debug_meta.provenance_valid()) {
-		std::cerr << "Debug benchmark binary reports " << debug_meta.provenance_status;
-		if (!debug_meta.provenance_reason.empty()) {
-			std::cerr << " (" << debug_meta.provenance_reason << ')';
+	comparison_mode mode = comparison_mode::none;
+	if (!determine_comparison_mode(debug_meta, release_meta, mode, error)) {
+		if (error == "Cannot compare: provenance unavailable") {
+			if (!debug_meta.clean_publishable() && !debug_meta.dirty_matchable()) {
+				std::cerr << "Debug benchmark binary reports " << debug_meta.provenance_status;
+				if (!debug_meta.provenance_reason.empty()) {
+					std::cerr << " (" << debug_meta.provenance_reason << ')';
+				}
+				std::cerr << '\n';
+			}
+			if (!release_meta.clean_publishable() && !release_meta.dirty_matchable()) {
+				std::cerr << "Release benchmark binary reports " << release_meta.provenance_status;
+				if (!release_meta.provenance_reason.empty()) {
+					std::cerr << " (" << release_meta.provenance_reason << ')';
+				}
+				std::cerr << '\n';
+			}
 		}
-		std::cerr << "; no commit-based comparison available\n";
-		return EXIT_FAILURE;
-	}
-	if (!release_meta.provenance_valid()) {
-		std::cerr << "Release benchmark binary reports " << release_meta.provenance_status;
-		if (!release_meta.provenance_reason.empty()) {
-			std::cerr << " (" << release_meta.provenance_reason << ')';
-		}
-		std::cerr << "; no commit-based comparison available\n";
-		return EXIT_FAILURE;
-	}
-	if (debug_meta.commit_hash != release_meta.commit_hash) {
-		std::cerr << "Debug and Release benchmark binaries were built from different commits\n";
+		std::cerr << error << '\n';
 		return EXIT_FAILURE;
 	}
 
@@ -317,7 +412,7 @@ try {
 		return EXIT_FAILURE;
 	}
 
-	print_combined_report(debug_meta, debug_summary, release_meta, release_summary);
+	print_combined_report(debug_meta, debug_summary, release_meta, release_summary, mode);
 	return EXIT_SUCCESS;
 }
 catch (const std::exception& ex) {
