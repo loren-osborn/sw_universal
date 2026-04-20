@@ -65,6 +65,16 @@ template<std::size_t InlineCount, zero_inline_policy ZeroInlinePolicy>
 inline constexpr bool zero_inline_policy_matches_v =
 	((InlineCount == 0) == (ZeroInlinePolicy == zero_inline_policy::allow));
 
+template<class Container>
+concept has_mediated_indexed_write =
+	requires(Container c, typename Container::size_type index, typename Container::value_type value) {
+		{ c.set_at(index, value) } -> std::same_as<void>;
+	} &&
+	(!std::same_as<
+		decltype(std::declval<Container&>()[std::declval<typename Container::size_type>()]),
+		typename Container::value_type&
+	>);
+
 namespace sso_vector_detail {
 
 template<class T>
@@ -521,7 +531,7 @@ private:
 	}
 
 	template<class U>
-	void set_at(size_type index, U&& value) {
+	void set_at_impl(size_type index, U&& value) {
 		assert(index < size_impl() && "sso_vector set_at index should be in range");
 		ensure_mutable_heap_impl();
 		if (is_inline_impl()) {
@@ -1499,6 +1509,11 @@ public:
 	const_reference operator[](size_type pos) const noexcept {
 		assert(pos < size() && "sso_vector::operator[] should be in range");
 		return cref_at_unchecked(pos);
+	}
+
+	template<class U>
+	void set_at(size_type pos, U&& value) {
+		set_at_impl(pos, std::forward<U>(value));
 	}
 
 	const_reference front() const noexcept { return data_const_impl()[0]; }

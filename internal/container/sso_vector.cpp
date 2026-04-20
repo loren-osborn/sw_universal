@@ -431,6 +431,9 @@ static_assert(sw::universal::internal::zero_inline_policy_matches_v<0, sw::unive
 static_assert(sw::universal::internal::zero_inline_policy_matches_v<4, sw::universal::internal::zero_inline_policy::disallow>);
 static_assert(!sw::universal::internal::zero_inline_policy_matches_v<0, sw::universal::internal::zero_inline_policy::disallow>);
 static_assert(!sw::universal::internal::zero_inline_policy_matches_v<4, sw::universal::internal::zero_inline_policy::allow>);
+static_assert(!sw::universal::internal::has_mediated_indexed_write<std::vector<int>>);
+static_assert(!sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::sso_vector_default<int>>);
+static_assert(sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::sso_cow_vector_default<int>>);
 
 template<class T, class Allocator>
 using sso_vector_auto = sw::universal::internal::sso_vector_default<T, Allocator>;
@@ -1068,6 +1071,8 @@ void run_sso_proxy_suite(int& failures) {
 	check(ctx, static_cast<int>(v[0]) == 11, "proxy read conversion");
 	v[1] = 42;
 	check(ctx, static_cast<int>(v[1]) == 42, "proxy write assignment");
+	v.set_at(0, 17);
+	check(ctx, static_cast<int>(v[0]) == 17, "set_at updates proxy-backed vector");
 	check(ctx, static_cast<int>(v.at(1)) == 42, "mutable at returns readable proxy");
 	expect_throw<std::out_of_range>(ctx, "mutable at throws on bounds failure", [&]() { (void)v.at(99); });
 	expect_throw<std::out_of_range>(ctx, "const at throws on bounds failure", [&]() { (void)std::as_const(v).at(99); });
@@ -1182,6 +1187,8 @@ void run_sso_vector_non_cow_suite(int& failures) {
 	static_assert(std::is_same_v<decltype(v.begin()), int*>);
 	static_assert(std::is_same_v<decltype(*v.begin()), int&>);
 	check(ctx, &v[0] == v.data(), "mutable indexing returns direct references");
+	v.set_at(1, 44);
+	check(ctx, v[1] == 44, "set_at updates direct-reference vector");
 
 	v.reserve(32);
 	for (int i = 2; i < 12; ++i) v.push_back(i);
