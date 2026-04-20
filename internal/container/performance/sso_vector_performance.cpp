@@ -31,8 +31,14 @@ namespace {
 
 using sw::universal::internal::sso_cow_vector;
 using sw::universal::internal::sso_vector;
+using sw::universal::internal::has_mediated_indexed_write;
 using sw::universal::internal::zero_inline_policy;
 namespace perf = sw::universal::internal::sso_vector_perf_detail;
+
+enum class indexed_write_path {
+	proxy,
+	set_at,
+};
 
 template<typename T>
 struct payload_ops;
@@ -51,6 +57,16 @@ struct payload_ops<std::uint32_t> {
 		value += delta;
 	}
 };
+
+template<indexed_write_path WritePath, typename Container>
+void write_indexed_value(Container& c, std::size_t index, typename Container::value_type value) {
+	if constexpr (WritePath == indexed_write_path::set_at) {
+		static_assert(has_mediated_indexed_write<Container>);
+		c.set_at(index, std::move(value));
+	} else {
+		c[index] = std::move(value);
+	}
+}
 
 template<typename Container>
 void append_pattern(Container& c, std::size_t count, std::uint32_t seed) {
@@ -108,7 +124,7 @@ std::uint64_t workload_copy_read_mostly(std::size_t iterations, std::size_t inli
 	return acc;
 }
 
-template<typename Container>
+template<typename Container, indexed_write_path WritePath = indexed_write_path::proxy>
 std::uint64_t workload_copy_then_mutate(std::size_t iterations, std::size_t inline_capacity) {
 	std::uint64_t acc = 0;
 	for (std::size_t i = 0; i < iterations; ++i) {
@@ -119,7 +135,7 @@ std::uint64_t workload_copy_then_mutate(std::size_t iterations, std::size_t inli
 			const std::size_t pos = (i * 7u) % copy.size();
 			auto value = static_cast<typename Container::value_type>(copy[pos]);
 			payload_ops<typename Container::value_type>::mutate(value, static_cast<std::uint32_t>(i + 1u));
-			copy[pos] = std::move(value);
+			write_indexed_value<WritePath>(copy, pos, std::move(value));
 		}
 		acc ^= reduce_hash(src);
 		acc ^= reduce_hash(copy);
@@ -142,7 +158,7 @@ std::uint64_t workload_inline_threshold(std::size_t iterations, std::size_t inli
 	return acc;
 }
 
-template<typename Container>
+template<typename Container, indexed_write_path WritePath = indexed_write_path::proxy>
 std::uint64_t workload_reuse_pool(std::size_t iterations, std::size_t inline_capacity) {
 	std::array<Container, 16> pool{};
 	std::uint64_t acc = 0;
@@ -153,7 +169,7 @@ std::uint64_t workload_reuse_pool(std::size_t iterations, std::size_t inline_cap
 		if (!v.empty() && (i % 3u) == 0u) {
 			auto value = static_cast<typename Container::value_type>(v.back());
 			payload_ops<typename Container::value_type>::mutate(value, static_cast<std::uint32_t>(17u + i));
-			v.back() = std::move(value);
+			write_indexed_value<WritePath>(v, v.size() - 1u, std::move(value));
 		}
 		acc ^= reduce_hash(v);
 	}
@@ -204,9 +220,12 @@ struct scenario_results {
 	measurement sso_non_cow_zero_inline;
 	measurement sso_non_cow_inline;
 	measurement sso_non_cow_double_inline;
-	measurement sso_cow_zero_inline;
-	measurement sso_cow_inline;
-	measurement sso_cow_double_inline;
+	measurement sso_cow_zero_inline_proxy;
+	measurement sso_cow_inline_proxy;
+	measurement sso_cow_double_inline_proxy;
+	measurement sso_cow_zero_inline_set_at;
+	measurement sso_cow_inline_set_at;
+	measurement sso_cow_double_inline_set_at;
 };
 
 template<typename Container>
@@ -291,6 +310,14 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 	using sso_cow_inline_t = sso_cow_vector<T, benchmark_inline>;
 	using sso_cow_double_t = sso_cow_vector<T, benchmark_double_inline>;
 
+	static_assert(!has_mediated_indexed_write<std_vector_t>);
+	static_assert(!has_mediated_indexed_write<sso_zero_t>);
+	static_assert(!has_mediated_indexed_write<sso_inline_t>);
+	static_assert(!has_mediated_indexed_write<sso_double_t>);
+	static_assert(has_mediated_indexed_write<sso_cow_zero_t>);
+	static_assert(has_mediated_indexed_write<sso_cow_inline_t>);
+	static_assert(has_mediated_indexed_write<sso_cow_double_t>);
+
 	constexpr std::array<scenario_spec, 6> scenarios{{
 		{"ephemeral churn", 1u},
 		{"copy/read-mostly", 2u},
@@ -303,9 +330,12 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 	const std::string zero_inline_label = "sso_vector inline=0";
 	const std::string inline_label = "sso_vector inline=" + std::to_string(benchmark_inline);
 	const std::string double_inline_label = "sso_vector inline=" + std::to_string(benchmark_double_inline);
-	const std::string cow_zero_inline_label = "sso_cow_vector inline=0";
-	const std::string cow_inline_label = "sso_cow_vector inline=" + std::to_string(benchmark_inline);
-	const std::string cow_double_inline_label = "sso_cow_vector inline=" + std::to_string(benchmark_double_inline);
+	const std::string cow_zero_inline_proxy_label = "sso_cow_vector inline=0 [proxy]";
+	const std::string cow_inline_proxy_label = "sso_cow_vector inline=" + std::to_string(benchmark_inline) + " [proxy]";
+	const std::string cow_double_inline_proxy_label = "sso_cow_vector inline=" + std::to_string(benchmark_double_inline) + " [proxy]";
+	const std::string cow_zero_inline_set_at_label = "sso_cow_vector inline=0 [set_at]";
+	const std::string cow_inline_set_at_label = "sso_cow_vector inline=" + std::to_string(benchmark_inline) + " [set_at]";
+	const std::string cow_double_inline_set_at_label = "sso_cow_vector inline=" + std::to_string(benchmark_double_inline) + " [set_at]";
 
 	const auto print_scenario_header = [] {
 		std::cout << std::left << std::setw(32) << "Container"
@@ -332,49 +362,67 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 	results[0].sso_non_cow_zero_inline = benchmark_case<sso_zero_t>(results[0].iterations, 0u, workload_ephemeral<sso_zero_t>);
 	results[0].sso_non_cow_inline = benchmark_case<sso_inline_t>(results[0].iterations, benchmark_inline, workload_ephemeral<sso_inline_t>);
 	results[0].sso_non_cow_double_inline = benchmark_case<sso_double_t>(results[0].iterations, benchmark_double_inline, workload_ephemeral<sso_double_t>);
-	results[0].sso_cow_zero_inline = benchmark_case<sso_cow_zero_t>(results[0].iterations, 0u, workload_ephemeral<sso_cow_zero_t>);
-	results[0].sso_cow_inline = benchmark_case<sso_cow_inline_t>(results[0].iterations, benchmark_inline, workload_ephemeral<sso_cow_inline_t>);
-	results[0].sso_cow_double_inline = benchmark_case<sso_cow_double_t>(results[0].iterations, benchmark_double_inline, workload_ephemeral<sso_cow_double_t>);
+	results[0].sso_cow_zero_inline_proxy = benchmark_case<sso_cow_zero_t>(results[0].iterations, 0u, workload_ephemeral<sso_cow_zero_t>);
+	results[0].sso_cow_inline_proxy = benchmark_case<sso_cow_inline_t>(results[0].iterations, benchmark_inline, workload_ephemeral<sso_cow_inline_t>);
+	results[0].sso_cow_double_inline_proxy = benchmark_case<sso_cow_double_t>(results[0].iterations, benchmark_double_inline, workload_ephemeral<sso_cow_double_t>);
+	results[0].sso_cow_zero_inline_set_at = benchmark_case<sso_cow_zero_t>(results[0].iterations, 0u, workload_ephemeral<sso_cow_zero_t>);
+	results[0].sso_cow_inline_set_at = benchmark_case<sso_cow_inline_t>(results[0].iterations, benchmark_inline, workload_ephemeral<sso_cow_inline_t>);
+	results[0].sso_cow_double_inline_set_at = benchmark_case<sso_cow_double_t>(results[0].iterations, benchmark_double_inline, workload_ephemeral<sso_cow_double_t>);
 
 	results[1].std_vector = benchmark_case<std_vector_t>(results[1].iterations, benchmark_inline, workload_copy_read_mostly<std_vector_t>);
 	results[1].sso_non_cow_zero_inline = benchmark_case<sso_zero_t>(results[1].iterations, 0u, workload_copy_read_mostly<sso_zero_t>);
 	results[1].sso_non_cow_inline = benchmark_case<sso_inline_t>(results[1].iterations, benchmark_inline, workload_copy_read_mostly<sso_inline_t>);
 	results[1].sso_non_cow_double_inline = benchmark_case<sso_double_t>(results[1].iterations, benchmark_double_inline, workload_copy_read_mostly<sso_double_t>);
-	results[1].sso_cow_zero_inline = benchmark_case<sso_cow_zero_t>(results[1].iterations, 0u, workload_copy_read_mostly<sso_cow_zero_t>);
-	results[1].sso_cow_inline = benchmark_case<sso_cow_inline_t>(results[1].iterations, benchmark_inline, workload_copy_read_mostly<sso_cow_inline_t>);
-	results[1].sso_cow_double_inline = benchmark_case<sso_cow_double_t>(results[1].iterations, benchmark_double_inline, workload_copy_read_mostly<sso_cow_double_t>);
+	results[1].sso_cow_zero_inline_proxy = benchmark_case<sso_cow_zero_t>(results[1].iterations, 0u, workload_copy_read_mostly<sso_cow_zero_t>);
+	results[1].sso_cow_inline_proxy = benchmark_case<sso_cow_inline_t>(results[1].iterations, benchmark_inline, workload_copy_read_mostly<sso_cow_inline_t>);
+	results[1].sso_cow_double_inline_proxy = benchmark_case<sso_cow_double_t>(results[1].iterations, benchmark_double_inline, workload_copy_read_mostly<sso_cow_double_t>);
+	results[1].sso_cow_zero_inline_set_at = benchmark_case<sso_cow_zero_t>(results[1].iterations, 0u, workload_copy_read_mostly<sso_cow_zero_t>);
+	results[1].sso_cow_inline_set_at = benchmark_case<sso_cow_inline_t>(results[1].iterations, benchmark_inline, workload_copy_read_mostly<sso_cow_inline_t>);
+	results[1].sso_cow_double_inline_set_at = benchmark_case<sso_cow_double_t>(results[1].iterations, benchmark_double_inline, workload_copy_read_mostly<sso_cow_double_t>);
 
 	results[2].std_vector = benchmark_case<std_vector_t>(results[2].iterations, benchmark_inline, workload_copy_then_mutate<std_vector_t>);
 	results[2].sso_non_cow_zero_inline = benchmark_case<sso_zero_t>(results[2].iterations, 0u, workload_copy_then_mutate<sso_zero_t>);
 	results[2].sso_non_cow_inline = benchmark_case<sso_inline_t>(results[2].iterations, benchmark_inline, workload_copy_then_mutate<sso_inline_t>);
 	results[2].sso_non_cow_double_inline = benchmark_case<sso_double_t>(results[2].iterations, benchmark_double_inline, workload_copy_then_mutate<sso_double_t>);
-	results[2].sso_cow_zero_inline = benchmark_case<sso_cow_zero_t>(results[2].iterations, 0u, workload_copy_then_mutate<sso_cow_zero_t>);
-	results[2].sso_cow_inline = benchmark_case<sso_cow_inline_t>(results[2].iterations, benchmark_inline, workload_copy_then_mutate<sso_cow_inline_t>);
-	results[2].sso_cow_double_inline = benchmark_case<sso_cow_double_t>(results[2].iterations, benchmark_double_inline, workload_copy_then_mutate<sso_cow_double_t>);
+	results[2].sso_cow_zero_inline_proxy = benchmark_case<sso_cow_zero_t>(results[2].iterations, 0u, workload_copy_then_mutate<sso_cow_zero_t, indexed_write_path::proxy>);
+	results[2].sso_cow_inline_proxy = benchmark_case<sso_cow_inline_t>(results[2].iterations, benchmark_inline, workload_copy_then_mutate<sso_cow_inline_t, indexed_write_path::proxy>);
+	results[2].sso_cow_double_inline_proxy = benchmark_case<sso_cow_double_t>(results[2].iterations, benchmark_double_inline, workload_copy_then_mutate<sso_cow_double_t, indexed_write_path::proxy>);
+	results[2].sso_cow_zero_inline_set_at = benchmark_case<sso_cow_zero_t>(results[2].iterations, 0u, workload_copy_then_mutate<sso_cow_zero_t, indexed_write_path::set_at>);
+	results[2].sso_cow_inline_set_at = benchmark_case<sso_cow_inline_t>(results[2].iterations, benchmark_inline, workload_copy_then_mutate<sso_cow_inline_t, indexed_write_path::set_at>);
+	results[2].sso_cow_double_inline_set_at = benchmark_case<sso_cow_double_t>(results[2].iterations, benchmark_double_inline, workload_copy_then_mutate<sso_cow_double_t, indexed_write_path::set_at>);
 
 	results[3].std_vector = benchmark_case<std_vector_t>(results[3].iterations, benchmark_inline, workload_inline_threshold<std_vector_t>);
 	results[3].sso_non_cow_zero_inline = benchmark_case<sso_zero_t>(results[3].iterations, 0u, workload_inline_threshold<sso_zero_t>);
 	results[3].sso_non_cow_inline = benchmark_case<sso_inline_t>(results[3].iterations, benchmark_inline, workload_inline_threshold<sso_inline_t>);
 	results[3].sso_non_cow_double_inline = benchmark_case<sso_double_t>(results[3].iterations, benchmark_double_inline, workload_inline_threshold<sso_double_t>);
-	results[3].sso_cow_zero_inline = benchmark_case<sso_cow_zero_t>(results[3].iterations, 0u, workload_inline_threshold<sso_cow_zero_t>);
-	results[3].sso_cow_inline = benchmark_case<sso_cow_inline_t>(results[3].iterations, benchmark_inline, workload_inline_threshold<sso_cow_inline_t>);
-	results[3].sso_cow_double_inline = benchmark_case<sso_cow_double_t>(results[3].iterations, benchmark_double_inline, workload_inline_threshold<sso_cow_double_t>);
+	results[3].sso_cow_zero_inline_proxy = benchmark_case<sso_cow_zero_t>(results[3].iterations, 0u, workload_inline_threshold<sso_cow_zero_t>);
+	results[3].sso_cow_inline_proxy = benchmark_case<sso_cow_inline_t>(results[3].iterations, benchmark_inline, workload_inline_threshold<sso_cow_inline_t>);
+	results[3].sso_cow_double_inline_proxy = benchmark_case<sso_cow_double_t>(results[3].iterations, benchmark_double_inline, workload_inline_threshold<sso_cow_double_t>);
+	results[3].sso_cow_zero_inline_set_at = benchmark_case<sso_cow_zero_t>(results[3].iterations, 0u, workload_inline_threshold<sso_cow_zero_t>);
+	results[3].sso_cow_inline_set_at = benchmark_case<sso_cow_inline_t>(results[3].iterations, benchmark_inline, workload_inline_threshold<sso_cow_inline_t>);
+	results[3].sso_cow_double_inline_set_at = benchmark_case<sso_cow_double_t>(results[3].iterations, benchmark_double_inline, workload_inline_threshold<sso_cow_double_t>);
 
 	results[4].std_vector = benchmark_case<std_vector_t>(results[4].iterations, benchmark_inline, workload_reuse_pool<std_vector_t>);
 	results[4].sso_non_cow_zero_inline = benchmark_case<sso_zero_t>(results[4].iterations, 0u, workload_reuse_pool<sso_zero_t>);
 	results[4].sso_non_cow_inline = benchmark_case<sso_inline_t>(results[4].iterations, benchmark_inline, workload_reuse_pool<sso_inline_t>);
 	results[4].sso_non_cow_double_inline = benchmark_case<sso_double_t>(results[4].iterations, benchmark_double_inline, workload_reuse_pool<sso_double_t>);
-	results[4].sso_cow_zero_inline = benchmark_case<sso_cow_zero_t>(results[4].iterations, 0u, workload_reuse_pool<sso_cow_zero_t>);
-	results[4].sso_cow_inline = benchmark_case<sso_cow_inline_t>(results[4].iterations, benchmark_inline, workload_reuse_pool<sso_cow_inline_t>);
-	results[4].sso_cow_double_inline = benchmark_case<sso_cow_double_t>(results[4].iterations, benchmark_double_inline, workload_reuse_pool<sso_cow_double_t>);
+	results[4].sso_cow_zero_inline_proxy = benchmark_case<sso_cow_zero_t>(results[4].iterations, 0u, workload_reuse_pool<sso_cow_zero_t, indexed_write_path::proxy>);
+	results[4].sso_cow_inline_proxy = benchmark_case<sso_cow_inline_t>(results[4].iterations, benchmark_inline, workload_reuse_pool<sso_cow_inline_t, indexed_write_path::proxy>);
+	results[4].sso_cow_double_inline_proxy = benchmark_case<sso_cow_double_t>(results[4].iterations, benchmark_double_inline, workload_reuse_pool<sso_cow_double_t, indexed_write_path::proxy>);
+	results[4].sso_cow_zero_inline_set_at = benchmark_case<sso_cow_zero_t>(results[4].iterations, 0u, workload_reuse_pool<sso_cow_zero_t, indexed_write_path::set_at>);
+	results[4].sso_cow_inline_set_at = benchmark_case<sso_cow_inline_t>(results[4].iterations, benchmark_inline, workload_reuse_pool<sso_cow_inline_t, indexed_write_path::set_at>);
+	results[4].sso_cow_double_inline_set_at = benchmark_case<sso_cow_double_t>(results[4].iterations, benchmark_double_inline, workload_reuse_pool<sso_cow_double_t, indexed_write_path::set_at>);
 
 	results[5].std_vector = benchmark_case<std_vector_t>(results[5].iterations, 0u, workload_large_copy_read_mostly<std_vector_t>);
 	results[5].sso_non_cow_zero_inline = benchmark_case<sso_zero_t>(results[5].iterations, 0u, workload_large_copy_read_mostly<sso_zero_t>);
 	results[5].sso_non_cow_inline = benchmark_case<sso_inline_t>(results[5].iterations, benchmark_inline, workload_large_copy_read_mostly<sso_inline_t>);
 	results[5].sso_non_cow_double_inline = benchmark_case<sso_double_t>(results[5].iterations, benchmark_double_inline, workload_large_copy_read_mostly<sso_double_t>);
-	results[5].sso_cow_zero_inline = benchmark_case<sso_cow_zero_t>(results[5].iterations, 0u, workload_large_copy_read_mostly<sso_cow_zero_t>);
-	results[5].sso_cow_inline = benchmark_case<sso_cow_inline_t>(results[5].iterations, benchmark_inline, workload_large_copy_read_mostly<sso_cow_inline_t>);
-	results[5].sso_cow_double_inline = benchmark_case<sso_cow_double_t>(results[5].iterations, benchmark_double_inline, workload_large_copy_read_mostly<sso_cow_double_t>);
+	results[5].sso_cow_zero_inline_proxy = benchmark_case<sso_cow_zero_t>(results[5].iterations, 0u, workload_large_copy_read_mostly<sso_cow_zero_t>);
+	results[5].sso_cow_inline_proxy = benchmark_case<sso_cow_inline_t>(results[5].iterations, benchmark_inline, workload_large_copy_read_mostly<sso_cow_inline_t>);
+	results[5].sso_cow_double_inline_proxy = benchmark_case<sso_cow_double_t>(results[5].iterations, benchmark_double_inline, workload_large_copy_read_mostly<sso_cow_double_t>);
+	results[5].sso_cow_zero_inline_set_at = benchmark_case<sso_cow_zero_t>(results[5].iterations, 0u, workload_large_copy_read_mostly<sso_cow_zero_t>);
+	results[5].sso_cow_inline_set_at = benchmark_case<sso_cow_inline_t>(results[5].iterations, benchmark_inline, workload_large_copy_read_mostly<sso_cow_inline_t>);
+	results[5].sso_cow_double_inline_set_at = benchmark_case<sso_cow_double_t>(results[5].iterations, benchmark_double_inline, workload_large_copy_read_mostly<sso_cow_double_t>);
 
 	if (emit_report) {
 		std::cout << "\nPayload: " << payload_name << '\n';
@@ -390,9 +438,12 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 			print_scenario_row(zero_inline_label, scenario.sso_non_cow_zero_inline, scenario.std_vector);
 			print_scenario_row(inline_label, scenario.sso_non_cow_inline, scenario.std_vector);
 			print_scenario_row(double_inline_label, scenario.sso_non_cow_double_inline, scenario.std_vector);
-			print_scenario_row(cow_zero_inline_label, scenario.sso_cow_zero_inline, scenario.std_vector);
-			print_scenario_row(cow_inline_label, scenario.sso_cow_inline, scenario.std_vector);
-			print_scenario_row(cow_double_inline_label, scenario.sso_cow_double_inline, scenario.std_vector);
+			print_scenario_row(cow_zero_inline_proxy_label, scenario.sso_cow_zero_inline_proxy, scenario.std_vector);
+			print_scenario_row(cow_inline_proxy_label, scenario.sso_cow_inline_proxy, scenario.std_vector);
+			print_scenario_row(cow_double_inline_proxy_label, scenario.sso_cow_double_inline_proxy, scenario.std_vector);
+			print_scenario_row(cow_zero_inline_set_at_label, scenario.sso_cow_zero_inline_set_at, scenario.std_vector);
+			print_scenario_row(cow_inline_set_at_label, scenario.sso_cow_inline_set_at, scenario.std_vector);
+			print_scenario_row(cow_double_inline_set_at_label, scenario.sso_cow_double_inline_set_at, scenario.std_vector);
 		}
 	}
 
@@ -408,9 +459,12 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 	const double overall_zero_inline_seconds = sum_seconds(results, &scenario_results::sso_non_cow_zero_inline);
 	const double overall_inline_seconds = sum_seconds(results, &scenario_results::sso_non_cow_inline);
 	const double overall_double_seconds = sum_seconds(results, &scenario_results::sso_non_cow_double_inline);
-	const double overall_cow_zero_inline_seconds = sum_seconds(results, &scenario_results::sso_cow_zero_inline);
-	const double overall_cow_inline_seconds = sum_seconds(results, &scenario_results::sso_cow_inline);
-	const double overall_cow_double_seconds = sum_seconds(results, &scenario_results::sso_cow_double_inline);
+	const double overall_cow_zero_inline_proxy_seconds = sum_seconds(results, &scenario_results::sso_cow_zero_inline_proxy);
+	const double overall_cow_inline_proxy_seconds = sum_seconds(results, &scenario_results::sso_cow_inline_proxy);
+	const double overall_cow_double_inline_proxy_seconds = sum_seconds(results, &scenario_results::sso_cow_double_inline_proxy);
+	const double overall_cow_zero_inline_set_at_seconds = sum_seconds(results, &scenario_results::sso_cow_zero_inline_set_at);
+	const double overall_cow_inline_set_at_seconds = sum_seconds(results, &scenario_results::sso_cow_inline_set_at);
+	const double overall_cow_double_inline_set_at_seconds = sum_seconds(results, &scenario_results::sso_cow_double_inline_set_at);
 
 	const std::vector<perf::summary_row> summary_rows{
 		{"std::vector", overall_std_seconds, 1.0, 1.0},
@@ -423,15 +477,24 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 		{double_inline_label, overall_double_seconds,
 		 arithmetic_mean_ratio(results, &scenario_results::sso_non_cow_double_inline),
 		 geometric_mean_ratio(results, &scenario_results::sso_non_cow_double_inline)},
-		{cow_zero_inline_label, overall_cow_zero_inline_seconds,
-		 arithmetic_mean_ratio(results, &scenario_results::sso_cow_zero_inline),
-		 geometric_mean_ratio(results, &scenario_results::sso_cow_zero_inline)},
-		{cow_inline_label, overall_cow_inline_seconds,
-		 arithmetic_mean_ratio(results, &scenario_results::sso_cow_inline),
-		 geometric_mean_ratio(results, &scenario_results::sso_cow_inline)},
-		{cow_double_inline_label, overall_cow_double_seconds,
-		 arithmetic_mean_ratio(results, &scenario_results::sso_cow_double_inline),
-		 geometric_mean_ratio(results, &scenario_results::sso_cow_double_inline)},
+		{cow_zero_inline_proxy_label, overall_cow_zero_inline_proxy_seconds,
+		 arithmetic_mean_ratio(results, &scenario_results::sso_cow_zero_inline_proxy),
+		 geometric_mean_ratio(results, &scenario_results::sso_cow_zero_inline_proxy)},
+		{cow_inline_proxy_label, overall_cow_inline_proxy_seconds,
+		 arithmetic_mean_ratio(results, &scenario_results::sso_cow_inline_proxy),
+		 geometric_mean_ratio(results, &scenario_results::sso_cow_inline_proxy)},
+		{cow_double_inline_proxy_label, overall_cow_double_inline_proxy_seconds,
+		 arithmetic_mean_ratio(results, &scenario_results::sso_cow_double_inline_proxy),
+		 geometric_mean_ratio(results, &scenario_results::sso_cow_double_inline_proxy)},
+		{cow_zero_inline_set_at_label, overall_cow_zero_inline_set_at_seconds,
+		 arithmetic_mean_ratio(results, &scenario_results::sso_cow_zero_inline_set_at),
+		 geometric_mean_ratio(results, &scenario_results::sso_cow_zero_inline_set_at)},
+		{cow_inline_set_at_label, overall_cow_inline_set_at_seconds,
+		 arithmetic_mean_ratio(results, &scenario_results::sso_cow_inline_set_at),
+		 geometric_mean_ratio(results, &scenario_results::sso_cow_inline_set_at)},
+		{cow_double_inline_set_at_label, overall_cow_double_inline_set_at_seconds,
+		 arithmetic_mean_ratio(results, &scenario_results::sso_cow_double_inline_set_at),
+		 geometric_mean_ratio(results, &scenario_results::sso_cow_double_inline_set_at)},
 	};
 
 	const auto make_scenario_summary = [&](const scenario_results& scenario) {
@@ -445,12 +508,18 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 				 ratio_vs_std_vector(scenario.sso_non_cow_inline, scenario.std_vector)},
 				{double_inline_label, scenario.sso_non_cow_double_inline.seconds,
 				 ratio_vs_std_vector(scenario.sso_non_cow_double_inline, scenario.std_vector)},
-				{cow_zero_inline_label, scenario.sso_cow_zero_inline.seconds,
-				 ratio_vs_std_vector(scenario.sso_cow_zero_inline, scenario.std_vector)},
-				{cow_inline_label, scenario.sso_cow_inline.seconds,
-				 ratio_vs_std_vector(scenario.sso_cow_inline, scenario.std_vector)},
-				{cow_double_inline_label, scenario.sso_cow_double_inline.seconds,
-				 ratio_vs_std_vector(scenario.sso_cow_double_inline, scenario.std_vector)},
+				{cow_zero_inline_proxy_label, scenario.sso_cow_zero_inline_proxy.seconds,
+				 ratio_vs_std_vector(scenario.sso_cow_zero_inline_proxy, scenario.std_vector)},
+				{cow_inline_proxy_label, scenario.sso_cow_inline_proxy.seconds,
+				 ratio_vs_std_vector(scenario.sso_cow_inline_proxy, scenario.std_vector)},
+				{cow_double_inline_proxy_label, scenario.sso_cow_double_inline_proxy.seconds,
+				 ratio_vs_std_vector(scenario.sso_cow_double_inline_proxy, scenario.std_vector)},
+				{cow_zero_inline_set_at_label, scenario.sso_cow_zero_inline_set_at.seconds,
+				 ratio_vs_std_vector(scenario.sso_cow_zero_inline_set_at, scenario.std_vector)},
+				{cow_inline_set_at_label, scenario.sso_cow_inline_set_at.seconds,
+				 ratio_vs_std_vector(scenario.sso_cow_inline_set_at, scenario.std_vector)},
+				{cow_double_inline_set_at_label, scenario.sso_cow_double_inline_set_at.seconds,
+				 ratio_vs_std_vector(scenario.sso_cow_double_inline_set_at, scenario.std_vector)},
 			}
 		};
 	};
@@ -554,6 +623,7 @@ try {
 		std::cout << "           inline-threshold transitions, reusable pooled vectors,\n";
 		std::cout << "           and a larger copy/read-mostly scenario\n";
 		std::cout << "Rows include same-family no-inline-buffer baselines via explicit inline=0 opt-in.\n";
+		std::cout << "CoW rows split mediated proxy writes from explicit set_at() writes.\n";
 		std::cout << '\n';
 	}
 
