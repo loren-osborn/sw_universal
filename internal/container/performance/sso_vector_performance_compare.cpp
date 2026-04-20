@@ -131,6 +131,42 @@ void print_combined_report(const perf::benchmark_metadata& debug_meta,
 		          << std::setw(14) << release_row->geometric_mean_ratio << 'x'
 		          << '\n';
 	}
+
+	for (const auto& debug_scenario : debug_summary.scenarios) {
+		const perf::scenario_summary* release_scenario = nullptr;
+		for (const auto& candidate : release_summary.scenarios) {
+			if (candidate.label == debug_scenario.label) {
+				release_scenario = &candidate;
+				break;
+			}
+		}
+		if (!release_scenario) continue;
+
+		std::cout << "\nScenario: " << debug_scenario.label << '\n';
+		std::cout << std::left << std::setw(32) << "Container"
+		          << std::right << std::setw(14) << "Debug Time"
+		          << std::setw(14) << "Release Time"
+		          << std::setw(14) << "Debug Rel"
+		          << std::setw(14) << "Release Rel"
+		          << '\n';
+		std::cout << std::string(88, '-') << '\n';
+		for (const auto& debug_row : debug_scenario.rows) {
+			const perf::scenario_summary_row* release_row = nullptr;
+			for (const auto& candidate : release_scenario->rows) {
+				if (candidate.label == debug_row.label) {
+					release_row = &candidate;
+					break;
+				}
+			}
+			if (!release_row) continue;
+			std::cout << std::left << std::setw(32) << debug_row.label
+			          << std::right << std::setw(14) << std::fixed << std::setprecision(6) << debug_row.seconds
+			          << std::setw(14) << release_row->seconds
+			          << std::setw(14) << std::setprecision(2) << debug_row.relative_ratio << 'x'
+			          << std::setw(14) << release_row->relative_ratio << 'x'
+			          << '\n';
+		}
+	}
 }
 
 void print_usage(const char* argv0) {

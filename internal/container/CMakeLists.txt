@@ -8,7 +8,7 @@ set(SSO_VECTOR_PERF_ORCHESTRATE_SCRIPT
     "${CMAKE_CURRENT_SOURCE_DIR}/performance/sso_vector_performance_orchestrate.cmake")
 set(SSO_VECTOR_PERF_BENCHMARK_RELATIVE_PATH
     "internal/container/container_perf_sso_vector_performance${CMAKE_EXECUTABLE_SUFFIX}")
-set(SSO_VECTOR_PERF_SUMMARY_SCHEMA_VERSION 2)
+set(SSO_VECTOR_PERF_SUMMARY_SCHEMA_VERSION 3)
 
 add_custom_target(container_perf_sso_vector_summary_debug
     COMMAND ${CMAKE_COMMAND}
@@ -40,6 +40,7 @@ add_custom_target(container_perf_sso_vector_compare_builds
             -DSUMMARY_SCHEMA_VERSION=${SSO_VECTOR_PERF_SUMMARY_SCHEMA_VERSION}
             -DCOMPARE_BINARY=$<TARGET_FILE:container_perf_sso_vector_performance_compare>
             -P ${SSO_VECTOR_PERF_ORCHESTRATE_SCRIPT}
-    DEPENDS container_perf_sso_vector_performance_compare
+    DEPENDS container_perf_sso_vector_performance
+            container_perf_sso_vector_performance_compare
     USES_TERMINAL
     VERBATIM)
