@@ -517,6 +517,8 @@ try {
 	constexpr std::size_t u32_default_inline =
 		sso_vector_detail::default_inline_elems<std::uint32_t, std::allocator<std::uint32_t>>();
 
+	// Runtime responsibility stays narrow here: measure, report local results, and write the
+	// current build's cached summary. Cross-build refresh and comparison live in CMake/script tooling.
 	if (!write_summary_only) {
 		std::cout << "sso_vector / sso_cow_vector performance benchmark\n";
 		print_provenance_banner(metadata);
