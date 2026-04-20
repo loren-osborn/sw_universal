@@ -11,18 +11,25 @@
 
 namespace sw { namespace universal { namespace internal { namespace sso_vector_perf_detail {
 
-inline constexpr int summary_schema_version = 1;
+inline constexpr int summary_schema_version = 2;
 
 struct benchmark_metadata {
 	std::string build_config;
 	std::string provenance_status;
 	std::string provenance_reason;
-	std::string commit_hash;
+	std::string base_commit_hash;
+	std::string dirty_fingerprint;
+	bool provenance_publishable = false;
+	int summary_schema = summary_schema_version;
 	std::filesystem::path binary_path;
 	std::filesystem::path summary_path;
 
-	bool provenance_valid() const noexcept {
-		return provenance_status == "valid" && !commit_hash.empty();
+	bool clean_publishable() const noexcept {
+		return provenance_status == "clean" && provenance_publishable && !base_commit_hash.empty();
+	}
+
+	bool dirty_matchable() const noexcept {
+		return provenance_status == "dirty_matchable" && !base_commit_hash.empty() && !dirty_fingerprint.empty();
 	}
 };
 
@@ -37,7 +44,9 @@ struct persisted_summary {
 	int schema_version = summary_schema_version;
 	std::string build_config;
 	std::string provenance_status;
-	std::string commit_hash;
+	std::string base_commit_hash;
+	std::string dirty_fingerprint;
+	bool provenance_publishable = false;
 	std::int64_t timestamp_epoch = 0;
 	std::string payload_name;
 	std::vector<summary_row> rows;
@@ -63,7 +72,9 @@ inline void write_persisted_summary(const std::filesystem::path& path, const per
 	out << "schema_version=" << summary.schema_version << '\n';
 	out << "build_config=" << summary.build_config << '\n';
 	out << "provenance_status=" << summary.provenance_status << '\n';
-	out << "commit_hash=" << summary.commit_hash << '\n';
+	out << "provenance_publishable=" << (summary.provenance_publishable ? "true" : "false") << '\n';
+	out << "base_commit_hash=" << summary.base_commit_hash << '\n';
+	out << "dirty_fingerprint=" << summary.dirty_fingerprint << '\n';
 	out << "timestamp_epoch=" << summary.timestamp_epoch << '\n';
 	out << "payload=" << summary.payload_name << '\n';
 	for (const auto& row : summary.rows) {
@@ -94,8 +105,16 @@ inline bool read_persisted_summary(const std::filesystem::path& path, persisted_
 			summary.provenance_status = line.substr(std::string("provenance_status=").size());
 			continue;
 		}
-		if (line.rfind("commit_hash=", 0) == 0) {
-			summary.commit_hash = line.substr(std::string("commit_hash=").size());
+		if (line.rfind("provenance_publishable=", 0) == 0) {
+			summary.provenance_publishable = line.substr(std::string("provenance_publishable=").size()) == "true";
+			continue;
+		}
+		if (line.rfind("base_commit_hash=", 0) == 0) {
+			summary.base_commit_hash = line.substr(std::string("base_commit_hash=").size());
+			continue;
+		}
+		if (line.rfind("dirty_fingerprint=", 0) == 0) {
+			summary.dirty_fingerprint = line.substr(std::string("dirty_fingerprint=").size());
 			continue;
 		}
 		if (line.rfind("timestamp_epoch=", 0) == 0) {
@@ -138,8 +157,11 @@ inline void print_metadata(std::ostream& out, const benchmark_metadata& metadata
 	out << "build_config=" << metadata.build_config << '\n';
 	out << "provenance_status=" << metadata.provenance_status << '\n';
 	out << "provenance_reason=" << metadata.provenance_reason << '\n';
-	out << "commit_hash=" << metadata.commit_hash << '\n';
-	out << "summary_schema=" << summary_schema_version << '\n';
+	out << "provenance_publishable=" << (metadata.provenance_publishable ? "true" : "false") << '\n';
+	out << "base_commit_hash=" << metadata.base_commit_hash << '\n';
+	out << "commit_hash=" << metadata.base_commit_hash << '\n';
+	out << "dirty_fingerprint=" << metadata.dirty_fingerprint << '\n';
+	out << "summary_schema=" << metadata.summary_schema << '\n';
 	out << "benchmark_binary=" << metadata.binary_path.string() << '\n';
 	out << "summary_path=" << metadata.summary_path.string() << '\n';
 }

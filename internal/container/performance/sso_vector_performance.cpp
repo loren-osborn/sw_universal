@@ -247,7 +247,10 @@ perf::benchmark_metadata current_benchmark_metadata(const std::filesystem::path&
 	metadata.build_config = UNIVERSAL_BENCH_BUILD_CONFIG;
 	metadata.provenance_status = UNIVERSAL_BENCH_PROVENANCE_STATUS;
 	metadata.provenance_reason = UNIVERSAL_BENCH_PROVENANCE_REASON;
-	metadata.commit_hash = UNIVERSAL_BENCH_PROVENANCE_COMMIT_HASH;
+	metadata.base_commit_hash = UNIVERSAL_BENCH_PROVENANCE_BASE_COMMIT_HASH;
+	metadata.dirty_fingerprint = UNIVERSAL_BENCH_PROVENANCE_DIRTY_FINGERPRINT;
+	metadata.provenance_publishable = std::string_view{UNIVERSAL_BENCH_PROVENANCE_PUBLISHABLE} == "1";
+	metadata.summary_schema = perf::summary_schema_version;
 	metadata.binary_path = binary_path;
 	metadata.summary_path = perf::benchmark_summary_path(binary_path, metadata.build_config);
 	return metadata;
@@ -255,15 +258,24 @@ perf::benchmark_metadata current_benchmark_metadata(const std::filesystem::path&
 
 void print_provenance_banner(const perf::benchmark_metadata& metadata) {
 	std::cout << "Build configuration: " << metadata.build_config << '\n';
-	if (metadata.provenance_valid()) {
-		std::cout << "Build provenance   : commit " << metadata.commit_hash << '\n';
-	} else {
-		std::cout << "Build provenance   : " << metadata.provenance_status;
-		if (!metadata.provenance_reason.empty()) {
-			std::cout << " (" << metadata.provenance_reason << ')';
-		}
-		std::cout << '\n';
+	if (metadata.clean_publishable()) {
+		std::cout << "Build provenance   : clean commit " << metadata.base_commit_hash << '\n';
+		return;
 	}
+
+	if (metadata.dirty_matchable()) {
+		std::cout << "Build provenance   : DIRTY BUT MATCHABLE\n";
+		std::cout << "Base commit        : " << metadata.base_commit_hash << '\n';
+		std::cout << "Dirty fingerprint  : " << metadata.dirty_fingerprint << '\n';
+		std::cout << "Comparison policy  : unpublished/internal comparison only\n";
+		return;
+	}
+
+	std::cout << "Build provenance   : " << metadata.provenance_status;
+	if (!metadata.provenance_reason.empty()) {
+		std::cout << " (" << metadata.provenance_reason << ')';
+	}
+	std::cout << '\n';
 }
 
 template<typename T, std::size_t DefaultInlineElems>
@@ -447,7 +459,9 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 	perf::persisted_summary summary;
 	summary.build_config = UNIVERSAL_BENCH_BUILD_CONFIG;
 	summary.provenance_status = UNIVERSAL_BENCH_PROVENANCE_STATUS;
-	summary.commit_hash = UNIVERSAL_BENCH_PROVENANCE_COMMIT_HASH;
+	summary.provenance_publishable = std::string_view{UNIVERSAL_BENCH_PROVENANCE_PUBLISHABLE} == "1";
+	summary.base_commit_hash = UNIVERSAL_BENCH_PROVENANCE_BASE_COMMIT_HASH;
+	summary.dirty_fingerprint = UNIVERSAL_BENCH_PROVENANCE_DIRTY_FINGERPRINT;
 	summary.timestamp_epoch = perf::current_epoch_seconds();
 	summary.payload_name = std::string(payload_name);
 	summary.rows = summary_rows;
@@ -476,8 +490,8 @@ try {
 			return EXIT_SUCCESS;
 		}
 		if (arg == "--commit-hash") {
-			if (metadata.provenance_valid()) {
-				std::cout << metadata.commit_hash << '\n';
+			if (!metadata.base_commit_hash.empty()) {
+				std::cout << metadata.base_commit_hash << '\n';
 			} else {
 				std::cout << metadata.provenance_status;
 				if (!metadata.provenance_reason.empty()) {
@@ -517,7 +531,9 @@ try {
 		run_payload_benchmark<std::uint32_t, u32_default_inline>("uint32_t", 120000, !write_summary_only);
 	summary.build_config = metadata.build_config;
 	summary.provenance_status = metadata.provenance_status;
-	summary.commit_hash = metadata.commit_hash;
+	summary.provenance_publishable = metadata.provenance_publishable;
+	summary.base_commit_hash = metadata.base_commit_hash;
+	summary.dirty_fingerprint = metadata.dirty_fingerprint;
 	perf::write_persisted_summary(metadata.summary_path, summary);
 
 	std::cout << "Saved benchmark summary: " << metadata.summary_path.string() << '\n';
