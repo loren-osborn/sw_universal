@@ -9,11 +9,16 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
+#include <fstream>
 #include <iomanip>
 #include <iostream>
 #include <numeric>
+#include <sstream>
+#include <string>
 #include <string_view>
 #include <type_traits>
 #include <vector>
@@ -190,6 +195,19 @@ struct measurement {
 	double ops_per_sec = 0.0;
 };
 
+struct summary_row {
+	std::string label;
+	measurement overall;
+	double arithmetic_mean_ratio = 1.0;
+	double geometric_mean_ratio = 1.0;
+};
+
+struct persisted_summary {
+	std::string build_config;
+	std::string payload_name;
+	std::vector<summary_row> rows;
+};
+
 struct scenario_results {
 	std::string_view label;
 	std::size_t iterations = 0;
@@ -213,8 +231,178 @@ measurement benchmark_case(std::size_t iterations, std::size_t inline_capacity,
 	return measurement{seconds, static_cast<double>(iterations) / seconds};
 }
 
+constexpr std::string_view current_build_config() noexcept {
+#ifdef NDEBUG
+	return "Release";
+#else
+	return "Debug";
+#endif
+}
+
+constexpr std::string_view opposite_build_config() noexcept {
+#ifdef NDEBUG
+	return "Debug";
+#else
+	return "Release";
+#endif
+}
+
+std::filesystem::path benchmark_summary_dir(const char* argv0) {
+	namespace fs = std::filesystem;
+	fs::path executable_path = (argv0 && *argv0) ? fs::absolute(argv0) : fs::current_path();
+	return executable_path.parent_path() / "benchmark-results";
+}
+
+std::filesystem::path build_tree_root(const char* argv0) {
+	namespace fs = std::filesystem;
+	fs::path executable_path = (argv0 && *argv0) ? fs::absolute(argv0) : fs::current_path();
+	return executable_path.parent_path().parent_path().parent_path();
+}
+
+std::filesystem::path benchmark_summary_path(const std::filesystem::path& summary_dir, std::string_view build_config) {
+	const std::string suffix = (build_config == "Release") ? "release" : "debug";
+	return summary_dir / ("sso_vector_performance_" + suffix + ".txt");
+}
+
+std::filesystem::path find_opposite_summary_path(const char* argv0, std::string_view opposite_build_config) {
+	namespace fs = std::filesystem;
+	const auto current_build_tree = build_tree_root(argv0);
+	const auto current_candidate =
+		benchmark_summary_path(current_build_tree / "internal/container/benchmark-results", opposite_build_config);
+	if (fs::exists(current_candidate)) return current_candidate;
+
+	const auto build_parent = current_build_tree.parent_path();
+	if (!fs::exists(build_parent)) return current_candidate;
+
+	for (const auto& entry : fs::directory_iterator(build_parent)) {
+		if (!entry.is_directory()) continue;
+		if (entry.path() == current_build_tree) continue;
+		const auto candidate =
+			benchmark_summary_path(entry.path() / "internal/container/benchmark-results", opposite_build_config);
+		if (fs::exists(candidate)) return candidate;
+	}
+	return current_candidate;
+}
+
+double ratio_vs_std_vector(const measurement& result, const measurement& baseline) {
+	return result.seconds / baseline.seconds;
+}
+
+template<typename Member>
+double arithmetic_mean_ratio(const std::vector<scenario_results>& results, Member member) {
+	double total = 0.0;
+	for (const auto& result : results) {
+		total += ratio_vs_std_vector(result.*member, result.std_vector);
+	}
+	return total / static_cast<double>(results.size());
+}
+
+template<typename Member>
+double geometric_mean_ratio(const std::vector<scenario_results>& results, Member member) {
+	double log_total = 0.0;
+	for (const auto& result : results) {
+		log_total += std::log(ratio_vs_std_vector(result.*member, result.std_vector));
+	}
+	return std::exp(log_total / static_cast<double>(results.size()));
+}
+
+void write_persisted_summary(const std::filesystem::path& path, const persisted_summary& summary) {
+	std::filesystem::create_directories(path.parent_path());
+	std::ofstream out(path);
+	out << "build_config=" << summary.build_config << '\n';
+	out << "payload=" << summary.payload_name << '\n';
+	for (const auto& row : summary.rows) {
+		out << row.label << '|'
+		    << std::setprecision(17) << row.overall.seconds << '|'
+		    << row.arithmetic_mean_ratio << '|'
+		    << row.geometric_mean_ratio << '\n';
+	}
+}
+
+bool read_persisted_summary(const std::filesystem::path& path, persisted_summary& summary) {
+	std::ifstream in(path);
+	if (!in) return false;
+
+	summary = {};
+	std::string line;
+	while (std::getline(in, line)) {
+		if (line.rfind("build_config=", 0) == 0) {
+			summary.build_config = line.substr(std::string("build_config=").size());
+			continue;
+		}
+		if (line.rfind("payload=", 0) == 0) {
+			summary.payload_name = line.substr(std::string("payload=").size());
+			continue;
+		}
+
+		std::stringstream line_stream(line);
+		std::string label;
+		std::string seconds_text;
+		std::string arithmetic_text;
+		std::string geometric_text;
+		if (!std::getline(line_stream, label, '|')) continue;
+		if (!std::getline(line_stream, seconds_text, '|')) continue;
+		if (!std::getline(line_stream, arithmetic_text, '|')) continue;
+		if (!std::getline(line_stream, geometric_text, '|')) continue;
+
+		summary.rows.push_back(summary_row{
+			label,
+			measurement{std::stod(seconds_text), 0.0},
+			std::stod(arithmetic_text),
+			std::stod(geometric_text)
+		});
+	}
+	return !summary.rows.empty();
+}
+
+const summary_row* find_summary_row(const persisted_summary& summary, std::string_view label) {
+	const auto it = std::find_if(summary.rows.begin(), summary.rows.end(), [&](const summary_row& row) {
+		return row.label == label;
+	});
+	return (it == summary.rows.end()) ? nullptr : &*it;
+}
+
+void print_cross_build_comparison(const persisted_summary& current,
+                                  const std::filesystem::path& opposite_path,
+                                  std::string_view opposite_build) {
+	persisted_summary opposite;
+	std::cout << "\nCross-build comparison\n";
+	if (!read_persisted_summary(opposite_path, opposite)) {
+		std::cout << "No saved " << opposite_build << " benchmark summary found at "
+		          << opposite_path.string() << '\n';
+		return;
+	}
+	if (opposite.payload_name != current.payload_name) {
+		std::cout << "Saved " << opposite_build << " benchmark summary payload mismatch: "
+		          << opposite.payload_name << '\n';
+		return;
+	}
+
+	std::cout << std::left << std::setw(32) << "Container"
+	          << std::right << std::setw(14) << current.build_config + " Time"
+	          << std::setw(14) << opposite.build_config + " Time"
+	          << std::setw(14) << current.build_config + " Arith"
+	          << std::setw(14) << opposite.build_config + " Arith"
+	          << std::setw(14) << current.build_config + " Geom"
+	          << std::setw(14) << opposite.build_config + " Geom"
+	          << '\n';
+	std::cout << std::string(116, '-') << '\n';
+	for (const auto& row : current.rows) {
+		const auto* other = find_summary_row(opposite, row.label);
+		if (!other) continue;
+		std::cout << std::left << std::setw(32) << row.label
+		          << std::right << std::setw(14) << std::fixed << std::setprecision(6) << row.overall.seconds
+		          << std::setw(14) << other->overall.seconds
+		          << std::setw(14) << std::setprecision(2) << row.arithmetic_mean_ratio << 'x'
+		          << std::setw(14) << other->arithmetic_mean_ratio << 'x'
+		          << std::setw(14) << row.geometric_mean_ratio << 'x'
+		          << std::setw(14) << other->geometric_mean_ratio << 'x'
+		          << '\n';
+	}
+}
+
 template<typename T, std::size_t DefaultInlineElems>
-void run_payload_benchmark(std::string_view payload_name, std::size_t iterations) {
+persisted_summary run_payload_benchmark(std::string_view payload_name, std::size_t iterations) {
 	using std_vector_t = std::vector<T>;
 	constexpr std::size_t default_inline = DefaultInlineElems;
 	constexpr std::size_t benchmark_inline = (std::max)(std::size_t{2}, default_inline);
@@ -263,7 +451,7 @@ void run_payload_benchmark(std::string_view payload_name, std::size_t iterations
 		          << '\n';
 	};
 
-	std::array<scenario_results, 6> results{};
+	std::vector<scenario_results> results(scenarios.size());
 
 	for (std::size_t i = 0; i < results.size(); ++i) {
 		results[i].label = scenarios[i].label;
@@ -367,22 +555,87 @@ void run_payload_benchmark(std::string_view payload_name, std::size_t iterations
 		sum_seconds(results, &scenario_results::sso_cow_double_inline),
 		static_cast<double>(iterations) / sum_seconds(results, &scenario_results::sso_cow_double_inline)
 	};
+	const summary_row summary_std{
+		"std::vector",
+		overall_std,
+		1.0,
+		1.0
+	};
+	const summary_row summary_zero_inline{
+		zero_inline_label,
+		overall_zero_inline,
+		arithmetic_mean_ratio(results, &scenario_results::sso_non_cow_zero_inline),
+		geometric_mean_ratio(results, &scenario_results::sso_non_cow_zero_inline)
+	};
+	const summary_row summary_inline{
+		inline_label,
+		overall_inline,
+		arithmetic_mean_ratio(results, &scenario_results::sso_non_cow_inline),
+		geometric_mean_ratio(results, &scenario_results::sso_non_cow_inline)
+	};
+	const summary_row summary_double{
+		double_inline_label,
+		overall_double,
+		arithmetic_mean_ratio(results, &scenario_results::sso_non_cow_double_inline),
+		geometric_mean_ratio(results, &scenario_results::sso_non_cow_double_inline)
+	};
+	const summary_row summary_cow_zero_inline{
+		cow_zero_inline_label,
+		overall_cow_zero_inline,
+		arithmetic_mean_ratio(results, &scenario_results::sso_cow_zero_inline),
+		geometric_mean_ratio(results, &scenario_results::sso_cow_zero_inline)
+	};
+	const summary_row summary_cow_inline{
+		cow_inline_label,
+		overall_cow_inline,
+		arithmetic_mean_ratio(results, &scenario_results::sso_cow_inline),
+		geometric_mean_ratio(results, &scenario_results::sso_cow_inline)
+	};
+	const summary_row summary_cow_double{
+		cow_double_inline_label,
+		overall_cow_double,
+		arithmetic_mean_ratio(results, &scenario_results::sso_cow_double_inline),
+		geometric_mean_ratio(results, &scenario_results::sso_cow_double_inline)
+	};
+	const std::array<summary_row, 7> summary_rows{{
+		summary_std,
+		summary_zero_inline,
+		summary_inline,
+		summary_double,
+		summary_cow_zero_inline,
+		summary_cow_inline,
+		summary_cow_double
+	}};
 
 	std::cout << "\nOverall summary\n";
-	print_header();
-	std::cout << std::string(84, '-') << '\n';
-	print_row("std::vector", overall_std, overall_std);
-	print_row(zero_inline_label, overall_zero_inline, overall_std);
-	print_row(inline_label, overall_inline, overall_std);
-	print_row(double_inline_label, overall_double, overall_std);
-	print_row(cow_zero_inline_label, overall_cow_zero_inline, overall_std);
-	print_row(cow_inline_label, overall_cow_inline, overall_std);
-	print_row(cow_double_inline_label, overall_cow_double, overall_std);
+	std::cout << std::left << std::setw(32) << "Container"
+	          << std::right << std::setw(16) << "Time(s)"
+	          << std::setw(16) << "Ops/sec"
+	          << std::setw(20) << "Rel vs std::vector"
+	          << std::setw(20) << "Arith mean"
+	          << std::setw(20) << "Geom mean"
+	          << '\n';
+	std::cout << std::string(124, '-') << '\n';
+	for (const auto& row : summary_rows) {
+		std::cout << std::left << std::setw(32) << row.label
+		          << std::right << std::setw(16) << std::fixed << std::setprecision(6) << row.overall.seconds
+		          << std::setw(16) << std::setprecision(0) << row.overall.ops_per_sec
+		          << std::setw(20) << std::setprecision(2) << ratio_vs_std_vector(row.overall, overall_std) << 'x'
+		          << std::setw(20) << row.arithmetic_mean_ratio << 'x'
+		          << std::setw(20) << row.geometric_mean_ratio << 'x'
+		          << '\n';
+	}
+
+	return persisted_summary{
+		std::string(current_build_config()),
+		std::string(payload_name),
+		std::vector<summary_row>(summary_rows.begin(), summary_rows.end())
+	};
 }
 
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 try {
 	using namespace sw::universal::internal;
 
@@ -390,13 +643,22 @@ try {
 		sso_vector_detail::default_inline_elems<std::uint32_t, std::allocator<std::uint32_t>>();
 
 	std::cout << "sso_vector / sso_cow_vector performance benchmark\n";
+	std::cout << "Build configuration: " << current_build_config() << '\n';
 	std::cout << "Workloads: ephemeral churn, copy/read-mostly, copy-then-mutate,\n";
 	std::cout << "           inline-threshold transitions, reusable pooled vectors,\n";
 	std::cout << "           and a larger copy/read-mostly scenario\n";
 	std::cout << "Rows include same-family no-inline-buffer baselines via explicit inline=0 opt-in.\n";
 	std::cout << '\n';
 
-	run_payload_benchmark<std::uint32_t, u32_default_inline>("uint32_t", 120000);
+	const auto summary =
+		run_payload_benchmark<std::uint32_t, u32_default_inline>("uint32_t", 120000);
+	const auto summary_dir = benchmark_summary_dir((argc > 0) ? argv[0] : nullptr);
+	const auto current_summary_path = benchmark_summary_path(summary_dir, current_build_config());
+	const auto opposite_summary_path = find_opposite_summary_path((argc > 0) ? argv[0] : nullptr, opposite_build_config());
+
+	write_persisted_summary(current_summary_path, summary);
+	std::cout << "\nSaved benchmark summary: " << current_summary_path.string() << '\n';
+	print_cross_build_comparison(summary, opposite_summary_path, opposite_build_config());
 
 	if (g_sink == 0) {
 		std::cout << "optimizer guard\n";
