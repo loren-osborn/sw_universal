@@ -434,6 +434,33 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 		 geometric_mean_ratio(results, &scenario_results::sso_cow_double_inline)},
 	};
 
+	const auto make_scenario_summary = [&](const scenario_results& scenario) {
+		return perf::scenario_summary{
+			std::string(scenario.label),
+			{
+				{"std::vector", scenario.std_vector.seconds, 1.0},
+				{zero_inline_label, scenario.sso_non_cow_zero_inline.seconds,
+				 ratio_vs_std_vector(scenario.sso_non_cow_zero_inline, scenario.std_vector)},
+				{inline_label, scenario.sso_non_cow_inline.seconds,
+				 ratio_vs_std_vector(scenario.sso_non_cow_inline, scenario.std_vector)},
+				{double_inline_label, scenario.sso_non_cow_double_inline.seconds,
+				 ratio_vs_std_vector(scenario.sso_non_cow_double_inline, scenario.std_vector)},
+				{cow_zero_inline_label, scenario.sso_cow_zero_inline.seconds,
+				 ratio_vs_std_vector(scenario.sso_cow_zero_inline, scenario.std_vector)},
+				{cow_inline_label, scenario.sso_cow_inline.seconds,
+				 ratio_vs_std_vector(scenario.sso_cow_inline, scenario.std_vector)},
+				{cow_double_inline_label, scenario.sso_cow_double_inline.seconds,
+				 ratio_vs_std_vector(scenario.sso_cow_double_inline, scenario.std_vector)},
+			}
+		};
+	};
+
+	std::vector<perf::scenario_summary> scenario_summaries;
+	scenario_summaries.reserve(results.size());
+	for (const auto& scenario : results) {
+		scenario_summaries.push_back(make_scenario_summary(scenario));
+	}
+
 	if (emit_report) {
 		std::cout << "\nOverall summary\n";
 		std::cout << std::left << std::setw(32) << "Container"
@@ -465,6 +492,7 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 	summary.timestamp_epoch = perf::current_epoch_seconds();
 	summary.payload_name = std::string(payload_name);
 	summary.rows = summary_rows;
+	summary.scenarios = std::move(scenario_summaries);
 	return summary;
 }
 

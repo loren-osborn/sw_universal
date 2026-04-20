@@ -11,7 +11,7 @@
 
 namespace sw { namespace universal { namespace internal { namespace sso_vector_perf_detail {
 
-inline constexpr int summary_schema_version = 2;
+inline constexpr int summary_schema_version = 3;
 
 struct benchmark_metadata {
 	std::string build_config;
@@ -40,6 +40,17 @@ struct summary_row {
 	double geometric_mean_ratio = 1.0;
 };
 
+struct scenario_summary_row {
+	std::string label;
+	double seconds = 0.0;
+	double relative_ratio = 1.0;
+};
+
+struct scenario_summary {
+	std::string label;
+	std::vector<scenario_summary_row> rows;
+};
+
 struct persisted_summary {
 	int schema_version = summary_schema_version;
 	std::string build_config;
@@ -50,6 +61,7 @@ struct persisted_summary {
 	std::int64_t timestamp_epoch = 0;
 	std::string payload_name;
 	std::vector<summary_row> rows;
+	std::vector<scenario_summary> scenarios;
 };
 
 inline std::filesystem::path benchmark_summary_dir(const std::filesystem::path& binary_path) {
@@ -84,6 +96,15 @@ inline void write_persisted_summary(const std::filesystem::path& path, const per
 		    << row.arithmetic_mean_ratio << '|'
 		    << row.geometric_mean_ratio << '\n';
 	}
+	for (const auto& scenario : summary.scenarios) {
+		out << "scenario=" << scenario.label << '\n';
+		for (const auto& row : scenario.rows) {
+			out << "scenario_row="
+			    << row.label << '|'
+			    << row.seconds << '|'
+			    << row.relative_ratio << '\n';
+		}
+	}
 }
 
 inline bool read_persisted_summary(const std::filesystem::path& path, persisted_summary& summary) {
@@ -92,6 +113,7 @@ inline bool read_persisted_summary(const std::filesystem::path& path, persisted_
 
 	summary = {};
 	std::string line;
+	scenario_summary* current_scenario = nullptr;
 	while (std::getline(in, line)) {
 		if (line.rfind("schema_version=", 0) == 0) {
 			summary.schema_version = std::stoi(line.substr(std::string("schema_version=").size()));
@@ -141,9 +163,33 @@ inline bool read_persisted_summary(const std::filesystem::path& path, persisted_
 				std::stod(arithmetic_text),
 				std::stod(geometric_text)
 			});
+			continue;
+		}
+		if (line.rfind("scenario=", 0) == 0) {
+			summary.scenarios.push_back(scenario_summary{line.substr(std::string("scenario=").size()), {}});
+			current_scenario = &summary.scenarios.back();
+			continue;
+		}
+		if (line.rfind("scenario_row=", 0) == 0) {
+			if (!current_scenario) return false;
+			std::stringstream row_stream(line.substr(std::string("scenario_row=").size()));
+			std::string label;
+			std::string seconds_text;
+			std::string relative_text;
+			if (!std::getline(row_stream, label, '|')) return false;
+			if (!std::getline(row_stream, seconds_text, '|')) return false;
+			if (!std::getline(row_stream, relative_text, '|')) return false;
+			current_scenario->rows.push_back(scenario_summary_row{
+				label,
+				std::stod(seconds_text),
+				std::stod(relative_text)
+			});
 		}
 	}
-	return summary.schema_version == summary_schema_version && !summary.build_config.empty() && !summary.rows.empty();
+	return summary.schema_version == summary_schema_version &&
+	       !summary.build_config.empty() &&
+	       !summary.rows.empty() &&
+	       !summary.scenarios.empty();
 }
 
 inline const summary_row* find_summary_row(const persisted_summary& summary, std::string_view label) {
