@@ -542,9 +542,7 @@ struct for_index_type {
 		/// @brief Writes encoded active index while preserving sideband.
 		constexpr void set_index(std::size_t v) BITFIELD_PACK_NOEXCEPT {
 			BITFIELD_PACK_ASSERT((v == std::variant_npos) || (v < NTypes));
-#ifndef BITFIELD_PACK_NDEBUG
-			const IndexT prev_sideband = sideband_val();
-#endif
+			[[maybe_unused]] const IndexT prev_sideband = sideband_val();
 
 			const IndexT stored = (v == std::variant_npos) ? npos_code : IndexT(v);
 			bits_.template set_bits<INDEX>(stored);
