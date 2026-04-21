@@ -5,10 +5,14 @@
 //
 // This file is part of the universal numbers project, which is released under an MIT Open Source license.
 
+#include <string>
+#include <vector>
+
 namespace sw { namespace universal {
 
 // forward references
-template<typename BlockType> class einteger;
-template<typename BlockType> bool parse(const std::string& number, einteger<BlockType>& v);
+template<typename BlockType, typename BlockContainer = std::vector<BlockType>> class einteger;
+template<typename BlockType, typename BlockContainer>
+bool parse(const std::string& number, einteger<BlockType, BlockContainer>& v);
 
 }} // namespace sw::universal

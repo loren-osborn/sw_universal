@@ -23,8 +23,8 @@ TODO: how to make the einteger class a literal type so that we can use it as a r
 */
 
 
-template <typename BlockType> 
-class numeric_limits< sw::universal::einteger<BlockType> >
+template <typename BlockType, typename BlockContainer>
+class numeric_limits< sw::universal::einteger<BlockType, BlockContainer> >
 {
 	public:
 		static constexpr bool is_specialized = true;

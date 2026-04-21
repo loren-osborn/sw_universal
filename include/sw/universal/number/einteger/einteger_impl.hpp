@@ -23,14 +23,17 @@
 namespace sw { namespace universal {
 
 // einteger is an adaptive precision integer type
-template<typename BlockType = std::uint32_t>
+template<typename BlockType, typename BlockContainer>
 class einteger {
 public:
 	using bt = BlockType;
+	using block_container_type = BlockContainer;
 	static constexpr unsigned bitsInBlock = sizeof(BlockType) * 8;
 	static constexpr bt       ALL_ONES = bt(0xFFFF'FFFF'FFFF'FFFFull); // block type specific all 1's value
 	static constexpr uint64_t BASE = uint64_t(ALL_ONES) + 1ull;
 	static_assert(bitsInBlock <= 32, "BlockType must be one of [uint8_t, uint16_t, uint32_t]");
+	static_assert(std::is_same_v<typename block_container_type::value_type, BlockType>,
+	              "einteger block container value_type must match BlockType");
 
 	// Partial-constexpr surface (issue #748): einteger carries a
 	// std::vector<BlockType> _block member, so any non-empty digit
@@ -233,8 +236,8 @@ public:
 		if (lhsSize < rhsSize) _block.resize(rhsSize, 0);
 
 		std::uint64_t carry{ 0 };
-		typename std::vector<BlockType>::iterator li = _block.begin();
-		typename std::vector<BlockType>::const_iterator ri = rhs._block.begin();
+		auto li = _block.begin();
+		auto ri = rhs._block.begin();
 		while (li != _block.end()) {
 			if (ri != rhs._block.end()) {
 				carry += static_cast<std::uint64_t>(*li) + static_cast<std::uint64_t>(*ri);
@@ -275,7 +278,8 @@ public:
 		// prep storage
 		if (lhsSize < rhsSize) _block.resize(rhsSize, 0);
 
-		typename std::vector<BlockType>::const_iterator aIter, bIter;
+		typename block_container_type::const_iterator aIter;
+		typename block_container_type::const_iterator bIter;
 		if (magnitude == 1) {
 			aIter = _block.begin();
 			bIter = rhs._block.begin();
@@ -775,8 +779,8 @@ public:
 	}
 
 protected:
-	bool                   _sign;   // sign of the number: -1 if true, +1 if false, zero is positive
-	std::vector<BlockType> _block;  // building blocks representing a 1's complement magnitude
+	bool                 _sign;   // sign of the number: -1 if true, +1 if false, zero is positive
+	block_container_type _block;  // building blocks representing a 1's complement magnitude
 
 	// HELPER methods
 	// compare_magnitude returns 1 if a > b, 0 if they are equal, and -1 if a < b
@@ -797,7 +801,7 @@ protected:
 	}
 	void remove_leading_zeros() {
 		unsigned leadingZeroBlocks{ 0 };
-		typename std::vector<BlockType>::reverse_iterator rit = _block.rbegin();
+		auto rit = _block.rbegin();
 		while (rit != _block.rend()) {
 			if (*rit == 0) {
 				++leadingZeroBlocks;
@@ -902,14 +906,14 @@ protected:
 
 private:
 
-	template<typename BBlockType>
-	friend constexpr bool operator==(const einteger<BBlockType>&, const einteger<BBlockType>&) noexcept;
+	template<typename BBlockType, typename BBlockContainer>
+	friend constexpr bool operator==(const einteger<BBlockType, BBlockContainer>&, const einteger<BBlockType, BBlockContainer>&) noexcept;
 };
 
 ////////////////////////    einteger functions   /////////////////////////////////
 
-template<typename BlockType>
-inline einteger<BlockType> abs(const einteger<BlockType>& a) {
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> abs(const einteger<BlockType, BlockContainer>& a) {
 	return (a.isneg()  ? -a : a);
 }
 
@@ -918,9 +922,9 @@ inline einteger<BlockType> abs(const einteger<BlockType>& a) {
 /// stream operators
 
 // read a einteger ASCII format and make a binary einteger out of it
-template<typename BlockType>
-bool parse(const std::string& number, einteger<BlockType>& value) {
-	using Integer = einteger<BlockType>;
+template<typename BlockType, typename BlockContainer>
+bool parse(const std::string& number, einteger<BlockType, BlockContainer>& value) {
+	using Integer = einteger<BlockType, BlockContainer>;
 	bool bSuccess = false;
 	value.clear();
 	std::regex binary_regex("^[-+]*0b[01']+");
@@ -1084,9 +1088,9 @@ bool parse(const std::string& number, einteger<BlockType>& value) {
 	return bSuccess;
 }
 
-template<typename BlockType>
-std::string convert_to_string(std::ios_base::fmtflags flags, const einteger<BlockType>& n) {
-	using AdaptiveInteger = einteger<BlockType>;
+template<typename BlockType, typename BlockContainer>
+std::string convert_to_string(std::ios_base::fmtflags flags, const einteger<BlockType, BlockContainer>& n) {
+	using AdaptiveInteger = einteger<BlockType, BlockContainer>;
 
 	if (n.limbs() == 0) return std::string("0");
 
@@ -1186,8 +1190,8 @@ std::string convert_to_string(std::ios_base::fmtflags flags, const einteger<Bloc
 }
 
 // generate an einteger format ASCII format
-template<typename BlockType>
-inline std::ostream& operator<<(std::ostream& ostr, const einteger<BlockType>& i) {
+template<typename BlockType, typename BlockContainer>
+inline std::ostream& operator<<(std::ostream& ostr, const einteger<BlockType, BlockContainer>& i) {
 	std::string s = convert_to_string(ostr.flags(), i);
 	std::streamsize width = ostr.width();
 	if (width > static_cast<std::streamsize>(s.size())) {
@@ -1202,8 +1206,8 @@ inline std::ostream& operator<<(std::ostream& ostr, const einteger<BlockType>& i
 
 // read an ASCII einteger format
 
-template<typename BlockType>
-inline std::istream& operator>>(std::istream& istr, einteger<BlockType>& p) {
+template<typename BlockType, typename BlockContainer>
+inline std::istream& operator>>(std::istream& istr, einteger<BlockType, BlockContainer>& p) {
 	std::string txt;
 	if (!(istr >> txt)) {
 		// extraction failed (already-bad stream or EOF); failbit set by >>.
@@ -1218,8 +1222,8 @@ inline std::istream& operator>>(std::istream& istr, einteger<BlockType>& p) {
 
 ////////////////// string operators
 
-template<typename BlockType>
-inline std::string to_binary(const einteger<BlockType>& a, bool nibbleMarker = true) {
+template<typename BlockType, typename BlockContainer>
+inline std::string to_binary(const einteger<BlockType, BlockContainer>& a, bool nibbleMarker = true) {
 	if (a.limbs() == 0) return std::string("0b0");
 
 	std::stringstream s;
@@ -1238,8 +1242,8 @@ inline std::string to_binary(const einteger<BlockType>& a, bool nibbleMarker = t
 	return s.str();
 }
 
-template<typename BlockType>
-inline std::string to_hex(const einteger<BlockType>& a, bool wordMarker = true) {
+template<typename BlockType, typename BlockContainer>
+inline std::string to_hex(const einteger<BlockType, BlockContainer>& a, bool wordMarker = true) {
 	if (a.limbs() == 0) return std::string("0x0");
 
 	std::vector<char> nibbleLookup = { '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', 'A', 'B', 'C', 'D', 'E', 'F' };
@@ -1277,8 +1281,8 @@ inline std::string to_hex(const einteger<BlockType>& a, bool wordMarker = true) 
 // implementation ignored sign entirely, so +n == -n returned true.
 // Constexpr-callable: pure reads of the digit vector, no allocation.
 
-template<typename BlockType>
-constexpr bool operator==(const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) noexcept {
+template<typename BlockType, typename BlockContainer>
+constexpr bool operator==(const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) noexcept {
 	if (lhs.limbs() != rhs.limbs()) {
 		return false;
 	}
@@ -1292,13 +1296,13 @@ constexpr bool operator==(const einteger<BlockType>& lhs, const einteger<BlockTy
 	return true;
 }
 
-template<typename BlockType>
-constexpr bool operator!=(const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) noexcept {
+template<typename BlockType, typename BlockContainer>
+constexpr bool operator!=(const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) noexcept {
 	return !operator==(lhs, rhs);
 }
 
-template<typename BlockType>
-constexpr bool operator< (const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) noexcept {
+template<typename BlockType, typename BlockContainer>
+constexpr bool operator< (const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) noexcept {
 	const bool ls = lhs.sign();
 	const bool rs = rhs.sign();
 	if (ls != rs) {
@@ -1320,18 +1324,18 @@ constexpr bool operator< (const einteger<BlockType>& lhs, const einteger<BlockTy
 	return false; // lhs and rhs are the same
 }
 
-template<typename BlockType>
-constexpr bool operator> (const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) noexcept {
+template<typename BlockType, typename BlockContainer>
+constexpr bool operator> (const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) noexcept {
 	return operator< (rhs, lhs);
 }
 
-template<typename BlockType>
-constexpr bool operator<=(const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) noexcept {
+template<typename BlockType, typename BlockContainer>
+constexpr bool operator<=(const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) noexcept {
 	return operator< (lhs, rhs) || operator==(lhs, rhs);
 }
 
-template<typename BlockType>
-constexpr bool operator>=(const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) noexcept {
+template<typename BlockType, typename BlockContainer>
+constexpr bool operator>=(const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) noexcept {
 	return !operator< (lhs, rhs);
 }
 
@@ -1339,33 +1343,33 @@ constexpr bool operator>=(const einteger<BlockType>& lhs, const einteger<BlockTy
 // einteger - literal binary logic operators
 // equal: precondition is that the byte-storage is properly nulled in all arithmetic paths
 
-template<typename BlockType>
-inline bool operator==(const einteger<BlockType>& lhs, long long rhs) {
-	return operator==(lhs, einteger(rhs));
+template<typename BlockType, typename BlockContainer>
+inline bool operator==(const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
+	return operator==(lhs, einteger<BlockType, BlockContainer>(rhs));
 }
 
-template<typename BlockType>
-inline bool operator!=(const einteger<BlockType>& lhs, long long rhs) {
+template<typename BlockType, typename BlockContainer>
+inline bool operator!=(const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
 	return !operator==(lhs, rhs);
 }
 
-template<typename BlockType>
-inline bool operator< (const einteger<BlockType>& lhs, long long rhs) {
-	return operator<(lhs, einteger<BlockType>(rhs));
+template<typename BlockType, typename BlockContainer>
+inline bool operator< (const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
+	return operator<(lhs, einteger<BlockType, BlockContainer>(rhs));
 }
 
-template<typename BlockType>
-inline bool operator> (const einteger<BlockType>& lhs, long long rhs) {
-	return operator< (einteger<BlockType>(rhs), lhs);
+template<typename BlockType, typename BlockContainer>
+inline bool operator> (const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
+	return operator< (einteger<BlockType, BlockContainer>(rhs), lhs);
 }
 
-template<typename BlockType>
-inline bool operator<=(const einteger<BlockType>& lhs, long long rhs) {
+template<typename BlockType, typename BlockContainer>
+inline bool operator<=(const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
 	return operator< (lhs, rhs) || operator==(lhs, rhs);
 }
 
-template<typename BlockType>
-inline bool operator>=(const einteger<BlockType>& lhs, long long rhs) {
+template<typename BlockType, typename BlockContainer>
+inline bool operator>=(const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
 	return !operator< (lhs, rhs);
 }
 
@@ -1374,33 +1378,33 @@ inline bool operator>=(const einteger<BlockType>& lhs, long long rhs) {
 // precondition is that the byte-storage is properly nulled in all arithmetic paths
 
 
-template<typename BlockType>
-inline bool operator==(long long lhs, const einteger<BlockType>& rhs) {
-	return operator==(einteger<BlockType>(lhs), rhs);
+template<typename BlockType, typename BlockContainer>
+inline bool operator==(long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	return operator==(einteger<BlockType, BlockContainer>(lhs), rhs);
 }
 
-template<typename BlockType>
-inline bool operator!=(long long lhs, const einteger<BlockType>& rhs) {
+template<typename BlockType, typename BlockContainer>
+inline bool operator!=(long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
 	return !operator==(lhs, rhs);
 }
 
-template<typename BlockType>
-inline bool operator< (long long lhs, const einteger<BlockType>& rhs) {
-	return operator<(einteger<BlockType>(lhs), rhs);
+template<typename BlockType, typename BlockContainer>
+inline bool operator< (long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	return operator<(einteger<BlockType, BlockContainer>(lhs), rhs);
 }
 
-template<typename BlockType>
-inline bool operator> (long long lhs, const einteger<BlockType>& rhs) {
+template<typename BlockType, typename BlockContainer>
+inline bool operator> (long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
 	return operator< (rhs, lhs);
 }
 
-template<typename BlockType>
-inline bool operator<=(long long lhs, const einteger<BlockType>& rhs) {
+template<typename BlockType, typename BlockContainer>
+inline bool operator<=(long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
 	return operator< (lhs, rhs) || operator==(lhs, rhs);
 }
 
-template<typename BlockType>
-inline bool operator>=(long long lhs, const einteger<BlockType>& rhs) {
+template<typename BlockType, typename BlockContainer>
+inline bool operator>=(long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
 	return !operator< (lhs, rhs);
 }
 
@@ -1409,37 +1413,37 @@ inline bool operator>=(long long lhs, const einteger<BlockType>& rhs) {
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 // einteger - einteger binary arithmetic operators
 
-template<typename BlockType>
-inline einteger<BlockType> operator+(const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) {
-	einteger sum = lhs;
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator+(const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	einteger<BlockType, BlockContainer> sum = lhs;
 	sum += rhs;
 	return sum;
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator-(const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) {
-	einteger diff = lhs;
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator-(const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	einteger<BlockType, BlockContainer> diff = lhs;
 	diff -= rhs;
 	return diff;
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator*(const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) {
-	einteger product = lhs;
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator*(const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	einteger<BlockType, BlockContainer> product = lhs;
 	product *= rhs;
 	return product;
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator/(const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) {
-	einteger ratio = lhs;
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator/(const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	einteger<BlockType, BlockContainer> ratio = lhs;
 	ratio /= rhs;
 	return ratio;
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator%(const einteger<BlockType>& lhs, const einteger<BlockType>& rhs) {
-	einteger remainder = lhs;
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator%(const einteger<BlockType, BlockContainer>& lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	einteger<BlockType, BlockContainer> remainder = lhs;
 	remainder %= rhs;
 	return remainder;
 }
@@ -1447,62 +1451,62 @@ inline einteger<BlockType> operator%(const einteger<BlockType>& lhs, const einte
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 // einteger - literal binary arithmetic operators
 
-template<typename BlockType>
-inline einteger<BlockType> operator+(const einteger<BlockType>& lhs, long long rhs) {
-	return operator+(lhs, einteger<BlockType>(rhs));
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator+(const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
+	return operator+(lhs, einteger<BlockType, BlockContainer>(rhs));
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator-(const einteger<BlockType>& lhs, long long rhs) {
-	return operator-(lhs, einteger<BlockType>(rhs));
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator-(const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
+	return operator-(lhs, einteger<BlockType, BlockContainer>(rhs));
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator*(const einteger<BlockType>& lhs, long long rhs) {
-	return operator*(lhs, einteger<BlockType>(rhs));
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator*(const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
+	return operator*(lhs, einteger<BlockType, BlockContainer>(rhs));
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator/(const einteger<BlockType>& lhs, long long rhs) {
-	return operator/(lhs, einteger<BlockType>(rhs));
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator/(const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
+	return operator/(lhs, einteger<BlockType, BlockContainer>(rhs));
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator%(const einteger<BlockType>& lhs, long long rhs) {
-	return operator/(lhs, einteger<BlockType>(rhs));
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator%(const einteger<BlockType, BlockContainer>& lhs, long long rhs) {
+	return operator/(lhs, einteger<BlockType, BlockContainer>(rhs));
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator/(const einteger<BlockType>& lhs, unsigned long long rhs) {
-	return operator/(lhs, einteger<BlockType>(rhs));
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator/(const einteger<BlockType, BlockContainer>& lhs, unsigned long long rhs) {
+	return operator/(lhs, einteger<BlockType, BlockContainer>(rhs));
 }
 
 //////////////////////////////////////////////////////////////////////////////////////////////////////
 // literal - einteger binary arithmetic operators
 
-template<typename BlockType>
-inline einteger<BlockType> operator+(long long lhs, const einteger<BlockType>& rhs) {
-	return operator+(einteger<BlockType>(lhs), rhs);
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator+(long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	return operator+(einteger<BlockType, BlockContainer>(lhs), rhs);
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator-(long long lhs, const einteger<BlockType>& rhs) {
-	return operator-(einteger<BlockType>(lhs), rhs);
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator-(long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	return operator-(einteger<BlockType, BlockContainer>(lhs), rhs);
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator*(long long lhs, const einteger<BlockType>& rhs) {
-	return operator*(einteger<BlockType>(lhs), rhs);
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator*(long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	return operator*(einteger<BlockType, BlockContainer>(lhs), rhs);
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator/(long long lhs, const einteger<BlockType>& rhs) {
-	return operator/(einteger<BlockType>(lhs), rhs);
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator/(long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	return operator/(einteger<BlockType, BlockContainer>(lhs), rhs);
 }
 
-template<typename BlockType>
-inline einteger<BlockType> operator%(long long lhs, const einteger<BlockType>& rhs) {
-	return operator/(einteger<BlockType>(lhs), rhs);
+template<typename BlockType, typename BlockContainer>
+inline einteger<BlockType, BlockContainer> operator%(long long lhs, const einteger<BlockType, BlockContainer>& rhs) {
+	return operator/(einteger<BlockType, BlockContainer>(lhs), rhs);
 }
 
 }} // namespace sw::universal
