@@ -97,6 +97,9 @@ void print_combined_report(const perf::benchmark_metadata& debug_meta,
                            const perf::benchmark_metadata& release_meta,
                            const perf::persisted_summary& release_summary,
                            comparison_mode mode) {
+	constexpr int label_width = 64;
+	constexpr int metric_width = 14;
+
 	std::cout << "sso_vector Debug vs Release benchmark comparison\n";
 	if (mode == comparison_mode::clean_match) {
 		std::cout << "Comparison mode: CLEAN MATCH\n";
@@ -110,25 +113,25 @@ void print_combined_report(const perf::benchmark_metadata& debug_meta,
 	std::cout << "Debug summary   : " << debug_meta.summary_path.string() << '\n';
 	std::cout << "Release summary : " << release_meta.summary_path.string() << '\n';
 	std::cout << '\n';
-	std::cout << std::left << std::setw(32) << "Container"
-	          << std::right << std::setw(14) << "Debug Time"
-	          << std::setw(14) << "Release Time"
-	          << std::setw(14) << "Debug Arith"
-	          << std::setw(14) << "Release Arith"
-	          << std::setw(14) << "Debug Geom"
-	          << std::setw(14) << "Release Geom"
+	std::cout << std::left << std::setw(label_width) << "Container"
+	          << std::right << std::setw(metric_width) << "Debug Time"
+	          << std::setw(metric_width) << "Release Time"
+	          << std::setw(metric_width) << "Debug Arith"
+	          << std::setw(metric_width) << "Release Arith"
+	          << std::setw(metric_width) << "Debug Geom"
+	          << std::setw(metric_width) << "Release Geom"
 	          << '\n';
-	std::cout << std::string(116, '-') << '\n';
+	std::cout << std::string(label_width + 6 * metric_width, '-') << '\n';
 	for (const auto& debug_row : debug_summary.rows) {
 		const auto* release_row = perf::find_summary_row(release_summary, debug_row.label);
 		if (!release_row) continue;
-		std::cout << std::left << std::setw(32) << debug_row.label
-		          << std::right << std::setw(14) << std::fixed << std::setprecision(6) << debug_row.overall_seconds
-		          << std::setw(14) << release_row->overall_seconds
-		          << std::setw(14) << std::setprecision(2) << debug_row.arithmetic_mean_ratio << 'x'
-		          << std::setw(14) << release_row->arithmetic_mean_ratio << 'x'
-		          << std::setw(14) << debug_row.geometric_mean_ratio << 'x'
-		          << std::setw(14) << release_row->geometric_mean_ratio << 'x'
+		std::cout << std::left << std::setw(label_width) << debug_row.label
+		          << std::right << std::setw(metric_width) << std::fixed << std::setprecision(6) << debug_row.overall_seconds
+		          << std::setw(metric_width) << release_row->overall_seconds
+		          << std::setw(metric_width) << std::setprecision(2) << debug_row.arithmetic_mean_ratio << 'x'
+		          << std::setw(metric_width) << release_row->arithmetic_mean_ratio << 'x'
+		          << std::setw(metric_width) << debug_row.geometric_mean_ratio << 'x'
+		          << std::setw(metric_width) << release_row->geometric_mean_ratio << 'x'
 		          << '\n';
 	}
 
@@ -143,13 +146,13 @@ void print_combined_report(const perf::benchmark_metadata& debug_meta,
 		if (!release_scenario) continue;
 
 		std::cout << "\nScenario: " << debug_scenario.label << '\n';
-		std::cout << std::left << std::setw(32) << "Container"
-		          << std::right << std::setw(14) << "Debug Time"
-		          << std::setw(14) << "Release Time"
-		          << std::setw(14) << "Debug Rel"
-		          << std::setw(14) << "Release Rel"
+		std::cout << std::left << std::setw(label_width) << "Container"
+		          << std::right << std::setw(metric_width) << "Debug Time"
+		          << std::setw(metric_width) << "Release Time"
+		          << std::setw(metric_width) << "Debug Rel"
+		          << std::setw(metric_width) << "Release Rel"
 		          << '\n';
-		std::cout << std::string(88, '-') << '\n';
+		std::cout << std::string(label_width + 4 * metric_width, '-') << '\n';
 		for (const auto& debug_row : debug_scenario.rows) {
 			const perf::scenario_summary_row* release_row = nullptr;
 			for (const auto& candidate : release_scenario->rows) {
@@ -159,11 +162,11 @@ void print_combined_report(const perf::benchmark_metadata& debug_meta,
 				}
 			}
 			if (!release_row) continue;
-			std::cout << std::left << std::setw(32) << debug_row.label
-			          << std::right << std::setw(14) << std::fixed << std::setprecision(6) << debug_row.seconds
-			          << std::setw(14) << release_row->seconds
-			          << std::setw(14) << std::setprecision(2) << debug_row.relative_ratio << 'x'
-			          << std::setw(14) << release_row->relative_ratio << 'x'
+			std::cout << std::left << std::setw(label_width) << debug_row.label
+			          << std::right << std::setw(metric_width) << std::fixed << std::setprecision(6) << debug_row.seconds
+			          << std::setw(metric_width) << release_row->seconds
+			          << std::setw(metric_width) << std::setprecision(2) << debug_row.relative_ratio << 'x'
+			          << std::setw(metric_width) << release_row->relative_ratio << 'x'
 			          << '\n';
 		}
 	}

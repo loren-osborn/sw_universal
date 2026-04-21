@@ -1,20 +1,21 @@
 #pragma once
 // sso_vector.hpp
 //
-// The `sso_vector` family shares one storage core with two public facades:
+// The `sso_vector` family shares one storage core with three public facades:
 //  - `sso_vector`: small-size-optimized vector with ordinary value semantics
-//  - `sso_cow_vector`: same storage strategy plus copy-on-write heap sharing
+//  - `sso_cow_vector`: same storage strategy plus copy-on-write heap sharing with synchronized control state
+//  - `sso_cow_vector_with_unsynchronized_sharing`: same CoW structure with non-atomic shared control state
 //
-// Both variants keep small vectors in-object and use the same inline/heap representation switching.
-// The CoW facade alone carries the atomic ownership header, detach-on-write rules, and proxy-based
-// mutable access. The non-CoW facade structurally omits that heap-sharing state and exposes ordinary
-// mutable references/iterators.
+// All variants keep small vectors in-object and use the same inline/heap representation switching.
+// The CoW facades alone carry the ownership header, detach-on-write rules, and proxy-based mutable
+// access. The non-CoW facade structurally omits that heap-sharing state and exposes ordinary mutable
+// references/iterators.
 //
 // Intentional API/semantic differences from std::vector:
-//  - `sso_cow_vector` mutable element access uses proxy references and non-contiguous random-access
-//    iterators so reads can preserve sharing and writes can detach only when needed
+//  - the CoW facades use proxy references and non-contiguous random-access iterators so reads can
+//    preserve sharing and writes can detach only when needed
 //  - `sso_vector` mutable access is ordinary `T&` / `T*`
-//  - both variants keep logical size in variant sideband metadata rather than in the heap block
+//  - all variants keep logical size in variant sideband metadata rather than in the heap block
 //
 // Lifetime model:
 //  - Both inline and heap representations hold raw storage, not always-live T objects.
@@ -24,9 +25,12 @@
 //
 // Threading model:
 //  - Like std::vector, element operations are not thread-safe against concurrent mutation.
-//  - `sso_cow_vector` uses an atomic ownership header only for shared heap bookkeeping.
-//  - The bitfield hook layer publishes whole ownership-header words; it is not a general CAS
-//    abstraction. Ownership-transition compare/exchange logic stays local to `sso_cow_vector`.
+//  - the synchronized CoW facade uses an atomic ownership header only for shared heap bookkeeping
+//  - the unsynchronized-sharing CoW facade uses the same ownership layout backed by a plain word,
+//    so it drops the narrower "shared control state can be manipulated independently across threads"
+//    guarantee that the synchronized variant keeps
+//  - the bitfield hook layer publishes whole ownership-header words; it is not a general CAS
+//    abstraction. Ownership-transition compare/exchange logic stays local to the CoW implementation.
 //
 // Copyright (C) 2026 Stillwater Supercomputing, Inc.
 // SPDX-License-Identifier: MIT
@@ -126,64 +130,87 @@ inline constexpr zero_inline_policy default_zero_inline_policy() noexcept {
 }
 
 using header_underlying_t = std::uint64_t;
-using header_storage_t = std::atomic<header_underlying_t>;
+
+enum class cow_sharing_kind {
+	synchronized,
+	unsynchronized,
+};
 
 enum header_field : std::size_t {
 	UNSHAREABLE = 0,
 	REFCOUNT = 1,
 };
 
+template<cow_sharing_kind SharingKind>
+using header_storage_t = std::conditional_t<
+	SharingKind == cow_sharing_kind::synchronized,
+	std::atomic<header_underlying_t>,
+	header_underlying_t>;
+
+template<cow_sharing_kind SharingKind>
 struct ownership_header_word_spec {
 	using underlying_val_t = header_underlying_t;
 	using formatted_val_t = header_underlying_t;
-	using storage_t = header_storage_t;
+	using storage_t = header_storage_t<SharingKind>;
 	static constexpr bool directly_mutable = false;
 
 	static constexpr underlying_val_t to_underlying_value(formatted_val_t v) noexcept { return v; }
 	static constexpr formatted_val_t from_underlying_value(underlying_val_t v) noexcept { return v; }
 
 	static underlying_val_t load_underlying_value(const storage_t& storage) noexcept {
-		return storage.load(std::memory_order_acquire);
+		if constexpr (SharingKind == cow_sharing_kind::synchronized) {
+			return storage.load(std::memory_order_acquire);
+		} else {
+			return storage;
+		}
 	}
 
 	static void store_underlying_value(storage_t& storage, underlying_val_t v) noexcept {
-		storage.store(v, std::memory_order_release);
+		if constexpr (SharingKind == cow_sharing_kind::synchronized) {
+			storage.store(v, std::memory_order_release);
+		} else {
+			storage = v;
+		}
 	}
 };
 
+template<cow_sharing_kind SharingKind>
 using ownership_header_bits = bitfield_pack<
-	ownership_header_word_spec,
+	ownership_header_word_spec<SharingKind>,
 	header_field,
 	bitfield_field_spec<1>,
 	bitfield_remainder
 >;
-using ownership_header_scratch_bits = typename ownership_header_bits::template scratch_t<>;
+template<cow_sharing_kind SharingKind>
+using ownership_header_scratch_bits = typename ownership_header_bits<SharingKind>::template scratch_t<>;
 
-static_assert(ownership_header_bits::template field_width<REFCOUNT>() > 0,
+static_assert(ownership_header_bits<cow_sharing_kind::synchronized>::template field_width<REFCOUNT>() > 0,
 	"sso_vector: header refcount remainder must be non-zero width");
 
 inline constexpr header_underlying_t make_header_underlying_value(bool shareable, std::uint64_t rc) noexcept {
-	ownership_header_scratch_bits header{};
+	ownership_header_scratch_bits<cow_sharing_kind::synchronized> header{};
 	header.set_all_masked(shareable ? 0u : 1u, static_cast<header_underlying_t>(rc));
 	return header.underlying_value();
 }
 
-inline constexpr bool ownership_header_is_shareable(const ownership_header_scratch_bits& header) noexcept {
+template<class ScratchHeader>
+inline constexpr bool ownership_header_is_shareable(const ScratchHeader& header) noexcept {
 	return header.template get<UNSHAREABLE>() == 0;
 }
 
-inline constexpr std::uint64_t ownership_header_share_count(const ownership_header_scratch_bits& header) noexcept {
+template<class ScratchHeader>
+inline constexpr std::uint64_t ownership_header_share_count(const ScratchHeader& header) noexcept {
 	return static_cast<std::uint64_t>(header.template get<REFCOUNT>());
 }
 
-template<class T, bool EnableCow>
+template<class T, bool EnableCow, cow_sharing_kind SharingKind>
 struct heap_block;
 
-template<class T>
-struct heap_block<T, true> {
+template<class T, cow_sharing_kind SharingKind>
+struct heap_block<T, true, SharingKind> {
 	static_assert(alignof(T) <= alignof(std::max_align_t),
 		"sso_vector requires T alignment compatible with byte-rebound allocator");
-	mutable ownership_header_bits ownership_header;
+	mutable ownership_header_bits<SharingKind> ownership_header;
 	std::size_t capacity = 0;
 #ifndef NDEBUG
 	std::size_t live_count = 0;
@@ -196,8 +223,8 @@ struct heap_block<T, true> {
 	}
 };
 
-template<class T>
-struct heap_block<T, false> {
+template<class T, cow_sharing_kind SharingKind>
+struct heap_block<T, false, SharingKind> {
 	static_assert(alignof(T) <= alignof(std::max_align_t),
 		"sso_vector requires T alignment compatible with byte-rebound allocator");
 	std::size_t capacity = 0;
@@ -212,61 +239,64 @@ struct heap_block<T, false> {
 	}
 };
 
-template<class T, bool EnableCow>
+template<class T, bool EnableCow, cow_sharing_kind SharingKind>
 inline constexpr std::size_t heap_block_payload_offset() noexcept {
-	return ceil_div(sizeof(heap_block<T, EnableCow>), alignof(T)) * alignof(T);
+	return ceil_div(sizeof(heap_block<T, EnableCow, SharingKind>), alignof(T)) * alignof(T);
 }
 
-template<class T, bool EnableCow>
-inline T* block_data(heap_block<T, EnableCow>* b) noexcept {
-	auto* payload = reinterpret_cast<std::byte*>(b) + heap_block_payload_offset<T, EnableCow>();
+template<class T, bool EnableCow, cow_sharing_kind SharingKind>
+inline T* block_data(heap_block<T, EnableCow, SharingKind>* b) noexcept {
+	auto* payload = reinterpret_cast<std::byte*>(b) + heap_block_payload_offset<T, EnableCow, SharingKind>();
 	return std::launder(reinterpret_cast<T*>(payload));
 }
 
-template<class T, bool EnableCow>
-inline const T* block_data(const heap_block<T, EnableCow>* b) noexcept {
-	auto* payload = reinterpret_cast<const std::byte*>(b) + heap_block_payload_offset<T, EnableCow>();
+template<class T, bool EnableCow, cow_sharing_kind SharingKind>
+inline const T* block_data(const heap_block<T, EnableCow, SharingKind>* b) noexcept {
+	auto* payload = reinterpret_cast<const std::byte*>(b) + heap_block_payload_offset<T, EnableCow, SharingKind>();
 	return std::launder(reinterpret_cast<const T*>(payload));
 }
 
-template<class T, bool EnableCow>
+template<class T, bool EnableCow, cow_sharing_kind SharingKind>
 inline constexpr std::size_t heap_block_bytes(std::size_t capacity) noexcept {
 	const std::size_t capped_capacity = (capacity == 0 ? 1 : capacity);
-	return heap_block_payload_offset<T, EnableCow>() + capped_capacity * sizeof(T);
+	return heap_block_payload_offset<T, EnableCow, SharingKind>() + capped_capacity * sizeof(T);
 }
 
-template<class T, bool EnableCow>
+template<class T, bool EnableCow, cow_sharing_kind SharingKind>
 inline constexpr bool heap_block_payload_is_aligned() noexcept {
-	return (heap_block_payload_offset<T, EnableCow>() % alignof(T)) == 0;
+	return (heap_block_payload_offset<T, EnableCow, SharingKind>() % alignof(T)) == 0;
 }
 
-template<class T, bool EnableCow>
+template<class T, bool EnableCow, cow_sharing_kind SharingKind>
 inline constexpr bool heap_block_payload_follows_header() noexcept {
-	return heap_block_payload_offset<T, EnableCow>() >= sizeof(heap_block<T, EnableCow>);
+	return heap_block_payload_offset<T, EnableCow, SharingKind>() >= sizeof(heap_block<T, EnableCow, SharingKind>);
 }
 
-template<class T, bool EnableCow>
+template<class T, bool EnableCow, cow_sharing_kind SharingKind>
 inline constexpr bool heap_block_payload_formula_is_consistent() noexcept {
-	return heap_block_bytes<T, EnableCow>(1) == heap_block_payload_offset<T, EnableCow>() + sizeof(T);
+	return heap_block_bytes<T, EnableCow, SharingKind>(1) == heap_block_payload_offset<T, EnableCow, SharingKind>() + sizeof(T);
 }
 
-static_assert(heap_block_payload_is_aligned<int, true>(), "sso_vector heap payload offset must preserve T alignment");
-static_assert(heap_block_payload_is_aligned<int, false>(), "sso_vector heap payload offset must preserve T alignment");
-static_assert(heap_block_payload_follows_header<int, true>(), "sso_vector heap payload must start after the header object");
-static_assert(heap_block_payload_follows_header<int, false>(), "sso_vector heap payload must start after the header object");
-static_assert(heap_block_payload_formula_is_consistent<int, true>(), "sso_vector heap byte formula must match header-plus-payload layout");
-static_assert(heap_block_payload_formula_is_consistent<int, false>(), "sso_vector heap byte formula must match header-plus-payload layout");
+static_assert(heap_block_payload_is_aligned<int, true, cow_sharing_kind::synchronized>(), "sso_vector heap payload offset must preserve T alignment");
+static_assert(heap_block_payload_is_aligned<int, true, cow_sharing_kind::unsynchronized>(), "sso_vector heap payload offset must preserve T alignment");
+static_assert(heap_block_payload_is_aligned<int, false, cow_sharing_kind::synchronized>(), "sso_vector heap payload offset must preserve T alignment");
+static_assert(heap_block_payload_follows_header<int, true, cow_sharing_kind::synchronized>(), "sso_vector heap payload must start after the header object");
+static_assert(heap_block_payload_follows_header<int, true, cow_sharing_kind::unsynchronized>(), "sso_vector heap payload must start after the header object");
+static_assert(heap_block_payload_follows_header<int, false, cow_sharing_kind::synchronized>(), "sso_vector heap payload must start after the header object");
+static_assert(heap_block_payload_formula_is_consistent<int, true, cow_sharing_kind::synchronized>(), "sso_vector heap byte formula must match header-plus-payload layout");
+static_assert(heap_block_payload_formula_is_consistent<int, true, cow_sharing_kind::unsynchronized>(), "sso_vector heap byte formula must match header-plus-payload layout");
+static_assert(heap_block_payload_formula_is_consistent<int, false, cow_sharing_kind::synchronized>(), "sso_vector heap byte formula must match header-plus-payload layout");
 
-template<class T, bool EnableCow, class Allocator>
-inline heap_block<T, EnableCow>* allocate_block(std::size_t capacity, Allocator& alloc) {
+template<class T, bool EnableCow, cow_sharing_kind SharingKind, class Allocator>
+inline heap_block<T, EnableCow, SharingKind>* allocate_block(std::size_t capacity, Allocator& alloc) {
 	using byte_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
 	using byte_traits = std::allocator_traits<byte_alloc>;
 	byte_alloc bytes_alloc(alloc);
-	const std::size_t bytes = heap_block_bytes<T, EnableCow>(capacity);
+	const std::size_t bytes = heap_block_bytes<T, EnableCow, SharingKind>(capacity);
 	std::byte* mem = byte_traits::allocate(bytes_alloc, bytes);
-	auto* b = ::new (mem) heap_block<T, EnableCow>{};
+	auto* b = ::new (mem) heap_block<T, EnableCow, SharingKind>{};
 	if constexpr (EnableCow) {
-		ownership_header_word_spec::store_underlying_value(
+		ownership_header_word_spec<SharingKind>::store_underlying_value(
 			b->ownership_header.storage(),
 			make_header_underlying_value(true, 1));
 	}
@@ -274,29 +304,29 @@ inline heap_block<T, EnableCow>* allocate_block(std::size_t capacity, Allocator&
 	return b;
 }
 
-template<class T, bool EnableCow, class Allocator>
-inline void deallocate_block(heap_block<T, EnableCow>* b, Allocator& alloc) noexcept {
+template<class T, bool EnableCow, cow_sharing_kind SharingKind, class Allocator>
+inline void deallocate_block(heap_block<T, EnableCow, SharingKind>* b, Allocator& alloc) noexcept {
 	if (!b) return;
 	using byte_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
 	using byte_traits = std::allocator_traits<byte_alloc>;
 	byte_alloc bytes_alloc(alloc);
-	const std::size_t bytes = heap_block_bytes<T, EnableCow>(b->capacity);
-	b->~heap_block<T, EnableCow>();
+	const std::size_t bytes = heap_block_bytes<T, EnableCow, SharingKind>(b->capacity);
+	b->~heap_block<T, EnableCow, SharingKind>();
 	byte_traits::deallocate(bytes_alloc, reinterpret_cast<std::byte*>(b), bytes);
 }
 
-template<class T>
-inline ownership_header_scratch_bits load_ownership_header_snapshot(const heap_block<T, true>* b) noexcept {
+template<class T, cow_sharing_kind SharingKind>
+inline ownership_header_scratch_bits<SharingKind> load_ownership_header_snapshot(const heap_block<T, true, SharingKind>* b) noexcept {
 	return b->ownership_header.scratch_copy();
 }
 
-template<class T>
-inline bool ownership_header_is_unique(const heap_block<T, true>* b) noexcept {
+template<class T, cow_sharing_kind SharingKind>
+inline bool ownership_header_is_unique(const heap_block<T, true, SharingKind>* b) noexcept {
 	return ownership_header_share_count(load_ownership_header_snapshot(b)) == 1;
 }
 
-template<class T>
-inline bool try_add_shared_owner(const heap_block<T, true>* b) noexcept {
+template<class T, cow_sharing_kind SharingKind>
+inline bool try_add_shared_owner(const heap_block<T, true, SharingKind>* b) noexcept {
 	auto& storage = b->ownership_header.storage();
 	for (;;) {
 		auto scratch = load_ownership_header_snapshot(b);
@@ -306,15 +336,20 @@ inline bool try_add_shared_owner(const heap_block<T, true>* b) noexcept {
 		if (rc == std::numeric_limits<std::uint64_t>::max()) return false;
 		const header_underlying_t before = scratch.underlying_value();
 		scratch.template set_masked<REFCOUNT>(static_cast<header_underlying_t>(rc + 1));
-		header_underlying_t expected = before;
-		if (storage.compare_exchange_weak(expected, scratch.underlying_value(), std::memory_order_acq_rel, std::memory_order_acquire)) {
+		if constexpr (SharingKind == cow_sharing_kind::synchronized) {
+			header_underlying_t expected = before;
+			if (storage.compare_exchange_weak(expected, scratch.underlying_value(), std::memory_order_acq_rel, std::memory_order_acquire)) {
+				return true;
+			}
+		} else {
+			ownership_header_word_spec<SharingKind>::store_underlying_value(storage, scratch.underlying_value());
 			return true;
 		}
 	}
 }
 
-template<class T>
-inline bool release_shared_owner(const heap_block<T, true>* b) noexcept {
+template<class T, cow_sharing_kind SharingKind>
+inline bool release_shared_owner(const heap_block<T, true, SharingKind>* b) noexcept {
 	auto& storage = b->ownership_header.storage();
 	for (;;) {
 		auto scratch = load_ownership_header_snapshot(b);
@@ -323,35 +358,44 @@ inline bool release_shared_owner(const heap_block<T, true>* b) noexcept {
 		const std::uint64_t next_rc = rc - 1;
 		const header_underlying_t before = scratch.underlying_value();
 		scratch.template set_masked<REFCOUNT>(static_cast<header_underlying_t>(next_rc));
-		header_underlying_t expected = before;
-		if (storage.compare_exchange_weak(expected, scratch.underlying_value(), std::memory_order_acq_rel, std::memory_order_acquire)) {
+		if constexpr (SharingKind == cow_sharing_kind::synchronized) {
+			header_underlying_t expected = before;
+			if (storage.compare_exchange_weak(expected, scratch.underlying_value(), std::memory_order_acq_rel, std::memory_order_acquire)) {
+				return next_rc == 0;
+			}
+		} else {
+			ownership_header_word_spec<SharingKind>::store_underlying_value(storage, scratch.underlying_value());
 			return next_rc == 0;
 		}
 	}
 }
 
-template<class T>
-inline void mark_unshareable(heap_block<T, true>* b) noexcept {
+template<class T, cow_sharing_kind SharingKind>
+inline void mark_unshareable(heap_block<T, true, SharingKind>* b) noexcept {
 	auto& storage = b->ownership_header.storage();
 	auto scratch = load_ownership_header_snapshot(b);
 	assert(ownership_header_share_count(scratch) == 1 && "sso_vector: mark_unshareable requires unique ownership");
 	if (!ownership_header_is_shareable(scratch)) return;
 	const header_underlying_t before = scratch.underlying_value();
 	scratch.template set_masked<UNSHAREABLE>(1u);
-	header_underlying_t expected = before;
-	// Under the documented precondition (`refcount == 1` on a uniquely owned block), no other owner
-	// may legally race a refcount/shareability transition on this header. The single strong CAS is
-	// therefore an invariant check on the unique-owner assumption, not a retry-based state transition.
-	const bool cas_ok = storage.compare_exchange_strong(
-		expected,
-		scratch.underlying_value(),
-		std::memory_order_acq_rel,
-		std::memory_order_acquire);
-	(void)cas_ok;
-	assert(cas_ok && "sso_vector: mark_unshareable expected unique-owner CAS to succeed");
+	if constexpr (SharingKind == cow_sharing_kind::synchronized) {
+		header_underlying_t expected = before;
+		// Under the documented precondition (`refcount == 1` on a uniquely owned block), no other owner
+		// may legally race a refcount/shareability transition on this header. The single strong CAS is
+		// therefore an invariant check on the unique-owner assumption, not a retry-based state transition.
+		const bool cas_ok = storage.compare_exchange_strong(
+			expected,
+			scratch.underlying_value(),
+			std::memory_order_acq_rel,
+			std::memory_order_acquire);
+		(void)cas_ok;
+		assert(cas_ok && "sso_vector: mark_unshareable expected unique-owner CAS to succeed");
+	} else {
+		ownership_header_word_spec<SharingKind>::store_underlying_value(storage, scratch.underlying_value());
+	}
 }
 
-template<typename T, std::size_t N, typename Allocator, bool EnableCow, zero_inline_policy ZeroInlinePolicy>
+template<typename T, std::size_t N, typename Allocator, bool EnableCow, cow_sharing_kind CowSharingKind, zero_inline_policy ZeroInlinePolicy>
 class basic_sso_vector_core {
 	static constexpr bool zero_inline_allowed = (ZeroInlinePolicy == zero_inline_policy::allow);
 	static_assert((N == 0) == zero_inline_allowed,
@@ -372,7 +416,7 @@ public:
 
 private:
 	using self_type = basic_sso_vector_core;
-	using heap_block_type = heap_block<T, EnableCow>;
+	using heap_block_type = heap_block<T, EnableCow, CowSharingKind>;
 
 	struct inline_storage {
 		static constexpr std::size_t inline_bytes = (N == 0 ? 1 : sizeof(T) * N);
@@ -393,8 +437,8 @@ private:
 
 	struct heap_storage {
 		heap_block_type* block = nullptr;
-		T* data() noexcept { return sso_vector_detail::block_data<T, EnableCow>(block); }
-		const T* data() const noexcept { return sso_vector_detail::block_data<T, EnableCow>(block); }
+		T* data() noexcept { return sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(block); }
+		const T* data() const noexcept { return sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(block); }
 		size_type capacity() const noexcept { return block ? block->capacity : 0; }
 	};
 
@@ -640,15 +684,15 @@ private:
 	void release_heap_block_impl(heap_block_type* b, size_type constructed) noexcept {
 		if (!b) return;
 		if constexpr (EnableCow) {
-			if (sso_vector_detail::release_shared_owner(b)) {
-				T* d = sso_vector_detail::block_data<T, EnableCow>(b);
+			if (sso_vector_detail::release_shared_owner<T, CowSharingKind>(b)) {
+				T* d = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(b);
 				destroy_range_impl(*b, d, 0, constructed);
-				sso_vector_detail::deallocate_block<T, EnableCow>(b, alloc_);
+				sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(b, alloc_);
 			}
 		} else {
-			T* d = sso_vector_detail::block_data<T, EnableCow>(b);
+			T* d = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(b);
 			destroy_range_impl(*b, d, 0, constructed);
-			sso_vector_detail::deallocate_block<T, EnableCow>(b, alloc_);
+			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(b, alloc_);
 		}
 	}
 
@@ -670,7 +714,7 @@ private:
 			auto& h = heap_storage_impl();
 			if (!h.block) return;
 
-			const auto cur = sso_vector_detail::load_ownership_header_snapshot(h.block);
+			const auto cur = sso_vector_detail::load_ownership_header_snapshot<T, CowSharingKind>(h.block);
 			const std::uint64_t rc = sso_vector_detail::ownership_header_share_count(cur);
 			assert(rc >= 1);
 			if (rc == 1) return;
@@ -679,13 +723,13 @@ private:
 			auto* old_block = h.block;
 			const size_type cap = old_block->capacity;
 
-			auto* new_block = sso_vector_detail::allocate_block<T, EnableCow>(cap, alloc_);
-			T* dst = sso_vector_detail::block_data<T, EnableCow>(new_block);
-			const T* src = sso_vector_detail::block_data<T, EnableCow>(old_block);
+			auto* new_block = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(cap, alloc_);
+			T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(new_block);
+			const T* src = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(old_block);
 			try {
 				copy_construct_range_impl(*new_block, dst, src, n);
 			} catch (...) {
-				sso_vector_detail::deallocate_block<T, EnableCow>(new_block, alloc_);
+				sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(new_block, alloc_);
 				throw;
 			}
 
@@ -727,7 +771,7 @@ private:
 		if (!can_move_from_source && other.is_heap_impl() && other.heap_storage_impl().block) {
 			if constexpr (EnableCow) {
 				can_move_from_source =
-					sso_vector_detail::ownership_header_is_unique(other.heap_storage_impl().block);
+					sso_vector_detail::ownership_header_is_unique<T, CowSharingKind>(other.heap_storage_impl().block);
 			} else {
 				can_move_from_source = true;
 			}
@@ -752,8 +796,8 @@ private:
 		}
 
 		const size_type new_cap = other.is_heap_impl() ? other.capacity_impl() : growth_capacity(n, N);
-		auto* new_block = sso_vector_detail::allocate_block<T, EnableCow>(new_cap, alloc_);
-		T* dst = sso_vector_detail::block_data<T, EnableCow>(new_block);
+		auto* new_block = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(new_cap, alloc_);
+		T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(new_block);
 		try {
 			if (can_move_from_source) {
 				move_construct_range_impl(*new_block, dst, other.data_mut_no_cow_impl(), n);
@@ -761,7 +805,7 @@ private:
 				copy_construct_range_impl(*new_block, dst, other.data_const_impl(), n);
 			}
 		} catch (...) {
-			sso_vector_detail::deallocate_block<T, EnableCow>(new_block, alloc_);
+			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(new_block, alloc_);
 			throw;
 		}
 
@@ -802,14 +846,14 @@ private:
 		assert(is_inline_impl());
 		if (new_cap < 1) new_cap = 1;
 
-		auto* b = sso_vector_detail::allocate_block<T, EnableCow>(new_cap, alloc_);
-		T* dst = sso_vector_detail::block_data<T, EnableCow>(b);
+		auto* b = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(new_cap, alloc_);
+		T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(b);
 		T* src = inline_storage_impl().data();
 		const size_type n = size_impl();
 		try {
 			move_construct_range_impl(*b, dst, src, n);
 		} catch (...) {
-			sso_vector_detail::deallocate_block<T, EnableCow>(b, alloc_);
+			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(b, alloc_);
 			throw;
 		}
 
@@ -830,18 +874,18 @@ private:
 		const size_type n = size_impl();
 		assert(new_cap >= n);
 
-		auto* new_block = sso_vector_detail::allocate_block<T, EnableCow>(new_cap, alloc_);
-		T* dst = sso_vector_detail::block_data<T, EnableCow>(new_block);
-		T* src = sso_vector_detail::block_data<T, EnableCow>(old_block);
+		auto* new_block = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(new_cap, alloc_);
+		T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(new_block);
+		T* src = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(old_block);
 		try {
 			move_construct_range_impl(*new_block, dst, src, n);
 		} catch (...) {
-			sso_vector_detail::deallocate_block<T, EnableCow>(new_block, alloc_);
+			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(new_block, alloc_);
 			throw;
 		}
 
 		destroy_range_impl(*old_block, src, 0, n);
-		sso_vector_detail::deallocate_block<T, EnableCow>(old_block, alloc_);
+		sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(old_block, alloc_);
 
 		h.block = new_block;
 	}
@@ -897,20 +941,20 @@ private:
 		assert(b);
 
 		if constexpr (EnableCow) {
-			if (sso_vector_detail::try_add_shared_owner(b)) {
+			if (sso_vector_detail::try_add_shared_owner<T, CowSharingKind>(b)) {
 				heap_storage_impl().block = b;
 				set_size_impl(other.size());
 				return;
 			}
 		}
 
-		auto* nb = sso_vector_detail::allocate_block<T, EnableCow>(b->capacity, alloc_);
-		T* dst = sso_vector_detail::block_data<T, EnableCow>(nb);
-		const T* src = sso_vector_detail::block_data<T, EnableCow>(b);
+		auto* nb = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(b->capacity, alloc_);
+		T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(nb);
+		const T* src = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(b);
 		try {
 			copy_construct_range_impl(*nb, dst, src, other.size());
 		} catch (...) {
-			sso_vector_detail::deallocate_block<T, EnableCow>(nb, alloc_);
+			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(nb, alloc_);
 			throw;
 		}
 		heap_storage_impl().block = nb;
@@ -931,7 +975,7 @@ private:
 		}
 
 		if constexpr (EnableCow) {
-			const auto hdr = sso_vector_detail::load_ownership_header_snapshot(heap_storage_impl().block);
+			const auto hdr = sso_vector_detail::load_ownership_header_snapshot<T, CowSharingKind>(heap_storage_impl().block);
 			if (sso_vector_detail::ownership_header_share_count(hdr) > 1) {
 				release_heap_impl();
 				state_.template emplace<0>();
@@ -947,11 +991,11 @@ private:
 	void privatize_heap_impl() {
 		if constexpr (EnableCow) {
 			if (auto* block = heap_block_impl()) {
-				if (!sso_vector_detail::ownership_header_is_unique(block)) {
+				if (!sso_vector_detail::ownership_header_is_unique<T, CowSharingKind>(block)) {
 					ensure_unique_heap_impl();
 					block = heap_block_impl();
 				}
-				sso_vector_detail::mark_unshareable(block);
+				sso_vector_detail::mark_unshareable<T, CowSharingKind>(block);
 			}
 		}
 	}
@@ -1570,7 +1614,7 @@ public:
 		if constexpr (EnableCow) {
 			if (!is_heap_impl()) return true;
 			return sso_vector_detail::ownership_header_is_shareable(
-				sso_vector_detail::load_ownership_header_snapshot(heap_storage_impl().block));
+				sso_vector_detail::load_ownership_header_snapshot<T, CowSharingKind>(heap_storage_impl().block));
 		} else {
 			return true;
 		}
@@ -1580,10 +1624,17 @@ public:
 		if constexpr (EnableCow) {
 			if (!is_heap_impl()) return 1;
 			return static_cast<size_type>(sso_vector_detail::ownership_header_share_count(
-				sso_vector_detail::load_ownership_header_snapshot(heap_storage_impl().block)));
+				sso_vector_detail::load_ownership_header_snapshot<T, CowSharingKind>(heap_storage_impl().block)));
 		} else {
 			return 1;
 		}
+	}
+
+	void detach()
+		requires (EnableCow) {
+		// This only breaks current heap sharing. It does not hand out raw mutable access and therefore
+		// does not mark the block permanently unshareable for future copies.
+		if (is_heap_impl()) ensure_unique_heap_impl();
 	}
 
 	size_type capacity() const noexcept { return capacity_impl(); }
@@ -1752,8 +1803,10 @@ private:
 template<typename T, std::size_t N, typename Allocator = std::allocator<T>,
          zero_inline_policy ZeroInlinePolicy = zero_inline_policy::disallow>
 class sso_vector final
-	: public sso_vector_detail::basic_sso_vector_core<T, N, Allocator, false, ZeroInlinePolicy> {
-	using base = sso_vector_detail::basic_sso_vector_core<T, N, Allocator, false, ZeroInlinePolicy>;
+	: public sso_vector_detail::basic_sso_vector_core<
+		T, N, Allocator, false, sso_vector_detail::cow_sharing_kind::synchronized, ZeroInlinePolicy> {
+	using base = sso_vector_detail::basic_sso_vector_core<
+		T, N, Allocator, false, sso_vector_detail::cow_sharing_kind::synchronized, ZeroInlinePolicy>;
 public:
 	using base::base;
 	using base::operator=;
@@ -1762,8 +1815,26 @@ public:
 template<typename T, std::size_t N, typename Allocator = std::allocator<T>,
          zero_inline_policy ZeroInlinePolicy = zero_inline_policy::disallow>
 class sso_cow_vector final
-	: public sso_vector_detail::basic_sso_vector_core<T, N, Allocator, true, ZeroInlinePolicy> {
-	using base = sso_vector_detail::basic_sso_vector_core<T, N, Allocator, true, ZeroInlinePolicy>;
+	: public sso_vector_detail::basic_sso_vector_core<
+		T, N, Allocator, true, sso_vector_detail::cow_sharing_kind::synchronized, ZeroInlinePolicy> {
+	using base = sso_vector_detail::basic_sso_vector_core<
+		T, N, Allocator, true, sso_vector_detail::cow_sharing_kind::synchronized, ZeroInlinePolicy>;
+public:
+	using base::base;
+	using base::operator=;
+};
+
+// Same CoW facade shape as `sso_cow_vector`, but the packed shared ownership state is backed by a
+// plain word instead of atomics. This keeps the detach/share structure comparable for internal
+// measurements while dropping the narrower synchronized-control-state guarantee of the default CoW
+// facade. Callers that need to hand off a potentially shared vector should call `detach()` first.
+template<typename T, std::size_t N, typename Allocator = std::allocator<T>,
+         zero_inline_policy ZeroInlinePolicy = zero_inline_policy::disallow>
+class sso_cow_vector_with_unsynchronized_sharing final
+	: public sso_vector_detail::basic_sso_vector_core<
+		T, N, Allocator, true, sso_vector_detail::cow_sharing_kind::unsynchronized, ZeroInlinePolicy> {
+	using base = sso_vector_detail::basic_sso_vector_core<
+		T, N, Allocator, true, sso_vector_detail::cow_sharing_kind::unsynchronized, ZeroInlinePolicy>;
 public:
 	using base::base;
 	using base::operator=;
@@ -1781,6 +1852,15 @@ using sso_vector_default =
 template<typename T, typename Allocator = std::allocator<T>>
 using sso_cow_vector_default =
 	sso_cow_vector<
+		T,
+		sso_vector_detail::default_inline_elems<T, Allocator>(),
+		Allocator,
+		sso_vector_detail::default_zero_inline_policy<T, Allocator>()
+	>;
+
+template<typename T, typename Allocator = std::allocator<T>>
+using sso_cow_vector_with_unsynchronized_sharing_default =
+	sso_cow_vector_with_unsynchronized_sharing<
 		T,
 		sso_vector_detail::default_inline_elems<T, Allocator>(),
 		Allocator,

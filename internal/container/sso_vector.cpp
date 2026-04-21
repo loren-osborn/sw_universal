@@ -434,12 +434,17 @@ static_assert(!sw::universal::internal::zero_inline_policy_matches_v<4, sw::univ
 static_assert(!sw::universal::internal::has_mediated_indexed_write<std::vector<int>>);
 static_assert(!sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::sso_vector_default<int>>);
 static_assert(sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::sso_cow_vector_default<int>>);
+static_assert(sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::sso_cow_vector_with_unsynchronized_sharing_default<int>>);
 
 template<class T, class Allocator>
 using sso_vector_auto = sw::universal::internal::sso_vector_default<T, Allocator>;
 
 template<class T, class Allocator>
 using sso_cow_vector_auto = sw::universal::internal::sso_cow_vector_default<T, Allocator>;
+
+template<class T, class Allocator>
+using sso_cow_vector_unsync_auto =
+	sw::universal::internal::sso_cow_vector_with_unsynchronized_sharing_default<T, Allocator>;
 
 struct AllocState {
 	int alloc_calls = 0;
@@ -1078,6 +1083,35 @@ void run_sso_proxy_suite(int& failures) {
 	expect_throw<std::out_of_range>(ctx, "const at throws on bounds failure", [&]() { (void)std::as_const(v).at(99); });
 }
 
+void run_sso_unsynchronized_proxy_suite(int& failures) {
+	using Vec = sw::universal::internal::sso_cow_vector_with_unsynchronized_sharing_default<int>;
+	TestContext ctx{"sso_vector(proxy_unsync)", failures};
+
+	Vec v;
+	v.reserve(64);
+	v.push_back(11);
+	v.push_back(22);
+	static_assert(!std::is_reference_v<decltype(v[0])>);
+	static_assert(!std::is_same_v<decltype(v[0]), int&>);
+	static_assert(sw::universal::internal::has_mediated_indexed_write<Vec>);
+	check(ctx, static_cast<int>(v[0]) == 11, "proxy read conversion");
+	v[1] = 42;
+	check(ctx, static_cast<int>(v[1]) == 42, "proxy write assignment");
+	v.set_at(0, 17);
+	check(ctx, static_cast<int>(v[0]) == 17, "set_at updates unsynchronized proxy-backed vector");
+
+	Vec shared = v;
+	check(ctx, shared.is_shared(), "copy shares unsynchronized heap-backed storage");
+	const int* before_detach = std::as_const(shared).data();
+	shared.detach();
+	check(ctx, !shared.is_shared(), "detach breaks unsynchronized sharing");
+	check(ctx, shared.is_shareable(), "detach preserves shareability");
+	check(ctx, shared.share_count() == 1, "detached unsynchronized vector reports one owner");
+	check(ctx, std::as_const(shared).data() != before_detach, "detach moves unsynchronized vector onto a private block");
+	check(ctx, !v.is_shared(), "sibling becomes unique after unsynchronized detach");
+	check(ctx, v.share_count() == 1, "sibling reports one owner after unsynchronized detach");
+}
+
 void run_sso_cow_suite(int& failures) {
 	using Vec = sw::universal::internal::sso_cow_vector_default<int>;
 	TestContext ctx{"sso_vector(cow)", failures};
@@ -1099,6 +1133,20 @@ void run_sso_cow_suite(int& failures) {
 		check(ctx, static_cast<int>(a[0]) == 0, "proxy write does not mutate source");
 		check(ctx, static_cast<int>(b[0]) == 77, "proxy write applies to destination");
 		check(ctx, cb.data() != pa, "proxy write detaches from shared heap");
+	}
+
+	{
+		Vec a;
+		a.reserve(64);
+		for (int i = 0; i < 12; ++i) a.push_back(i);
+		Vec b = a;
+		const int* before_detach = std::as_const(b).data();
+		b.detach();
+		check(ctx, !b.is_shared(), "public detach breaks synchronized sharing");
+		check(ctx, b.is_shareable(), "public detach preserves synchronized shareability");
+		check(ctx, b.share_count() == 1, "public detach leaves one owner");
+		check(ctx, std::as_const(b).data() != before_detach, "public detach moves synchronized vector onto a private block");
+		check(ctx, !a.is_shared(), "sibling becomes unique after synchronized detach");
 	}
 
 	{
@@ -2830,43 +2878,62 @@ void run_sso_vector_ownership_header_suite(int& failures) {
 		// mark_unshareable is intentionally exercised only after the header has been driven back to
 		// unique ownership; that helper is a narrow one-shot unique-owner transition, not a detach path.
 		std::allocator<int> alloc;
-		auto* block = detail::allocate_block<int, true>(8, alloc);
-		const auto initial = detail::load_ownership_header_snapshot(block);
+		auto* block = detail::allocate_block<int, true, detail::cow_sharing_kind::synchronized>(8, alloc);
+		const auto initial = detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::synchronized>(block);
 		check(ctx, detail::ownership_header_is_shareable(initial), "fresh ownership header starts shareable");
 		check(ctx, detail::ownership_header_share_count(initial) == 1, "fresh ownership header starts with one owner");
 		check(ctx, block->ownership_header.load_underlying_value() == initial.underlying_value(), "ownership-header scratch snapshot matches live underlying value");
 
-		check(ctx, detail::try_add_shared_owner(block), "shareable ownership header accepts a second owner");
-		const auto shared = detail::load_ownership_header_snapshot(block);
+		check(ctx, detail::try_add_shared_owner<int, detail::cow_sharing_kind::synchronized>(block), "shareable ownership header accepts a second owner");
+		const auto shared = detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::synchronized>(block);
 		check(ctx, detail::ownership_header_is_shareable(shared), "adding a shared owner does not clear shareability");
 		check(ctx, detail::ownership_header_share_count(shared) == 2, "shareable ownership header reaches two owners");
-		check(ctx, detail::try_add_shared_owner(block), "shared ownership header remains shareable until explicitly privatized");
-		const auto triply_shared = detail::load_ownership_header_snapshot(block);
+		check(ctx, detail::try_add_shared_owner<int, detail::cow_sharing_kind::synchronized>(block), "shared ownership header remains shareable until explicitly privatized");
+		const auto triply_shared = detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::synchronized>(block);
 		check(ctx, detail::ownership_header_share_count(triply_shared) == 3, "shareable ownership header reaches three owners");
 
-		check(ctx, !detail::release_shared_owner(block), "release from three owners does not report last owner");
-		const auto back_to_two = detail::load_ownership_header_snapshot(block);
+		check(ctx, !detail::release_shared_owner<int, detail::cow_sharing_kind::synchronized>(block), "release from three owners does not report last owner");
+		const auto back_to_two = detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::synchronized>(block);
 		check(ctx, detail::ownership_header_share_count(back_to_two) == 2, "releasing a shared owner decrements the count");
 		check(ctx, detail::ownership_header_is_shareable(back_to_two), "shared-owner release preserves shareability");
-		check(ctx, !detail::release_shared_owner(block), "release from two owners does not report last owner");
-		const auto unique = detail::load_ownership_header_snapshot(block);
+		check(ctx, !detail::release_shared_owner<int, detail::cow_sharing_kind::synchronized>(block), "release from two owners does not report last owner");
+		const auto unique = detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::synchronized>(block);
 		check(ctx, detail::ownership_header_share_count(unique) == 1, "releasing down to one owner restores unique state");
 		check(ctx, detail::ownership_header_is_shareable(unique), "unique ownership remains shareable until explicitly marked");
 
-		detail::mark_unshareable(block);
-		const auto unshareable = detail::load_ownership_header_snapshot(block);
+		detail::mark_unshareable<int, detail::cow_sharing_kind::synchronized>(block);
+		const auto unshareable = detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::synchronized>(block);
 		check(ctx, !detail::ownership_header_is_shareable(unshareable), "mark_unshareable sets the ownership policy bit");
 		check(ctx, detail::ownership_header_share_count(unshareable) == 1, "mark_unshareable requires and preserves unique ownership");
-		check(ctx, !detail::try_add_shared_owner(block), "unshareable ownership header rejects new sharing");
-		const auto after_rejected_share = detail::load_ownership_header_snapshot(block);
+		check(ctx, !detail::try_add_shared_owner<int, detail::cow_sharing_kind::synchronized>(block), "unshareable ownership header rejects new sharing");
+		const auto after_rejected_share = detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::synchronized>(block);
 		check(ctx, after_rejected_share.underlying_value() == unshareable.underlying_value(), "rejected sharing leaves ownership header unchanged");
 
-		check(ctx, detail::release_shared_owner(block), "final release reports last owner");
-		const auto after_last_release = detail::load_ownership_header_snapshot(block);
+		check(ctx, detail::release_shared_owner<int, detail::cow_sharing_kind::synchronized>(block), "final release reports last owner");
+		const auto after_last_release = detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::synchronized>(block);
 		check(ctx, detail::ownership_header_share_count(after_last_release) == 0, "final release leaves zero shared owners");
 		check(ctx, !detail::ownership_header_is_shareable(after_last_release), "final release preserves the unshareable policy bit");
 
-		detail::deallocate_block(block, alloc);
+		detail::deallocate_block<int, true, detail::cow_sharing_kind::synchronized>(block, alloc);
+	}
+
+	{
+		std::allocator<int> alloc;
+		auto* block = detail::allocate_block<int, true, detail::cow_sharing_kind::unsynchronized>(8, alloc);
+		static_assert(std::is_same_v<
+			std::remove_reference_t<decltype(block->ownership_header.storage())>,
+			detail::header_underlying_t>);
+		check(ctx, detail::try_add_shared_owner<int, detail::cow_sharing_kind::unsynchronized>(block), "unsynchronized ownership header accepts a second owner");
+		check(ctx, detail::ownership_header_share_count(
+			detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::unsynchronized>(block)) == 2,
+			"unsynchronized ownership header tracks a second owner");
+		check(ctx, !detail::release_shared_owner<int, detail::cow_sharing_kind::unsynchronized>(block), "unsynchronized release from two owners does not report last owner");
+		detail::mark_unshareable<int, detail::cow_sharing_kind::unsynchronized>(block);
+		check(ctx, !detail::ownership_header_is_shareable(
+			detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::unsynchronized>(block)),
+			"unsynchronized ownership header also supports the unshareable bit");
+		check(ctx, detail::release_shared_owner<int, detail::cow_sharing_kind::unsynchronized>(block), "unsynchronized final release reports last owner");
+		detail::deallocate_block<int, true, detail::cow_sharing_kind::unsynchronized>(block, alloc);
 	}
 }
 
@@ -2874,6 +2941,7 @@ int main() {
 	int nrOfFailedTestCases = 0;
 	run_sso_vector_ownership_header_suite(nrOfFailedTestCases);
 	run_sso_proxy_suite(nrOfFailedTestCases);
+	run_sso_unsynchronized_proxy_suite(nrOfFailedTestCases);
 	run_sso_cow_suite(nrOfFailedTestCases);
 	run_sso_vector_non_cow_suite(nrOfFailedTestCases);
 	run_sso_vector_cow_behavior_suite(nrOfFailedTestCases);
