@@ -147,7 +147,7 @@ void print_combined_report(const perf::benchmark_metadata& debug_meta,
 		}
 		if (!release_scenario) continue;
 
-		std::cout << "\nScenario: " << debug_scenario.label << '\n';
+		std::cout << "\nWorkload: " << debug_scenario.label << '\n';
 		std::cout << std::left << std::setw(label_width) << "Backend"
 		          << std::right << std::setw(metric_width) << "Debug Time"
 		          << std::setw(metric_width) << "Release Time"
