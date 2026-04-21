@@ -14,8 +14,8 @@ namespace sw { namespace universal {
 		: false_type
 	{
 	};
-	template<typename _Ty>
-	struct is_einteger_trait< sw::universal::einteger<_Ty> >
+	template<typename BlockType, typename BlockContainer>
+	struct is_einteger_trait< sw::universal::einteger<BlockType, BlockContainer> >
 		: true_type
 	{
 	};
