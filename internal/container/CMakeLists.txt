@@ -1,8 +1,16 @@
 file (GLOB SOURCES "./*.cpp")
 file (GLOB PERFORMANCE_SOURCES "./performance/*.cpp")
+list(FILTER PERFORMANCE_SOURCES EXCLUDE REGEX "sso_vector_performance_compare\\.cpp$")
 
 compile_all("true" "container" "Internal/container" "${SOURCES}")
 compile_all("true" "container_perf" "Internal/container/performance" "${PERFORMANCE_SOURCES}")
+
+# This helper compares persisted benchmark summaries and requires explicit
+# summary-file arguments, so keep it buildable but out of direct CTest runs.
+add_executable(container_perf_sso_vector_performance_compare
+    "${CMAKE_CURRENT_SOURCE_DIR}/performance/sso_vector_performance_compare.cpp")
+set_target_properties(container_perf_sso_vector_performance_compare PROPERTIES
+    FOLDER "Internal/container/performance")
 
 set(SSO_VECTOR_PERF_ORCHESTRATE_SCRIPT
     "${CMAKE_CURRENT_SOURCE_DIR}/performance/sso_vector_performance_orchestrate.cmake")
