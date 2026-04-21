@@ -192,6 +192,85 @@ std::uint64_t workload_medium_copy_read_mostly(std::size_t iterations) {
 	return acc;
 }
 
+template<typename Integer>
+std::uint64_t workload_existing_mixed_suite(std::size_t iterations) {
+	std::uint64_t acc = 0;
+	acc ^= workload_small_construction<Integer>(iterations);
+	acc ^= workload_copy_read_mostly_small<Integer>(iterations);
+	acc ^= workload_add_sub_small_medium<Integer>((std::max)(std::size_t{1}, iterations / 2u));
+	acc ^= workload_multiply_small_medium<Integer>((std::max)(std::size_t{1}, iterations / 8u));
+	acc ^= workload_growth_shrink<Integer>((std::max)(std::size_t{1}, iterations / 2u));
+	acc ^= workload_medium_copy_read_mostly<Integer>((std::max)(std::size_t{1}, iterations / 12u));
+	return acc;
+}
+
+template<typename Integer>
+std::uint64_t workload_small_temporary_arithmetic(std::size_t iterations) {
+	std::uint64_t acc = 0;
+	for (std::size_t i = 0; i < iterations; ++i) {
+		const auto a = make_pattern_integer<Integer>(23001u + static_cast<std::uint32_t>(i), (std::max)(std::size_t{1}, small_limb_count(i)));
+		const auto b = make_pattern_integer<Integer>(24001u + static_cast<std::uint32_t>(i), (std::max)(std::size_t{1}, small_limb_count(i * 5u + 3u)));
+		const Integer sum = a + b;
+		const Integer product = sum * Integer(static_cast<unsigned long long>((i % 9u) + 2u));
+		const Integer reduced = product - b;
+		acc ^= reduce_hash(sum);
+		acc ^= reduce_hash(product);
+		acc ^= reduce_hash(reduced);
+	}
+	return acc;
+}
+
+template<typename Integer>
+std::uint64_t workload_gradual_growth_parse_like(std::size_t iterations) {
+	std::uint64_t acc = 0;
+	for (std::size_t i = 0; i < iterations; ++i) {
+		Integer value;
+		const std::size_t digits = 24u + (i % 24u);
+		for (std::size_t d = 0; d < digits; ++d) {
+			const unsigned digit = static_cast<unsigned>((i + d * 7u) % 10u);
+			value *= 10ll;
+			value += static_cast<long long>(digit);
+		}
+		acc ^= reduce_hash(value);
+	}
+	return acc;
+}
+
+template<typename Integer>
+std::uint64_t workload_large_plus_small_updates(std::size_t iterations) {
+	std::uint64_t acc = 0;
+	for (std::size_t i = 0; i < iterations; ++i) {
+		Integer value = make_pattern_integer<Integer>(31001u + static_cast<std::uint32_t>(i), 10u + (i % 4u));
+		for (std::size_t step = 0; step < 24u; ++step) {
+			value += static_cast<long long>((i + step) % 17u + 1u);
+			value *= static_cast<long long>((step % 3u) + 2u);
+			value >>= static_cast<int>((step % 3u) + 1u);
+			value += static_cast<long long>((step % 11u) + 3u);
+		}
+		acc ^= reduce_hash(value);
+	}
+	return acc;
+}
+
+template<typename Integer>
+std::uint64_t workload_persistent_larger_modular(std::size_t iterations) {
+	std::uint64_t acc = 0;
+	for (std::size_t i = 0; i < iterations; ++i) {
+		Integer modulus = make_pattern_integer<Integer>(41001u + static_cast<std::uint32_t>(i), 12u + (i % 3u));
+		modulus.setblock(0u, static_cast<typename Integer::bt>(modulus.block(0u) | 1u));
+		Integer base = make_pattern_integer<Integer>(42001u + static_cast<std::uint32_t>(i), 10u + (i % 3u));
+		Integer state = make_pattern_integer<Integer>(43001u + static_cast<std::uint32_t>(i), 8u + (i % 2u));
+		for (std::size_t round = 0; round < 10u; ++round) {
+			state = (state * base) + static_cast<long long>((round % 13u) + 5u);
+			state %= modulus;
+			base += static_cast<long long>((round % 7u) + 2u);
+		}
+		acc ^= reduce_hash(state);
+		acc ^= reduce_hash(base);
+	}
+	return acc;
+}
+
 template<typename Fn>
 double measure_seconds(Fn&& fn) {
 	const auto begin = std::chrono::steady_clock::now();
@@ -268,13 +347,12 @@ void print_provenance_banner(const perf::benchmark_metadata& metadata) {
 }
 
 perf::persisted_summary run_bigint_benchmark(std::size_t iterations, bool emit_report) {
-	constexpr std::array<scenario_spec, 6> scenarios{{
-		{"small construction churn", 1u},
-		{"small copy/read-mostly", 1u},
-		{"add/subtract small+medium", 2u},
-		{"multiply small+medium", 8u},
-		{"growth/shrink shifts", 2u},
-		{"medium copy/read-mostly", 12u},
+	constexpr std::array<scenario_spec, 5> scenarios{{
+		{"existing mixed small/medium workload", 1u},
+		{"small temporary arithmetic", 1u},
+		{"gradual growth / parse-like growth", 6u},
+		{"large + small operand updates", 6u},
+		{"persistent larger modular arithmetic", 2400u},
 	}};
 
 	constexpr auto sso_inline_elems = default_inline_elems<limb_type, std::allocator<limb_type>>();
@@ -308,33 +386,30 @@ perf::persisted_summary run_bigint_benchmark(std::size_t iterations, bool emit_r
 		results[i].iterations = (std::max)(std::size_t{1}, iterations / scenarios[i].iteration_divisor);
 	}
 
-	results[0].std_vector_backed = benchmark_case(results[0].iterations, workload_small_construction<std_bigint>);
-	results[0].sso_vector_backed = benchmark_case(results[0].iterations, workload_small_construction<sso_bigint>);
+	results[0].std_vector_backed = benchmark_case(results[0].iterations, workload_existing_mixed_suite<std_bigint>);
+	results[0].sso_vector_backed = benchmark_case(results[0].iterations, workload_existing_mixed_suite<sso_bigint>);
 
-	results[1].std_vector_backed = benchmark_case(results[1].iterations, workload_copy_read_mostly_small<std_bigint>);
-	results[1].sso_vector_backed = benchmark_case(results[1].iterations, workload_copy_read_mostly_small<sso_bigint>);
+	results[1].std_vector_backed = benchmark_case(results[1].iterations, workload_small_temporary_arithmetic<std_bigint>);
+	results[1].sso_vector_backed = benchmark_case(results[1].iterations, workload_small_temporary_arithmetic<sso_bigint>);
 
-	results[2].std_vector_backed = benchmark_case(results[2].iterations, workload_add_sub_small_medium<std_bigint>);
-	results[2].sso_vector_backed = benchmark_case(results[2].iterations, workload_add_sub_small_medium<sso_bigint>);
+	results[2].std_vector_backed = benchmark_case(results[2].iterations, workload_gradual_growth_parse_like<std_bigint>);
+	results[2].sso_vector_backed = benchmark_case(results[2].iterations, workload_gradual_growth_parse_like<sso_bigint>);
 
-	results[3].std_vector_backed = benchmark_case(results[3].iterations, workload_multiply_small_medium<std_bigint>);
-	results[3].sso_vector_backed = benchmark_case(results[3].iterations, workload_multiply_small_medium<sso_bigint>);
+	results[3].std_vector_backed = benchmark_case(results[3].iterations, workload_large_plus_small_updates<std_bigint>);
+	results[3].sso_vector_backed = benchmark_case(results[3].iterations, workload_large_plus_small_updates<sso_bigint>);
 
-	results[4].std_vector_backed = benchmark_case(results[4].iterations, workload_growth_shrink<std_bigint>);
-	results[4].sso_vector_backed = benchmark_case(results[4].iterations, workload_growth_shrink<sso_bigint>);
-
-	results[5].std_vector_backed = benchmark_case(results[5].iterations, workload_medium_copy_read_mostly<std_bigint>);
-	results[5].sso_vector_backed = benchmark_case(results[5].iterations, workload_medium_copy_read_mostly<sso_bigint>);
+	results[4].std_vector_backed = benchmark_case(results[4].iterations, workload_persistent_larger_modular<std_bigint>);
+	results[4].sso_vector_backed = benchmark_case(results[4].iterations, workload_persistent_larger_modular<sso_bigint>);
 
 	if (emit_report) {
-		std::cout << "\nPayload              : einteger<uint32_t>\n";
-		std::cout << "Limb storage         : uint32_t words\n";
-		std::cout << "sso limb inline elems: " << sso_inline_elems << '\n';
-		for (const auto& scenario : results) {
-			std::cout << "\nScenario: " << scenario.label << '\n';
-			print_scenario_header();
-			std::cout << std::string(label_width + time_width + ops_width + ratio_width, '-') << '\n';
-			print_scenario_row(std_label, scenario.std_vector_backed, scenario.std_vector_backed);
+			std::cout << "\nPayload              : einteger<uint32_t>\n";
+			std::cout << "Limb storage         : uint32_t words\n";
+			std::cout << "sso limb inline elems: " << sso_inline_elems << '\n';
+			for (const auto& scenario : results) {
+				std::cout << "\nWorkload: " << scenario.label << '\n';
+				print_scenario_header();
+				std::cout << std::string(label_width + time_width + ops_width + ratio_width, '-') << '\n';
+				print_scenario_row(std_label, scenario.std_vector_backed, scenario.std_vector_backed);
 			print_scenario_row(sso_label, scenario.sso_vector_backed, scenario.std_vector_backed);
 		}
 	}
@@ -454,9 +529,12 @@ try {
 		std::cout << "einteger BigInt storage benchmark\n";
 		print_provenance_banner(metadata);
 		std::cout << "Backends: std::vector<uint32_t> vs sso_vector<uint32_t>\n";
-		std::cout << "Workloads: small construction churn, small copy/read-mostly,\n";
-		std::cout << "           add/subtract small+medium, multiply small+medium,\n";
-		std::cout << "           growth/shrink shifts, and medium copy/read-mostly\n";
+		std::cout << "Workload families:\n";
+		std::cout << "  - existing mixed small/medium workload: preserves the prior benchmark mix\n";
+		std::cout << "  - small temporary arithmetic: tiny temporaries and short-lived arithmetic\n";
+		std::cout << "  - gradual growth / parse-like growth: repeated multiply-by-small and add-small\n";
+		std::cout << "  - large + small operand updates: persistent larger values updated by small operands\n";
+		std::cout << "  - persistent larger modular arithmetic: medium-large modular arithmetic loop\n";
 		std::cout << '\n';
 	}
 
