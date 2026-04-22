@@ -457,6 +457,17 @@ cmake_args_for_suffix = \
 	-DUNIVERSAL_ENABLE_UBSAN=$(call predicate_on_off,is_ub_sanitize,$1) \
 	-DUNIVERSAL_ENABLE_COVERAGE=$(call predicate_on_off,is_coverage,$1)
 
+## @brief Fixed build-tree pair used for cross-build aggregate benchmark reports.
+REPORT_DEBUG_SUFFIX := debug_all_uni
+REPORT_RELEASE_SUFFIX := prod_all_uni
+REPORTS_DIR := reports
+REPORT_SSO_VECTOR_FILE := $(REPORTS_DIR)/sso_vector_report.txt
+REPORT_EINTEGER_FILE := $(REPORTS_DIR)/einteger_report.txt
+REPORT_DEBUG_DIR := $(call build_dir,$(REPORT_DEBUG_SUFFIX))
+REPORT_RELEASE_DIR := $(call build_dir,$(REPORT_RELEASE_SUFFIX))
+REPORT_SSO_VECTOR_BUILD_ARTIFACT := $(REPORT_DEBUG_DIR)/internal/container/benchmark-results/sso_vector_debug_vs_release_report.txt
+REPORT_EINTEGER_BUILD_ARTIFACT := $(REPORT_DEBUG_DIR)/elastic/einteger/benchmark-results/einteger_debug_vs_release_report.txt
+
 ## @}
 
 ###############################################################################
@@ -470,6 +481,7 @@ default: all
 ###############################################################################
 
 .PHONY: default all build test sanitize asanitize ubsanitize coverage clean help more_help
+.PHONY: report__sso_vector report__einteger reports__theo
 
 ###############################################################################
 ## @section Validation targets
@@ -557,6 +569,73 @@ coverage: coverage__debug_all_uni_cov
 ##        production assets (prod_core).
 all: test build
 
+###############################################################################
+## Cross-Build Aggregate Benchmark Reports
+##
+## These report targets intentionally live in this top-level GNU Makefile
+## instead of in a single CMake build tree.
+##
+## Why:
+##
+## - each final report compares Debug and Release benchmark summaries
+## - those summaries live in different configured build trees
+## - provenance validation depends on each tree's generated benchmark metadata
+## - stale summaries must be refreshed conservatively before comparison
+##
+## CMake remains responsible for all in-tree work:
+##
+## - building the benchmark executable
+## - building the compare helper
+## - refreshing stale summaries
+## - validating provenance compatibility
+## - emitting the final aggregate comparison text
+##
+## GNU Make is the correct outer coordinator for these user-facing report
+## workflows because it owns the cross-build-tree step:
+##
+## - ensure the Release benchmark tree exists and is built far enough
+## - ensure the Debug benchmark tree exists and runs the compare target
+## - collect the resulting aggregate report into a stable top-level file
+##
+## These targets are intentionally conservative. They re-run configure/build
+## stages so changes in generated provenance metadata force the benchmark
+## binaries and summaries to be reconsidered before report generation.
+##
+## Do not "clean this up" by moving these targets into one CMake tree unless
+## multi-build-tree coordination is first solved in a principled way.
+###############################################################################
+
+$(REPORTS_DIR): tool__CMAKE
+	$(CMAKE) -E make_directory "$(REPORTS_DIR)"
+
+$(REPORT_SSO_VECTOR_FILE): tool__CMAKE configure__$(REPORT_RELEASE_SUFFIX) configure__$(REPORT_DEBUG_SUFFIX) | $(REPORTS_DIR)
+	$(CMAKE) --build "$(REPORT_RELEASE_DIR)" \
+		--config Release \
+		--parallel "$(JOBS)" \
+		--target container_perf_sso_vector_performance
+	$(CMAKE) --build "$(REPORT_DEBUG_DIR)" \
+		--config Debug \
+		--parallel "$(JOBS)" \
+		--target container_perf_sso_vector_compare_builds
+	$(CMAKE) -E copy_if_different "$(REPORT_SSO_VECTOR_BUILD_ARTIFACT)" "$@"
+
+$(REPORT_EINTEGER_FILE): tool__CMAKE configure__$(REPORT_RELEASE_SUFFIX) configure__$(REPORT_DEBUG_SUFFIX) | $(REPORTS_DIR)
+	$(CMAKE) --build "$(REPORT_RELEASE_DIR)" \
+		--config Release \
+		--parallel "$(JOBS)" \
+		--target eint_performance
+	$(CMAKE) --build "$(REPORT_DEBUG_DIR)" \
+		--config Debug \
+		--parallel "$(JOBS)" \
+		--target eint_performance_compare_builds
+	$(CMAKE) -E copy_if_different "$(REPORT_EINTEGER_BUILD_ARTIFACT)" "$@"
+
+report__sso_vector: $(REPORT_SSO_VECTOR_FILE)
+
+report__einteger: $(REPORT_EINTEGER_FILE)
+
+reports__theo: $(REPORT_SSO_VECTOR_FILE) $(REPORT_EINTEGER_FILE)
+
 ## @brief Remove wrapper-managed build trees.
 clean:
 	rm -rf build
@@ -572,6 +651,9 @@ help:
 	@echo "  sanitize   Configure, build, and run all tests with ASan and UBSan enabled"
 	@echo "  coverage   Configure, build, and run all tests with code coverage tracking"
 	@echo "                enabled to generate a code coverage report."
+	@echo "  report__sso_vector  Generate the cross-build Debug-vs-Release sso_vector report"
+	@echo "  report__einteger    Generate the cross-build Debug-vs-Release einteger report"
+	@echo "  reports__theo       Generate both cross-build aggregate benchmark reports"
 	@echo "  clean      Remove build trees"
 	@echo "  help       Show this summary"
 	@echo "  more_help  Show advanced usage, suffixes, and override variables"

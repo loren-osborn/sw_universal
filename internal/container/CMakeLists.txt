@@ -17,6 +17,8 @@ set(SSO_VECTOR_PERF_ORCHESTRATE_SCRIPT
 set(SSO_VECTOR_PERF_BENCHMARK_RELATIVE_PATH
     "internal/container/container_perf_sso_vector_performance${CMAKE_EXECUTABLE_SUFFIX}")
 set(SSO_VECTOR_PERF_SUMMARY_SCHEMA_VERSION 3)
+set(SSO_VECTOR_PERF_REPORT_PATH
+    "${CMAKE_CURRENT_BINARY_DIR}/benchmark-results/sso_vector_debug_vs_release_report.txt")
 
 add_custom_target(container_perf_sso_vector_summary_debug
     COMMAND ${CMAKE_COMMAND}
@@ -26,6 +28,7 @@ add_custom_target(container_perf_sso_vector_summary_debug
             -DBENCHMARK_RELATIVE_PATH=${SSO_VECTOR_PERF_BENCHMARK_RELATIVE_PATH}
             -DSUMMARY_SCHEMA_VERSION=${SSO_VECTOR_PERF_SUMMARY_SCHEMA_VERSION}
             -P ${SSO_VECTOR_PERF_ORCHESTRATE_SCRIPT}
+    DEPENDS container_perf_sso_vector_performance
     USES_TERMINAL
     VERBATIM)
 
@@ -37,6 +40,7 @@ add_custom_target(container_perf_sso_vector_summary_release
             -DBENCHMARK_RELATIVE_PATH=${SSO_VECTOR_PERF_BENCHMARK_RELATIVE_PATH}
             -DSUMMARY_SCHEMA_VERSION=${SSO_VECTOR_PERF_SUMMARY_SCHEMA_VERSION}
             -P ${SSO_VECTOR_PERF_ORCHESTRATE_SCRIPT}
+    DEPENDS container_perf_sso_vector_performance
     USES_TERMINAL
     VERBATIM)
 
@@ -47,6 +51,7 @@ add_custom_target(container_perf_sso_vector_compare_builds
             -DBENCHMARK_RELATIVE_PATH=${SSO_VECTOR_PERF_BENCHMARK_RELATIVE_PATH}
             -DSUMMARY_SCHEMA_VERSION=${SSO_VECTOR_PERF_SUMMARY_SCHEMA_VERSION}
             -DCOMPARE_BINARY=$<TARGET_FILE:container_perf_sso_vector_performance_compare>
+            -DREPORT_OUTPUT_PATH=${SSO_VECTOR_PERF_REPORT_PATH}
             -P ${SSO_VECTOR_PERF_ORCHESTRATE_SCRIPT}
     DEPENDS container_perf_sso_vector_performance
             container_perf_sso_vector_performance_compare
