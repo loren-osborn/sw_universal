@@ -56,3 +56,5 @@ CMakeUserPresets.json
 
 # Claude Code user-local settings
 .claude/settings.local.json
+
+reports/

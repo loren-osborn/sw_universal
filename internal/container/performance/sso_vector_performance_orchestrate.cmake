@@ -73,6 +73,19 @@ function(find_benchmark_binary_for_config wanted_config out_var)
   set("${out_var}" "" PARENT_SCOPE)
 endfunction()
 
+function(write_report_output report_text)
+  if(NOT DEFINED REPORT_OUTPUT_PATH OR "${REPORT_OUTPUT_PATH}" STREQUAL "")
+    return()
+  endif()
+
+  get_filename_component(_report_dir "${REPORT_OUTPUT_PATH}" DIRECTORY)
+  if(NOT "${_report_dir}" STREQUAL "")
+    file(MAKE_DIRECTORY "${_report_dir}")
+  endif()
+  file(WRITE "${REPORT_OUTPUT_PATH}" "${report_text}\n")
+  message(STATUS "Wrote aggregate report: ${REPORT_OUTPUT_PATH}")
+endfunction()
+
 function(parse_summary_file summary_path prefix out_ok)
   if(NOT EXISTS "${summary_path}")
     set("${out_ok}" FALSE PARENT_SCOPE)
@@ -216,7 +229,11 @@ if(ACTION STREQUAL "refresh-config")
 
   find_benchmark_binary_for_config("${WANTED_CONFIG}" _benchmark_binary)
   if("${_benchmark_binary}" STREQUAL "")
-    message(FATAL_ERROR "${WANTED_CONFIG} benchmark binary not found")
+    get_filename_component(_build_parent "${CURRENT_BUILD_DIR}" DIRECTORY)
+    message(FATAL_ERROR
+      "${WANTED_CONFIG} benchmark binary not found for ${BENCHMARK_RELATIVE_PATH}.\n"
+      "Searched the current build tree and sibling build trees under ${_build_parent}.\n"
+      "Configure/build a ${WANTED_CONFIG} tree containing this benchmark before rerunning this target.")
   endif()
 
   ensure_current_summary("${_benchmark_binary}" _summary_path)
@@ -232,10 +249,18 @@ if(ACTION STREQUAL "compare-builds")
   find_benchmark_binary_for_config("Debug" _debug_binary)
   find_benchmark_binary_for_config("Release" _release_binary)
   if("${_debug_binary}" STREQUAL "")
-    message(FATAL_ERROR "Debug benchmark binary not found")
+    get_filename_component(_build_parent "${CURRENT_BUILD_DIR}" DIRECTORY)
+    message(FATAL_ERROR
+      "Debug benchmark binary not found for ${BENCHMARK_RELATIVE_PATH}.\n"
+      "Searched the current build tree and sibling build trees under ${_build_parent}.\n"
+      "Build the Debug benchmark target first, then rerun compare-builds.")
   endif()
   if("${_release_binary}" STREQUAL "")
-    message(FATAL_ERROR "Release benchmark binary not found")
+    get_filename_component(_build_parent "${CURRENT_BUILD_DIR}" DIRECTORY)
+    message(FATAL_ERROR
+      "Release benchmark binary not found for ${BENCHMARK_RELATIVE_PATH}.\n"
+      "Searched the current build tree and sibling build trees under ${_build_parent}.\n"
+      "Build a sibling Release tree for this benchmark first, or use the top-level Make report target.")
   endif()
 
   ensure_current_summary("${_debug_binary}" _debug_summary)
@@ -254,6 +279,7 @@ if(ACTION STREQUAL "compare-builds")
   if(NOT _compare_result EQUAL 0)
     message(FATAL_ERROR "Benchmark comparison failed: ${_compare_error}${_compare_output}")
   endif()
+  write_report_output("${_compare_output}")
   return()
 endif()
 

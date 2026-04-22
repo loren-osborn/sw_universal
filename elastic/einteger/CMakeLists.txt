@@ -24,6 +24,8 @@ set(EINTEGER_PERF_ORCHESTRATE_SCRIPT
 set(EINTEGER_PERF_BENCHMARK_RELATIVE_PATH
     "elastic/einteger/eint_performance${CMAKE_EXECUTABLE_SUFFIX}")
 set(EINTEGER_PERF_SUMMARY_SCHEMA_VERSION 1)
+set(EINTEGER_PERF_REPORT_PATH
+    "${CMAKE_CURRENT_BINARY_DIR}/benchmark-results/einteger_debug_vs_release_report.txt")
 
 add_custom_target(eint_performance_summary_debug
     COMMAND ${CMAKE_COMMAND}
@@ -33,6 +35,7 @@ add_custom_target(eint_performance_summary_debug
             -DBENCHMARK_RELATIVE_PATH=${EINTEGER_PERF_BENCHMARK_RELATIVE_PATH}
             -DSUMMARY_SCHEMA_VERSION=${EINTEGER_PERF_SUMMARY_SCHEMA_VERSION}
             -P ${EINTEGER_PERF_ORCHESTRATE_SCRIPT}
+    DEPENDS eint_performance
     USES_TERMINAL
     VERBATIM)
 
@@ -44,6 +47,7 @@ add_custom_target(eint_performance_summary_release
             -DBENCHMARK_RELATIVE_PATH=${EINTEGER_PERF_BENCHMARK_RELATIVE_PATH}
             -DSUMMARY_SCHEMA_VERSION=${EINTEGER_PERF_SUMMARY_SCHEMA_VERSION}
             -P ${EINTEGER_PERF_ORCHESTRATE_SCRIPT}
+    DEPENDS eint_performance
     USES_TERMINAL
     VERBATIM)
 
@@ -54,6 +58,7 @@ add_custom_target(eint_performance_compare_builds
             -DBENCHMARK_RELATIVE_PATH=${EINTEGER_PERF_BENCHMARK_RELATIVE_PATH}
             -DSUMMARY_SCHEMA_VERSION=${EINTEGER_PERF_SUMMARY_SCHEMA_VERSION}
             -DCOMPARE_BINARY=$<TARGET_FILE:eint_performance_compare_tool>
+            -DREPORT_OUTPUT_PATH=${EINTEGER_PERF_REPORT_PATH}
             -P ${EINTEGER_PERF_ORCHESTRATE_SCRIPT}
     DEPENDS eint_performance
             eint_performance_compare_tool
