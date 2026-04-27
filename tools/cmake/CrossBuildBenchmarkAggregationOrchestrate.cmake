@@ -1,10 +1,15 @@
 cmake_minimum_required(VERSION 3.22)
 
-# Cross-platform orchestration for the sso_vector benchmark family.
+# Generic cross-platform orchestration for cross-build benchmark aggregation.
 # Responsibilities:
-# - benchmark executable: emit metadata and write summaries
+# - benchmark executable: emit metadata and write aggregation summaries
 # - compare executable: compare persisted summaries only
-# - this script: locate binaries, refresh stale summaries, invoke compare
+# - this script: locate sibling build-tree binaries, refresh stale summaries,
+#   validate provenance compatibility, and emit the final cross-build report
+
+if(NOT DEFINED BENCHMARK_FAMILY_LABEL OR "${BENCHMARK_FAMILY_LABEL}" STREQUAL "")
+  set(BENCHMARK_FAMILY_LABEL "benchmark")
+endif()
 
 function(parse_key_value_text text prefix)
   string(REPLACE "\r\n" "\n" _normalized "${text}")
@@ -83,7 +88,7 @@ function(write_report_output report_text)
     file(MAKE_DIRECTORY "${_report_dir}")
   endif()
   file(WRITE "${REPORT_OUTPUT_PATH}" "${report_text}\n")
-  message(STATUS "Wrote aggregate report: ${REPORT_OUTPUT_PATH}")
+  message(STATUS "Wrote ${BENCHMARK_FAMILY_LABEL} cross-build aggregation report: ${REPORT_OUTPUT_PATH}")
 endfunction()
 
 function(parse_summary_file summary_path prefix out_ok)
@@ -186,7 +191,8 @@ function(ensure_current_summary benchmark_binary out_summary_path)
 
   summary_is_stale("${benchmark_binary}" "meta" _is_stale _stale_reason)
   if(_is_stale)
-    message(STATUS "Refreshing ${meta_build_config} sso_vector benchmark summary: ${_stale_reason}")
+    message(STATUS
+      "Refreshing ${meta_build_config} ${BENCHMARK_FAMILY_LABEL} cross-build aggregation summary: ${_stale_reason}")
     execute_process(
       COMMAND "${benchmark_binary}" --write-summary-only
       RESULT_VARIABLE _result
@@ -203,7 +209,8 @@ function(ensure_current_summary benchmark_binary out_summary_path)
       message(FATAL_ERROR "Summary remained unreadable after refresh: ${meta_summary_path}")
     endif()
   else()
-    message(STATUS "${meta_build_config} sso_vector benchmark summary is up to date")
+    message(STATUS
+      "${meta_build_config} ${BENCHMARK_FAMILY_LABEL} cross-build aggregation summary is up to date")
   endif()
 
   set("${out_summary_path}" "${meta_summary_path}" PARENT_SCOPE)
@@ -231,13 +238,14 @@ if(ACTION STREQUAL "refresh-config")
   if("${_benchmark_binary}" STREQUAL "")
     get_filename_component(_build_parent "${CURRENT_BUILD_DIR}" DIRECTORY)
     message(FATAL_ERROR
-      "${WANTED_CONFIG} benchmark binary not found for ${BENCHMARK_RELATIVE_PATH}.\n"
+      "${WANTED_CONFIG} benchmark binary not found for ${BENCHMARK_FAMILY_LABEL} cross-build aggregation.\n"
+      "Expected relative path: ${BENCHMARK_RELATIVE_PATH}\n"
       "Searched the current build tree and sibling build trees under ${_build_parent}.\n"
       "Configure/build a ${WANTED_CONFIG} tree containing this benchmark before rerunning this target.")
   endif()
 
   ensure_current_summary("${_benchmark_binary}" _summary_path)
-  message(STATUS "${WANTED_CONFIG} summary ready: ${_summary_path}")
+  message(STATUS "${WANTED_CONFIG} ${BENCHMARK_FAMILY_LABEL} cross-build aggregation summary ready: ${_summary_path}")
   return()
 endif()
 
@@ -251,16 +259,18 @@ if(ACTION STREQUAL "compare-builds")
   if("${_debug_binary}" STREQUAL "")
     get_filename_component(_build_parent "${CURRENT_BUILD_DIR}" DIRECTORY)
     message(FATAL_ERROR
-      "Debug benchmark binary not found for ${BENCHMARK_RELATIVE_PATH}.\n"
+      "Debug benchmark binary not found for ${BENCHMARK_FAMILY_LABEL} cross-build aggregation.\n"
+      "Expected relative path: ${BENCHMARK_RELATIVE_PATH}\n"
       "Searched the current build tree and sibling build trees under ${_build_parent}.\n"
       "Build the Debug benchmark target first, then rerun compare-builds.")
   endif()
   if("${_release_binary}" STREQUAL "")
     get_filename_component(_build_parent "${CURRENT_BUILD_DIR}" DIRECTORY)
     message(FATAL_ERROR
-      "Release benchmark binary not found for ${BENCHMARK_RELATIVE_PATH}.\n"
+      "Release benchmark binary not found for ${BENCHMARK_FAMILY_LABEL} cross-build aggregation.\n"
+      "Expected relative path: ${BENCHMARK_RELATIVE_PATH}\n"
       "Searched the current build tree and sibling build trees under ${_build_parent}.\n"
-      "Build a sibling Release tree for this benchmark first, or use the top-level Make report target.")
+      "Build a sibling Release tree for this benchmark first, or use the Makefile cross-build aggregation report target.")
   endif()
 
   ensure_current_summary("${_debug_binary}" _debug_summary)

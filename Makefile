@@ -457,7 +457,11 @@ cmake_args_for_suffix = \
 	-DUNIVERSAL_ENABLE_UBSAN=$(call predicate_on_off,is_ub_sanitize,$1) \
 	-DUNIVERSAL_ENABLE_COVERAGE=$(call predicate_on_off,is_coverage,$1)
 
-## @brief Fixed build-tree pair used for cross-build aggregate benchmark reports.
+cross_build_benchmark_aggregation_cmake_args_for_suffix = \
+	$(call cmake_args_for_suffix,$1) \
+	-DUNIVERSAL_ENABLE_CROSS_BUILD_BENCHMARK_AGGREGATION=ON
+
+## @brief Fixed build-tree pair used for cross-build benchmark aggregation reports.
 REPORT_DEBUG_SUFFIX := debug_all_uni
 REPORT_RELEASE_SUFFIX := prod_all_uni
 REPORTS_DIR := reports
@@ -482,6 +486,8 @@ default: all
 
 .PHONY: default all build test sanitize asanitize ubsanitize coverage clean help more_help
 .PHONY: report__sso_vector report__einteger reports__theo
+.PHONY: configure__cross_build_benchmark_aggregation__debug
+.PHONY: configure__cross_build_benchmark_aggregation__release
 
 ###############################################################################
 ## @section Validation targets
@@ -542,6 +548,12 @@ coverage__%: validate_suffix__% fail_unless_cov__% tool__CMAKE tool__CTEST confi
 		--config "$(call profile_build_type,$*)" \
 		--target coverage
 
+configure__cross_build_benchmark_aggregation__debug: validate_suffix__$(REPORT_DEBUG_SUFFIX) tool__CMAKE $(if $(IS_NINJA),tool__NINJA,)
+	$(CMAKE) $(call cross_build_benchmark_aggregation_cmake_args_for_suffix,$(REPORT_DEBUG_SUFFIX))
+
+configure__cross_build_benchmark_aggregation__release: validate_suffix__$(REPORT_RELEASE_SUFFIX) tool__CMAKE $(if $(IS_NINJA),tool__NINJA,)
+	$(CMAKE) $(call cross_build_benchmark_aggregation_cmake_args_for_suffix,$(REPORT_RELEASE_SUFFIX))
+
 ###############################################################################
 ## @section Public targets
 ###############################################################################
@@ -570,23 +582,23 @@ coverage: coverage__debug_all_uni_cov
 all: test build
 
 ###############################################################################
-## Cross-Build Aggregate Benchmark Reports
+## Cross-Build Benchmark Aggregation Reports
 ##
 ## These report targets intentionally live in this top-level GNU Makefile
 ## instead of in a single CMake build tree.
 ##
 ## Why:
 ##
-## - each final report compares Debug and Release benchmark summaries
+## - each final report compares Debug and Release aggregation summaries
 ## - those summaries live in different configured build trees
-## - provenance validation depends on each tree's generated benchmark metadata
+## - provenance validation depends on each tree's generated aggregation metadata
 ## - stale summaries must be refreshed conservatively before comparison
 ##
 ## CMake remains responsible for all in-tree work:
 ##
 ## - building the benchmark executable
 ## - building the compare helper
-## - refreshing stale summaries
+## - refreshing stale cross-build aggregation summaries
 ## - validating provenance compatibility
 ## - emitting the final aggregate comparison text
 ##
@@ -595,7 +607,7 @@ all: test build
 ##
 ## - ensure the Release benchmark tree exists and is built far enough
 ## - ensure the Debug benchmark tree exists and runs the compare target
-## - collect the resulting aggregate report into a stable top-level file
+## - collect the resulting cross-build aggregation report into a stable top-level file
 ##
 ## These targets are intentionally conservative. They re-run configure/build
 ## stages so changes in generated provenance metadata force the benchmark
@@ -608,7 +620,7 @@ all: test build
 $(REPORTS_DIR): tool__CMAKE
 	$(CMAKE) -E make_directory "$(REPORTS_DIR)"
 
-$(REPORT_SSO_VECTOR_FILE): tool__CMAKE configure__$(REPORT_RELEASE_SUFFIX) configure__$(REPORT_DEBUG_SUFFIX) | $(REPORTS_DIR)
+$(REPORT_SSO_VECTOR_FILE): tool__CMAKE configure__cross_build_benchmark_aggregation__release configure__cross_build_benchmark_aggregation__debug | $(REPORTS_DIR)
 	$(CMAKE) --build "$(REPORT_RELEASE_DIR)" \
 		--config Release \
 		--parallel "$(JOBS)" \
@@ -619,7 +631,7 @@ $(REPORT_SSO_VECTOR_FILE): tool__CMAKE configure__$(REPORT_RELEASE_SUFFIX) confi
 		--target container_perf_sso_vector_compare_builds
 	$(CMAKE) -E copy_if_different "$(REPORT_SSO_VECTOR_BUILD_ARTIFACT)" "$@"
 
-$(REPORT_EINTEGER_FILE): tool__CMAKE configure__$(REPORT_RELEASE_SUFFIX) configure__$(REPORT_DEBUG_SUFFIX) | $(REPORTS_DIR)
+$(REPORT_EINTEGER_FILE): tool__CMAKE configure__cross_build_benchmark_aggregation__release configure__cross_build_benchmark_aggregation__debug | $(REPORTS_DIR)
 	$(CMAKE) --build "$(REPORT_RELEASE_DIR)" \
 		--config Release \
 		--parallel "$(JOBS)" \
@@ -651,9 +663,9 @@ help:
 	@echo "  sanitize   Configure, build, and run all tests with ASan and UBSan enabled"
 	@echo "  coverage   Configure, build, and run all tests with code coverage tracking"
 	@echo "                enabled to generate a code coverage report."
-	@echo "  report__sso_vector  Generate the cross-build Debug-vs-Release sso_vector report"
-	@echo "  report__einteger    Generate the cross-build Debug-vs-Release einteger report"
-	@echo "  reports__theo       Generate both cross-build aggregate benchmark reports"
+	@echo "  report__sso_vector  Generate the cross-build Debug-vs-Release sso_vector aggregation report"
+	@echo "  report__einteger    Generate the cross-build Debug-vs-Release einteger aggregation report"
+	@echo "  reports__theo       Generate both cross-build benchmark aggregation reports"
 	@echo "  clean      Remove build trees"
 	@echo "  help       Show this summary"
 	@echo "  more_help  Show advanced usage, suffixes, and override variables"

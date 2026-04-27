@@ -22,7 +22,16 @@
 #include <type_traits>
 #include <vector>
 
+#if defined(UNIVERSAL_HAS_CROSS_BUILD_BENCHMARK_PROVENANCE_HEADER)
 #include <BenchmarkProvenance.hpp>
+#else
+#define UNIVERSAL_BENCH_BUILD_CONFIG "Unknown"
+#define UNIVERSAL_BENCH_PROVENANCE_STATUS "unknown"
+#define UNIVERSAL_BENCH_PROVENANCE_REASON "cross-build benchmark aggregation disabled"
+#define UNIVERSAL_BENCH_PROVENANCE_BASE_COMMIT_HASH ""
+#define UNIVERSAL_BENCH_PROVENANCE_DIRTY_FINGERPRINT ""
+#define UNIVERSAL_BENCH_PROVENANCE_PUBLISHABLE "0"
+#endif
 #include <universal/internal/container/sso_vector.hpp>
 
 #include "sso_vector_performance_common.hpp"

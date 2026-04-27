@@ -4,7 +4,7 @@ file (GLOB CONVERSION_SRC  "conversion/*.cpp")
 file (GLOB ARITHMETIC_SRC  "arithmetic/*.cpp")
 file (GLOB MATH_SRC        "./math/*.cpp")
 file (GLOB PERFORMANCE_SRC "./performance/*.cpp")
-# This helper compares persisted benchmark summaries and requires explicit
+# This helper compares persisted cross-build aggregation summaries and requires explicit
 # summary-file arguments, so keep it buildable but out of direct CTest runs.
 list(FILTER PERFORMANCE_SRC EXCLUDE REGEX "performance_compare\\.cpp$")
 
@@ -19,48 +19,20 @@ add_executable(eint_performance_compare_tool "${CMAKE_CURRENT_SOURCE_DIR}/perfor
 set_target_properties(eint_performance_compare_tool PROPERTIES
     FOLDER "Number Systems/elastic/integer/binary/einteger/performance")
 
-set(EINTEGER_PERF_ORCHESTRATE_SCRIPT
-    "${CMAKE_CURRENT_SOURCE_DIR}/performance/einteger_performance_orchestrate.cmake")
-set(EINTEGER_PERF_BENCHMARK_RELATIVE_PATH
-    "elastic/einteger/eint_performance${CMAKE_EXECUTABLE_SUFFIX}")
-set(EINTEGER_PERF_SUMMARY_SCHEMA_VERSION 1)
-set(EINTEGER_PERF_REPORT_PATH
-    "${CMAKE_CURRENT_BINARY_DIR}/benchmark-results/einteger_debug_vs_release_report.txt")
+if(UNIVERSAL_ENABLE_CROSS_BUILD_BENCHMARK_AGGREGATION)
+    include("${PROJECT_SOURCE_DIR}/tools/cmake/CrossBuildBenchmarkProvenance.cmake")
+    include("${PROJECT_SOURCE_DIR}/tools/cmake/CrossBuildBenchmarkAggregation.cmake")
 
-add_custom_target(eint_performance_summary_debug
-    COMMAND ${CMAKE_COMMAND}
-            -DACTION=refresh-config
-            -DWANTED_CONFIG=Debug
-            -DCURRENT_BUILD_DIR=${CMAKE_BINARY_DIR}
-            -DBENCHMARK_RELATIVE_PATH=${EINTEGER_PERF_BENCHMARK_RELATIVE_PATH}
-            -DSUMMARY_SCHEMA_VERSION=${EINTEGER_PERF_SUMMARY_SCHEMA_VERSION}
-            -P ${EINTEGER_PERF_ORCHESTRATE_SCRIPT}
-    DEPENDS eint_performance
-    USES_TERMINAL
-    VERBATIM)
-
-add_custom_target(eint_performance_summary_release
-    COMMAND ${CMAKE_COMMAND}
-            -DACTION=refresh-config
-            -DWANTED_CONFIG=Release
-            -DCURRENT_BUILD_DIR=${CMAKE_BINARY_DIR}
-            -DBENCHMARK_RELATIVE_PATH=${EINTEGER_PERF_BENCHMARK_RELATIVE_PATH}
-            -DSUMMARY_SCHEMA_VERSION=${EINTEGER_PERF_SUMMARY_SCHEMA_VERSION}
-            -P ${EINTEGER_PERF_ORCHESTRATE_SCRIPT}
-    DEPENDS eint_performance
-    USES_TERMINAL
-    VERBATIM)
-
-add_custom_target(eint_performance_compare_builds
-    COMMAND ${CMAKE_COMMAND}
-            -DACTION=compare-builds
-            -DCURRENT_BUILD_DIR=${CMAKE_BINARY_DIR}
-            -DBENCHMARK_RELATIVE_PATH=${EINTEGER_PERF_BENCHMARK_RELATIVE_PATH}
-            -DSUMMARY_SCHEMA_VERSION=${EINTEGER_PERF_SUMMARY_SCHEMA_VERSION}
-            -DCOMPARE_BINARY=$<TARGET_FILE:eint_performance_compare_tool>
-            -DREPORT_OUTPUT_PATH=${EINTEGER_PERF_REPORT_PATH}
-            -P ${EINTEGER_PERF_ORCHESTRATE_SCRIPT}
-    DEPENDS eint_performance
-            eint_performance_compare_tool
-    USES_TERMINAL
-    VERBATIM)
+    universal_enable_cross_build_benchmark_provenance(eint_performance)
+    universal_add_cross_build_benchmark_aggregation(
+        FAMILY_LABEL "einteger"
+        SUMMARY_DEBUG_TARGET eint_performance_summary_debug
+        SUMMARY_RELEASE_TARGET eint_performance_summary_release
+        COMPARE_BUILDS_TARGET eint_performance_compare_builds
+        BENCHMARK_TARGET eint_performance
+        COMPARE_TARGET eint_performance_compare_tool
+        BENCHMARK_RELATIVE_PATH "elastic/einteger/eint_performance${CMAKE_EXECUTABLE_SUFFIX}"
+        SUMMARY_SCHEMA_VERSION 1
+        REPORT_OUTPUT_PATH "${CMAKE_CURRENT_BINARY_DIR}/benchmark-results/einteger_debug_vs_release_report.txt"
+        TARGET_FOLDER "Number Systems/elastic/integer/binary/einteger/performance")
+endif()
