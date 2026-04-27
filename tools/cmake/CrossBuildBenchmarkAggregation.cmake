@@ -2,6 +2,8 @@ include_guard(GLOBAL)
 
 include(CMakeParseArguments)
 
+# Register per-family targets that refresh provenance-aware benchmark summaries
+# and emit the final cross-build aggregation report.
 function(universal_add_cross_build_benchmark_aggregation)
   set(options)
   set(oneValueArgs
@@ -29,7 +31,7 @@ function(universal_add_cross_build_benchmark_aggregation)
       REPORT_OUTPUT_PATH)
     if(NOT UCBBA_${required_arg})
       message(FATAL_ERROR
-        "universal_add_cross_build_benchmark_aggregation missing required argument: ${required_arg}")
+        "Cross-build benchmark aggregation for '${UCBBA_FAMILY_LABEL}' is missing required argument: ${required_arg}")
     endif()
   endforeach()
 

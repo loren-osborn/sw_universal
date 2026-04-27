@@ -2,10 +2,10 @@ cmake_minimum_required(VERSION 3.22)
 
 # Generic cross-platform orchestration for cross-build benchmark aggregation.
 # Responsibilities:
-# - benchmark executable: emit metadata and write aggregation summaries
+# - benchmark executable: emit metadata and write provenance-aware benchmark summaries
 # - compare executable: compare persisted summaries only
 # - this script: locate sibling build-tree binaries, refresh stale summaries,
-#   validate provenance compatibility, and emit the final cross-build report
+#   validate provenance compatibility, and emit the final cross-build aggregation report
 
 if(NOT DEFINED BENCHMARK_FAMILY_LABEL OR "${BENCHMARK_FAMILY_LABEL}" STREQUAL "")
   set(BENCHMARK_FAMILY_LABEL "benchmark")
@@ -24,7 +24,8 @@ endfunction()
 
 function(query_benchmark_metadata benchmark_binary prefix)
   if(NOT EXISTS "${benchmark_binary}")
-    message(FATAL_ERROR "Benchmark binary not found: ${benchmark_binary}")
+    message(FATAL_ERROR
+      "${BENCHMARK_FAMILY_LABEL}: benchmark binary not found: ${benchmark_binary}")
   endif()
 
   execute_process(
@@ -35,7 +36,8 @@ function(query_benchmark_metadata benchmark_binary prefix)
     OUTPUT_STRIP_TRAILING_WHITESPACE
   )
   if(NOT _result EQUAL 0)
-    message(FATAL_ERROR "Failed to query benchmark metadata from ${benchmark_binary}: ${_error}")
+    message(FATAL_ERROR
+      "${BENCHMARK_FAMILY_LABEL}: failed to query benchmark metadata from ${benchmark_binary}: ${_error}")
   endif()
 
   parse_key_value_text("${_output}" "${prefix}")
@@ -132,14 +134,14 @@ function(summary_is_stale benchmark_binary prefix out_stale out_reason)
   set(_summary_path "${${prefix}_summary_path}")
   if("${_summary_path}" STREQUAL "")
     set("${out_stale}" TRUE PARENT_SCOPE)
-    set("${out_reason}" "summary path missing from benchmark metadata" PARENT_SCOPE)
+    set("${out_reason}" "benchmark summary path missing from benchmark metadata" PARENT_SCOPE)
     return()
   endif()
 
   parse_summary_file("${_summary_path}" "summary" _summary_ok)
   if(NOT _summary_ok)
     set("${out_stale}" TRUE PARENT_SCOPE)
-    set("${out_reason}" "summary missing or malformed" PARENT_SCOPE)
+    set("${out_reason}" "provenance-aware benchmark summary missing or malformed" PARENT_SCOPE)
     return()
   endif()
 
@@ -178,7 +180,7 @@ function(summary_is_stale benchmark_binary prefix out_stale out_reason)
   file(TIMESTAMP "${benchmark_binary}" _binary_timestamp UTC "%Y-%m-%dT%H:%M:%SZ")
   if(_summary_timestamp STRLESS _binary_timestamp)
     set("${out_stale}" TRUE PARENT_SCOPE)
-    set("${out_reason}" "summary is older than benchmark binary" PARENT_SCOPE)
+    set("${out_reason}" "benchmark summary is older than benchmark binary" PARENT_SCOPE)
     return()
   endif()
 
@@ -192,7 +194,7 @@ function(ensure_current_summary benchmark_binary out_summary_path)
   summary_is_stale("${benchmark_binary}" "meta" _is_stale _stale_reason)
   if(_is_stale)
     message(STATUS
-      "Refreshing ${meta_build_config} ${BENCHMARK_FAMILY_LABEL} cross-build aggregation summary: ${_stale_reason}")
+      "Refreshing ${meta_build_config} ${BENCHMARK_FAMILY_LABEL} benchmark summary for cross-build aggregation: ${_stale_reason}")
     execute_process(
       COMMAND "${benchmark_binary}" --write-summary-only
       RESULT_VARIABLE _result
@@ -201,37 +203,39 @@ function(ensure_current_summary benchmark_binary out_summary_path)
       OUTPUT_STRIP_TRAILING_WHITESPACE
     )
     if(NOT _result EQUAL 0)
-      message(FATAL_ERROR "Failed to write summary for ${benchmark_binary}: ${_error}${_output}")
+      message(FATAL_ERROR
+        "${BENCHMARK_FAMILY_LABEL}: failed to write benchmark summary for cross-build aggregation from ${benchmark_binary}: ${_error}${_output}")
     endif()
 
     parse_summary_file("${meta_summary_path}" "summary" _summary_ok)
     if(NOT _summary_ok)
-      message(FATAL_ERROR "Summary remained unreadable after refresh: ${meta_summary_path}")
+      message(FATAL_ERROR
+        "${BENCHMARK_FAMILY_LABEL}: provenance-aware benchmark summary remained unreadable after refresh: ${meta_summary_path}")
     endif()
   else()
     message(STATUS
-      "${meta_build_config} ${BENCHMARK_FAMILY_LABEL} cross-build aggregation summary is up to date")
+      "${meta_build_config} ${BENCHMARK_FAMILY_LABEL} benchmark summary for cross-build aggregation is up to date")
   endif()
 
   set("${out_summary_path}" "${meta_summary_path}" PARENT_SCOPE)
 endfunction()
 
 if(NOT DEFINED ACTION)
-  message(FATAL_ERROR "ACTION is required")
+  message(FATAL_ERROR "${BENCHMARK_FAMILY_LABEL}: ACTION is required")
 endif()
 if(NOT DEFINED CURRENT_BUILD_DIR)
-  message(FATAL_ERROR "CURRENT_BUILD_DIR is required")
+  message(FATAL_ERROR "${BENCHMARK_FAMILY_LABEL}: CURRENT_BUILD_DIR is required")
 endif()
 if(NOT DEFINED BENCHMARK_RELATIVE_PATH)
-  message(FATAL_ERROR "BENCHMARK_RELATIVE_PATH is required")
+  message(FATAL_ERROR "${BENCHMARK_FAMILY_LABEL}: BENCHMARK_RELATIVE_PATH is required")
 endif()
 if(NOT DEFINED SUMMARY_SCHEMA_VERSION)
-  message(FATAL_ERROR "SUMMARY_SCHEMA_VERSION is required")
+  message(FATAL_ERROR "${BENCHMARK_FAMILY_LABEL}: SUMMARY_SCHEMA_VERSION is required")
 endif()
 
 if(ACTION STREQUAL "refresh-config")
   if(NOT DEFINED WANTED_CONFIG)
-    message(FATAL_ERROR "WANTED_CONFIG is required for refresh-config")
+    message(FATAL_ERROR "${BENCHMARK_FAMILY_LABEL}: WANTED_CONFIG is required for refresh-config")
   endif()
 
   find_benchmark_binary_for_config("${WANTED_CONFIG}" _benchmark_binary)
@@ -245,13 +249,14 @@ if(ACTION STREQUAL "refresh-config")
   endif()
 
   ensure_current_summary("${_benchmark_binary}" _summary_path)
-  message(STATUS "${WANTED_CONFIG} ${BENCHMARK_FAMILY_LABEL} cross-build aggregation summary ready: ${_summary_path}")
+  message(STATUS
+    "${WANTED_CONFIG} ${BENCHMARK_FAMILY_LABEL} benchmark summary for cross-build aggregation is ready: ${_summary_path}")
   return()
 endif()
 
 if(ACTION STREQUAL "compare-builds")
   if(NOT DEFINED COMPARE_BINARY)
-    message(FATAL_ERROR "COMPARE_BINARY is required for compare-builds")
+    message(FATAL_ERROR "${BENCHMARK_FAMILY_LABEL}: COMPARE_BINARY is required for compare-builds")
   endif()
 
   find_benchmark_binary_for_config("Debug" _debug_binary)
@@ -287,10 +292,11 @@ if(ACTION STREQUAL "compare-builds")
     message("${_compare_output}")
   endif()
   if(NOT _compare_result EQUAL 0)
-    message(FATAL_ERROR "Benchmark comparison failed: ${_compare_error}${_compare_output}")
+    message(FATAL_ERROR
+      "${BENCHMARK_FAMILY_LABEL}: cross-build aggregation report generation failed: ${_compare_error}${_compare_output}")
   endif()
   write_report_output("${_compare_output}")
   return()
 endif()
 
-message(FATAL_ERROR "Unknown ACTION: ${ACTION}")
+message(FATAL_ERROR "${BENCHMARK_FAMILY_LABEL}: unknown ACTION: ${ACTION}")

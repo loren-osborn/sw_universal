@@ -589,7 +589,8 @@ all: test build
 ##
 ## Why:
 ##
-## - each final report compares Debug and Release aggregation summaries
+## - each final output is a cross-build aggregation report
+## - its inputs are Debug and Release provenance-aware benchmark summaries
 ## - those summaries live in different configured build trees
 ## - provenance validation depends on each tree's generated aggregation metadata
 ## - stale summaries must be refreshed conservatively before comparison
@@ -598,9 +599,9 @@ all: test build
 ##
 ## - building the benchmark executable
 ## - building the compare helper
-## - refreshing stale cross-build aggregation summaries
+## - refreshing stale benchmark summaries for cross-build aggregation
 ## - validating provenance compatibility
-## - emitting the final aggregate comparison text
+## - emitting the final cross-build aggregation report
 ##
 ## GNU Make is the correct outer coordinator for these user-facing report
 ## workflows because it owns the cross-build-tree step:
@@ -611,7 +612,7 @@ all: test build
 ##
 ## These targets are intentionally conservative. They re-run configure/build
 ## stages so changes in generated provenance metadata force the benchmark
-## binaries and summaries to be reconsidered before report generation.
+## binaries and benchmark summaries to be reconsidered before report generation.
 ##
 ## Do not "clean this up" by moving these targets into one CMake tree unless
 ## multi-build-tree coordination is first solved in a principled way.

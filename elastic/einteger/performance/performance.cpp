@@ -22,6 +22,9 @@
 #if defined(UNIVERSAL_HAS_CROSS_BUILD_BENCHMARK_PROVENANCE_HEADER)
 #include <BenchmarkProvenance.hpp>
 #else
+// Normal benchmark builds do not require cross-build benchmark aggregation
+// provenance. These fallback values are only used when that interface target
+// is not linked into this executable.
 #define UNIVERSAL_BENCH_BUILD_CONFIG "Unknown"
 #define UNIVERSAL_BENCH_PROVENANCE_STATUS "unknown"
 #define UNIVERSAL_BENCH_PROVENANCE_REASON "cross-build benchmark aggregation disabled"

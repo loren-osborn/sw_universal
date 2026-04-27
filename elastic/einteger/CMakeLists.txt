@@ -4,8 +4,8 @@ file (GLOB CONVERSION_SRC  "conversion/*.cpp")
 file (GLOB ARITHMETIC_SRC  "arithmetic/*.cpp")
 file (GLOB MATH_SRC        "./math/*.cpp")
 file (GLOB PERFORMANCE_SRC "./performance/*.cpp")
-# This helper compares persisted cross-build aggregation summaries and requires explicit
-# summary-file arguments, so keep it buildable but out of direct CTest runs.
+# This helper compares provenance-aware benchmark summaries for cross-build
+# aggregation and requires explicit summary-file arguments.
 list(FILTER PERFORMANCE_SRC EXCLUDE REGEX "performance_compare\\.cpp$")
 
 compile_all("true" "eint" "Number Systems/elastic/integer/binary/einteger/api"         "${API_SRC}")

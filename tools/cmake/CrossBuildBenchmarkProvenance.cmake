@@ -1,5 +1,7 @@
 include_guard(GLOBAL)
 
+# Cross-build benchmark aggregation provenance is opt-in. Normal benchmark
+# builds do not need this generated header or its metadata.
 function(universal_prepare_cross_build_benchmark_provenance)
   if(TARGET universal_cross_build_benchmark_provenance)
     return()
@@ -133,7 +135,7 @@ endfunction()
 function(universal_enable_cross_build_benchmark_provenance target_name)
   if(NOT TARGET "${target_name}")
     message(FATAL_ERROR
-      "universal_enable_cross_build_benchmark_provenance expected an existing target: ${target_name}")
+      "Cross-build benchmark aggregation provenance expected an existing target: ${target_name}")
   endif()
 
   universal_prepare_cross_build_benchmark_provenance()

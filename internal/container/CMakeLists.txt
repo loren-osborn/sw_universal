@@ -5,8 +5,8 @@ list(FILTER PERFORMANCE_SOURCES EXCLUDE REGEX "sso_vector_performance_compare\\.
 compile_all("true" "container" "Internal/container" "${SOURCES}")
 compile_all("true" "container_perf" "Internal/container/performance" "${PERFORMANCE_SOURCES}")
 
-# This helper compares persisted cross-build aggregation summaries and requires explicit
-# summary-file arguments, so keep it buildable but out of direct CTest runs.
+# This helper compares provenance-aware benchmark summaries for cross-build
+# aggregation and requires explicit summary-file arguments.
 add_executable(container_perf_sso_vector_performance_compare
     "${CMAKE_CURRENT_SOURCE_DIR}/performance/sso_vector_performance_compare.cpp")
 set_target_properties(container_perf_sso_vector_performance_compare PROPERTIES
