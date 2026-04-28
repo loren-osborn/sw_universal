@@ -22,19 +22,6 @@
 #include <type_traits>
 #include <vector>
 
-#if defined(UNIVERSAL_HAS_CROSS_BUILD_BENCHMARK_PROVENANCE_HEADER)
-#include <BenchmarkProvenance.hpp>
-#else
-// Normal benchmark builds do not require cross-build benchmark aggregation
-// provenance. These fallback values are only used when that interface target
-// is not linked into this executable.
-#define UNIVERSAL_BENCH_BUILD_CONFIG "Unknown"
-#define UNIVERSAL_BENCH_PROVENANCE_STATUS "unknown"
-#define UNIVERSAL_BENCH_PROVENANCE_REASON "cross-build benchmark aggregation disabled"
-#define UNIVERSAL_BENCH_PROVENANCE_BASE_COMMIT_HASH ""
-#define UNIVERSAL_BENCH_PROVENANCE_DIRTY_FINGERPRINT ""
-#define UNIVERSAL_BENCH_PROVENANCE_PUBLISHABLE "0"
-#endif
 #include <universal/internal/container/sso_vector.hpp>
 
 #include "sso_vector_performance_common.hpp"
@@ -278,42 +265,6 @@ double geometric_mean_ratio(const std::vector<scenario_results>& results, Member
 		log_total += std::log(ratio_vs_std_vector(result.*member, result.std_vector));
 	}
 	return std::exp(log_total / static_cast<double>(results.size()));
-}
-
-perf::benchmark_metadata current_benchmark_metadata(const std::filesystem::path& binary_path) {
-	perf::benchmark_metadata metadata;
-	metadata.build_config = UNIVERSAL_BENCH_BUILD_CONFIG;
-	metadata.provenance_status = UNIVERSAL_BENCH_PROVENANCE_STATUS;
-	metadata.provenance_reason = UNIVERSAL_BENCH_PROVENANCE_REASON;
-	metadata.base_commit_hash = UNIVERSAL_BENCH_PROVENANCE_BASE_COMMIT_HASH;
-	metadata.dirty_fingerprint = UNIVERSAL_BENCH_PROVENANCE_DIRTY_FINGERPRINT;
-	metadata.provenance_publishable = std::string_view{UNIVERSAL_BENCH_PROVENANCE_PUBLISHABLE} == "1";
-	metadata.summary_schema = perf::summary_schema_version;
-	metadata.binary_path = binary_path;
-	metadata.summary_path = perf::benchmark_summary_path(binary_path, metadata.build_config);
-	return metadata;
-}
-
-void print_provenance_banner(const perf::benchmark_metadata& metadata) {
-	std::cout << "Build configuration: " << metadata.build_config << '\n';
-	if (metadata.clean_publishable()) {
-		std::cout << "Build provenance   : clean commit " << metadata.base_commit_hash << '\n';
-		return;
-	}
-
-	if (metadata.dirty_matchable()) {
-		std::cout << "Build provenance   : DIRTY BUT MATCHABLE\n";
-		std::cout << "Base commit        : " << metadata.base_commit_hash << '\n';
-		std::cout << "Dirty fingerprint  : " << metadata.dirty_fingerprint << '\n';
-		std::cout << "Comparison policy  : unpublished/internal comparison only\n";
-		return;
-	}
-
-	std::cout << "Build provenance   : " << metadata.provenance_status;
-	if (!metadata.provenance_reason.empty()) {
-		std::cout << " (" << metadata.provenance_reason << ')';
-	}
-	std::cout << '\n';
 }
 
 template<typename T, std::size_t DefaultInlineElems>
@@ -686,10 +637,6 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 	return summary;
 }
 
-void print_usage(const char* argv0) {
-	std::cout << "Usage: " << argv0 << " [--build-metadata] [--commit-hash] [--write-summary-only]\n";
-}
-
 } // namespace
 
 int main(int argc, char** argv)
@@ -698,38 +645,19 @@ try {
 
 	const std::filesystem::path binary_path =
 		(argc > 0 && argv[0]) ? std::filesystem::absolute(argv[0]) : std::filesystem::current_path();
-	const auto metadata = current_benchmark_metadata(binary_path);
+	const auto metadata = perf::current_benchmark_metadata(binary_path);
 
 	bool write_summary_only = false;
 	for (int i = 1; i < argc; ++i) {
 		const std::string_view arg = argv[i];
-		if (arg == "--build-metadata") {
-			perf::print_metadata(std::cout, metadata);
+		switch (perf::handle_common_benchmark_argument(arg, metadata, write_summary_only, argv[0])) {
+		case perf::common_benchmark_cli_action::continue_run:
+			break;
+		case perf::common_benchmark_cli_action::exit_success:
 			return EXIT_SUCCESS;
+		case perf::common_benchmark_cli_action::exit_failure:
+			return EXIT_FAILURE;
 		}
-		if (arg == "--commit-hash") {
-			if (!metadata.base_commit_hash.empty()) {
-				std::cout << metadata.base_commit_hash << '\n';
-			} else {
-				std::cout << metadata.provenance_status;
-				if (!metadata.provenance_reason.empty()) {
-					std::cout << ": " << metadata.provenance_reason;
-				}
-				std::cout << '\n';
-			}
-			return EXIT_SUCCESS;
-		}
-		if (arg == "--write-summary-only") {
-			write_summary_only = true;
-			continue;
-		}
-		if (arg == "--help" || arg == "-h") {
-			print_usage(argv[0]);
-			return EXIT_SUCCESS;
-		}
-		std::cerr << "Unknown argument: " << arg << '\n';
-		print_usage(argv[0]);
-		return EXIT_FAILURE;
 	}
 
 	constexpr std::size_t u32_default_inline =
@@ -739,7 +667,7 @@ try {
 	// current build's cached summary. Cross-build refresh and comparison live in CMake/script tooling.
 	if (!write_summary_only) {
 		std::cout << "sso_vector / sso_cow_vector performance benchmark\n";
-		print_provenance_banner(metadata);
+		perf::print_provenance_banner(metadata);
 		std::cout << "Workloads: ephemeral churn, copy/read-mostly, copy-then-mutate,\n";
 		std::cout << "           inline-threshold transitions, reusable pooled vectors,\n";
 		std::cout << "           and a larger copy/read-mostly scenario\n";
