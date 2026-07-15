@@ -2880,7 +2880,7 @@ void run_sso_vector_ownership_header_suite(int& failures) {
 		// mark_unshareable is intentionally exercised only after the header has been driven back to
 		// unique ownership; that helper is a narrow one-shot unique-owner transition, not a detach path.
 		std::allocator<int> alloc;
-		auto* block = detail::allocate_block<int, true, detail::cow_sharing_kind::synchronized>(8, alloc);
+		auto* block = detail::allocate_block<int, detail::cow_storage_tag<detail::cow_sharing_kind::synchronized>>(8, alloc);
 		const auto initial = detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::synchronized>(block);
 		check(ctx, detail::ownership_header_is_shareable(initial), "fresh ownership header starts shareable");
 		check(ctx, detail::ownership_header_share_count(initial) == 1, "fresh ownership header starts with one owner");
@@ -2916,12 +2916,12 @@ void run_sso_vector_ownership_header_suite(int& failures) {
 		check(ctx, detail::ownership_header_share_count(after_last_release) == 0, "final release leaves zero shared owners");
 		check(ctx, !detail::ownership_header_is_shareable(after_last_release), "final release preserves the unshareable policy bit");
 
-		detail::deallocate_block<int, true, detail::cow_sharing_kind::synchronized>(block, alloc);
+		detail::deallocate_block<int, detail::cow_storage_tag<detail::cow_sharing_kind::synchronized>>(block, alloc);
 	}
 
 	{
 		std::allocator<int> alloc;
-		auto* block = detail::allocate_block<int, true, detail::cow_sharing_kind::unsynchronized>(8, alloc);
+		auto* block = detail::allocate_block<int, detail::cow_storage_tag<detail::cow_sharing_kind::unsynchronized>>(8, alloc);
 		static_assert(std::is_same_v<
 			std::remove_reference_t<decltype(block->ownership_header.storage())>,
 			detail::header_underlying_t>);
@@ -2935,7 +2935,7 @@ void run_sso_vector_ownership_header_suite(int& failures) {
 			detail::load_ownership_header_snapshot<int, detail::cow_sharing_kind::unsynchronized>(block)),
 			"unsynchronized ownership header also supports the unshareable bit");
 		check(ctx, detail::release_shared_owner<int, detail::cow_sharing_kind::unsynchronized>(block), "unsynchronized final release reports last owner");
-		detail::deallocate_block<int, true, detail::cow_sharing_kind::unsynchronized>(block, alloc);
+		detail::deallocate_block<int, detail::cow_storage_tag<detail::cow_sharing_kind::unsynchronized>>(block, alloc);
 	}
 }
 

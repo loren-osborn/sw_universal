@@ -51,7 +51,6 @@
 #endif
 
 #include <algorithm>
-#include <atomic>
 #include <cassert>
 #include <concepts>
 #include <cstddef>
@@ -59,7 +58,6 @@
 #include <functional>
 #include <initializer_list>
 #include <iterator>
-#include <limits>
 #include <memory>
 #include <new>
 #include <stdexcept>
@@ -67,7 +65,12 @@
 #include <utility>
 #include <vector>
 
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
+#include <atomic>
+#include <limits>
+
 #include "universal/internal/container/bitfield_pack.hpp"
+#endif
 #include "universal/internal/container/custom_indexed_variant.hpp"
 
 SW_UNIVERSAL_SSO_VECTOR_NAMESPACE_OPEN
@@ -143,12 +146,24 @@ inline constexpr zero_inline_policy default_zero_inline_policy() noexcept {
 	}
 }
 
+struct non_cow_storage_tag {};
+
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 using header_underlying_t = std::uint64_t;
 
 enum class cow_sharing_kind {
 	synchronized,
 	unsynchronized,
 };
+
+template<cow_sharing_kind SharingKind>
+struct cow_storage_tag {};
+
+template<class StorageTag>
+struct cow_storage_tag_traits;
+
+template<cow_sharing_kind SharingKind>
+struct cow_storage_tag_traits<cow_storage_tag<SharingKind>> : std::integral_constant<cow_sharing_kind, SharingKind> {};
 
 enum header_field : std::size_t {
 	UNSHAREABLE = 0,
@@ -216,12 +231,30 @@ template<class ScratchHeader>
 inline constexpr std::uint64_t ownership_header_share_count(const ScratchHeader& header) noexcept {
 	return static_cast<std::uint64_t>(header.template get<REFCOUNT>());
 }
+#endif
 
-template<class T, bool EnableCow, cow_sharing_kind SharingKind>
+template<class T, class StorageTag>
 struct heap_block;
 
+template<class T>
+struct heap_block<T, non_cow_storage_tag> {
+	static_assert(alignof(T) <= alignof(std::max_align_t),
+		"sso_vector requires T alignment compatible with byte-rebound allocator");
+	std::size_t capacity = 0;
+#ifndef NDEBUG
+	std::size_t live_count = 0;
+#endif
+
+	~heap_block() {
+#ifndef NDEBUG
+		assert(live_count == 0 && "heap_block should not be destroyed while it still owns live elements");
+#endif
+	}
+};
+
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 template<class T, cow_sharing_kind SharingKind>
-struct heap_block<T, true, SharingKind> {
+struct heap_block<T, cow_storage_tag<SharingKind>> {
 	static_assert(alignof(T) <= alignof(std::max_align_t),
 		"sso_vector requires T alignment compatible with byte-rebound allocator");
 	mutable ownership_header_bits<SharingKind> ownership_header;
@@ -236,111 +269,103 @@ struct heap_block<T, true, SharingKind> {
 #endif
 	}
 };
-
-template<class T, cow_sharing_kind SharingKind>
-struct heap_block<T, false, SharingKind> {
-	static_assert(alignof(T) <= alignof(std::max_align_t),
-		"sso_vector requires T alignment compatible with byte-rebound allocator");
-	std::size_t capacity = 0;
-#ifndef NDEBUG
-	std::size_t live_count = 0;
 #endif
 
-	~heap_block() {
-#ifndef NDEBUG
-		assert(live_count == 0 && "heap_block should not be destroyed while it still owns live elements");
-#endif
-	}
-};
-
-template<class T, bool EnableCow, cow_sharing_kind SharingKind>
+template<class T, class StorageTag>
 inline constexpr std::size_t heap_block_payload_offset() noexcept {
-	return ceil_div(sizeof(heap_block<T, EnableCow, SharingKind>), alignof(T)) * alignof(T);
+	return ceil_div(sizeof(heap_block<T, StorageTag>), alignof(T)) * alignof(T);
 }
 
-template<class T, bool EnableCow, cow_sharing_kind SharingKind>
-inline T* block_data(heap_block<T, EnableCow, SharingKind>* b) noexcept {
-	auto* payload = reinterpret_cast<std::byte*>(b) + heap_block_payload_offset<T, EnableCow, SharingKind>();
+template<class T, class StorageTag>
+inline T* block_data(heap_block<T, StorageTag>* b) noexcept {
+	auto* payload = reinterpret_cast<std::byte*>(b) + heap_block_payload_offset<T, StorageTag>();
 	return std::launder(reinterpret_cast<T*>(payload));
 }
 
-template<class T, bool EnableCow, cow_sharing_kind SharingKind>
-inline const T* block_data(const heap_block<T, EnableCow, SharingKind>* b) noexcept {
-	auto* payload = reinterpret_cast<const std::byte*>(b) + heap_block_payload_offset<T, EnableCow, SharingKind>();
+template<class T, class StorageTag>
+inline const T* block_data(const heap_block<T, StorageTag>* b) noexcept {
+	auto* payload = reinterpret_cast<const std::byte*>(b) + heap_block_payload_offset<T, StorageTag>();
 	return std::launder(reinterpret_cast<const T*>(payload));
 }
 
-template<class T, bool EnableCow, cow_sharing_kind SharingKind>
+template<class T, class StorageTag>
 inline constexpr std::size_t heap_block_bytes(std::size_t capacity) noexcept {
 	const std::size_t capped_capacity = (capacity == 0 ? 1 : capacity);
-	return heap_block_payload_offset<T, EnableCow, SharingKind>() + capped_capacity * sizeof(T);
+	return heap_block_payload_offset<T, StorageTag>() + capped_capacity * sizeof(T);
 }
 
-template<class T, bool EnableCow, cow_sharing_kind SharingKind>
+template<class T, class StorageTag>
 inline constexpr bool heap_block_payload_is_aligned() noexcept {
-	return (heap_block_payload_offset<T, EnableCow, SharingKind>() % alignof(T)) == 0;
+	return (heap_block_payload_offset<T, StorageTag>() % alignof(T)) == 0;
 }
 
-template<class T, bool EnableCow, cow_sharing_kind SharingKind>
+template<class T, class StorageTag>
 inline constexpr bool heap_block_payload_follows_header() noexcept {
-	return heap_block_payload_offset<T, EnableCow, SharingKind>() >= sizeof(heap_block<T, EnableCow, SharingKind>);
+	return heap_block_payload_offset<T, StorageTag>() >= sizeof(heap_block<T, StorageTag>);
 }
 
-template<class T, bool EnableCow, cow_sharing_kind SharingKind>
+template<class T, class StorageTag>
 inline constexpr bool heap_block_payload_formula_is_consistent() noexcept {
-	return heap_block_bytes<T, EnableCow, SharingKind>(1) == heap_block_payload_offset<T, EnableCow, SharingKind>() + sizeof(T);
+	return heap_block_bytes<T, StorageTag>(1) == heap_block_payload_offset<T, StorageTag>() + sizeof(T);
 }
 
-static_assert(heap_block_payload_is_aligned<int, true, cow_sharing_kind::synchronized>(), "sso_vector heap payload offset must preserve T alignment");
-static_assert(heap_block_payload_is_aligned<int, true, cow_sharing_kind::unsynchronized>(), "sso_vector heap payload offset must preserve T alignment");
-static_assert(heap_block_payload_is_aligned<int, false, cow_sharing_kind::synchronized>(), "sso_vector heap payload offset must preserve T alignment");
-static_assert(heap_block_payload_follows_header<int, true, cow_sharing_kind::synchronized>(), "sso_vector heap payload must start after the header object");
-static_assert(heap_block_payload_follows_header<int, true, cow_sharing_kind::unsynchronized>(), "sso_vector heap payload must start after the header object");
-static_assert(heap_block_payload_follows_header<int, false, cow_sharing_kind::synchronized>(), "sso_vector heap payload must start after the header object");
-static_assert(heap_block_payload_formula_is_consistent<int, true, cow_sharing_kind::synchronized>(), "sso_vector heap byte formula must match header-plus-payload layout");
-static_assert(heap_block_payload_formula_is_consistent<int, true, cow_sharing_kind::unsynchronized>(), "sso_vector heap byte formula must match header-plus-payload layout");
-static_assert(heap_block_payload_formula_is_consistent<int, false, cow_sharing_kind::synchronized>(), "sso_vector heap byte formula must match header-plus-payload layout");
+static_assert(heap_block_payload_is_aligned<int, non_cow_storage_tag>(), "sso_vector heap payload offset must preserve T alignment");
+static_assert(heap_block_payload_follows_header<int, non_cow_storage_tag>(), "sso_vector heap payload must start after the header object");
+static_assert(heap_block_payload_formula_is_consistent<int, non_cow_storage_tag>(), "sso_vector heap byte formula must match header-plus-payload layout");
+static_assert(requires(heap_block<int, non_cow_storage_tag>& block) { block.capacity; });
+#ifdef NDEBUG
+static_assert(sizeof(heap_block<int, non_cow_storage_tag>) == sizeof(std::size_t),
+	"sso_vector non-COW heap block should not reserve ownership-header bookkeeping");
+#else
+static_assert(sizeof(heap_block<int, non_cow_storage_tag>) == 2 * sizeof(std::size_t),
+	"sso_vector non-COW heap block should not reserve ownership-header bookkeeping");
+#endif
 
-template<class T, bool EnableCow, cow_sharing_kind SharingKind, class Allocator>
-inline heap_block<T, EnableCow, SharingKind>* allocate_block(std::size_t capacity, Allocator& alloc) {
+template<class T, class StorageTag, class Allocator>
+inline heap_block<T, StorageTag>* allocate_block(std::size_t capacity, Allocator& alloc) {
 	using byte_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
 	using byte_traits = std::allocator_traits<byte_alloc>;
 	byte_alloc bytes_alloc(alloc);
-	const std::size_t bytes = heap_block_bytes<T, EnableCow, SharingKind>(capacity);
+	const std::size_t bytes = heap_block_bytes<T, StorageTag>(capacity);
 	std::byte* mem = byte_traits::allocate(bytes_alloc, bytes);
-	auto* b = ::new (mem) heap_block<T, EnableCow, SharingKind>{};
-	if constexpr (EnableCow) {
-		ownership_header_word_spec<SharingKind>::store_underlying_value(
+	auto* b = ::new (mem) heap_block<T, StorageTag>{};
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
+	if constexpr (!std::is_same_v<StorageTag, non_cow_storage_tag>) {
+		constexpr auto sharing_kind = cow_storage_tag_traits<StorageTag>::value;
+		ownership_header_word_spec<sharing_kind>::store_underlying_value(
 			b->ownership_header.storage(),
 			make_header_underlying_value(true, 1));
 	}
+#endif
 	b->capacity = capacity;
 	return b;
 }
 
-template<class T, bool EnableCow, cow_sharing_kind SharingKind, class Allocator>
-inline void deallocate_block(heap_block<T, EnableCow, SharingKind>* b, Allocator& alloc) noexcept {
+template<class T, class StorageTag, class Allocator>
+inline void deallocate_block(heap_block<T, StorageTag>* b, Allocator& alloc) noexcept {
 	if (!b) return;
 	using byte_alloc = typename std::allocator_traits<Allocator>::template rebind_alloc<std::byte>;
 	using byte_traits = std::allocator_traits<byte_alloc>;
 	byte_alloc bytes_alloc(alloc);
-	const std::size_t bytes = heap_block_bytes<T, EnableCow, SharingKind>(b->capacity);
-	b->~heap_block<T, EnableCow, SharingKind>();
+	const std::size_t bytes = heap_block_bytes<T, StorageTag>(b->capacity);
+	b->~heap_block<T, StorageTag>();
 	byte_traits::deallocate(bytes_alloc, reinterpret_cast<std::byte*>(b), bytes);
 }
 
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 template<class T, cow_sharing_kind SharingKind>
-inline ownership_header_scratch_bits<SharingKind> load_ownership_header_snapshot(const heap_block<T, true, SharingKind>* b) noexcept {
+inline ownership_header_scratch_bits<SharingKind> load_ownership_header_snapshot(
+	const heap_block<T, cow_storage_tag<SharingKind>>* b) noexcept {
 	return b->ownership_header.scratch_copy();
 }
 
 template<class T, cow_sharing_kind SharingKind>
-inline bool ownership_header_is_unique(const heap_block<T, true, SharingKind>* b) noexcept {
+inline bool ownership_header_is_unique(const heap_block<T, cow_storage_tag<SharingKind>>* b) noexcept {
 	return ownership_header_share_count(load_ownership_header_snapshot(b)) == 1;
 }
 
 template<class T, cow_sharing_kind SharingKind>
-inline bool try_add_shared_owner(const heap_block<T, true, SharingKind>* b) noexcept {
+inline bool try_add_shared_owner(const heap_block<T, cow_storage_tag<SharingKind>>* b) noexcept {
 	auto& storage = b->ownership_header.storage();
 	for (;;) {
 		auto scratch = load_ownership_header_snapshot(b);
@@ -363,7 +388,7 @@ inline bool try_add_shared_owner(const heap_block<T, true, SharingKind>* b) noex
 }
 
 template<class T, cow_sharing_kind SharingKind>
-inline bool release_shared_owner(const heap_block<T, true, SharingKind>* b) noexcept {
+inline bool release_shared_owner(const heap_block<T, cow_storage_tag<SharingKind>>* b) noexcept {
 	auto& storage = b->ownership_header.storage();
 	for (;;) {
 		auto scratch = load_ownership_header_snapshot(b);
@@ -385,7 +410,7 @@ inline bool release_shared_owner(const heap_block<T, true, SharingKind>* b) noex
 }
 
 template<class T, cow_sharing_kind SharingKind>
-inline void mark_unshareable(heap_block<T, true, SharingKind>* b) noexcept {
+inline void mark_unshareable(heap_block<T, cow_storage_tag<SharingKind>>* b) noexcept {
 	auto& storage = b->ownership_header.storage();
 	auto scratch = load_ownership_header_snapshot(b);
 	assert(ownership_header_share_count(scratch) == 1 && "sso_vector: mark_unshareable requires unique ownership");
@@ -408,9 +433,11 @@ inline void mark_unshareable(heap_block<T, true, SharingKind>* b) noexcept {
 		ownership_header_word_spec<SharingKind>::store_underlying_value(storage, scratch.underlying_value());
 	}
 }
+#endif
 
-template<typename T, std::size_t N, typename Allocator, bool EnableCow, cow_sharing_kind CowSharingKind, zero_inline_policy ZeroInlinePolicy>
+template<typename T, std::size_t N, typename Allocator, class StorageTag, zero_inline_policy ZeroInlinePolicy>
 class basic_sso_vector_core {
+	static constexpr bool EnableCow = !std::is_same_v<StorageTag, non_cow_storage_tag>;
 	static constexpr bool zero_inline_allowed = (ZeroInlinePolicy == zero_inline_policy::allow);
 	static_assert((N == 0) == zero_inline_allowed,
 		"sso_vector zero_inline_policy must exactly match whether InlineCount is zero");
@@ -430,7 +457,19 @@ public:
 
 private:
 	using self_type = basic_sso_vector_core;
-	using heap_block_type = heap_block<T, EnableCow, CowSharingKind>;
+	using heap_block_type = heap_block<T, StorageTag>;
+public:
+	class reference_proxy;
+	class iterator_proxy;
+
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
+	using reference = std::conditional_t<EnableCow, reference_proxy, T&>;
+	using iterator = std::conditional_t<EnableCow, iterator_proxy, T*>;
+#else
+	using reference = T&;
+	using iterator = T*;
+#endif
+private:
 
 	struct inline_storage {
 		static constexpr std::size_t inline_bytes = (N == 0 ? 1 : sizeof(T) * N);
@@ -451,8 +490,8 @@ private:
 
 	struct heap_storage {
 		heap_block_type* block = nullptr;
-		T* data() noexcept { return sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(block); }
-		const T* data() const noexcept { return sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(block); }
+		T* data() noexcept { return sso_vector_detail::block_data<T, StorageTag>(block); }
+		const T* data() const noexcept { return sso_vector_detail::block_data<T, StorageTag>(block); }
 		size_type capacity() const noexcept { return block ? block->capacity : 0; }
 	};
 
@@ -697,17 +736,19 @@ private:
 
 	void release_heap_block_impl(heap_block_type* b, size_type constructed) noexcept {
 		if (!b) return;
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
-			if (sso_vector_detail::release_shared_owner<T, CowSharingKind>(b)) {
-				T* d = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(b);
+			if (sso_vector_detail::release_shared_owner(b)) {
+				T* d = sso_vector_detail::block_data<T, StorageTag>(b);
 				destroy_range_impl(*b, d, 0, constructed);
-				sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(b, alloc_);
+				sso_vector_detail::deallocate_block<T, StorageTag>(b, alloc_);
 			}
-		} else {
-			T* d = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(b);
-			destroy_range_impl(*b, d, 0, constructed);
-			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(b, alloc_);
+			return;
 		}
+#endif
+		T* d = sso_vector_detail::block_data<T, StorageTag>(b);
+		destroy_range_impl(*b, d, 0, constructed);
+		sso_vector_detail::deallocate_block<T, StorageTag>(b, alloc_);
 	}
 
 	void release_heap_impl() noexcept {
@@ -721,6 +762,7 @@ private:
 	}
 
 	void ensure_unique_heap_impl() {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (!EnableCow) {
 			return;
 		} else {
@@ -728,7 +770,7 @@ private:
 			auto& h = heap_storage_impl();
 			if (!h.block) return;
 
-			const auto cur = sso_vector_detail::load_ownership_header_snapshot<T, CowSharingKind>(h.block);
+			const auto cur = sso_vector_detail::load_ownership_header_snapshot(h.block);
 			const std::uint64_t rc = sso_vector_detail::ownership_header_share_count(cur);
 			assert(rc >= 1);
 			if (rc == 1) return;
@@ -737,19 +779,20 @@ private:
 			auto* old_block = h.block;
 			const size_type cap = old_block->capacity;
 
-			auto* new_block = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(cap, alloc_);
-			T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(new_block);
-			const T* src = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(old_block);
+			auto* new_block = sso_vector_detail::allocate_block<T, StorageTag>(cap, alloc_);
+			T* dst = sso_vector_detail::block_data<T, StorageTag>(new_block);
+			const T* src = sso_vector_detail::block_data<T, StorageTag>(old_block);
 			try {
 				copy_construct_range_impl(*new_block, dst, src, n);
 			} catch (...) {
-				sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(new_block, alloc_);
+				sso_vector_detail::deallocate_block<T, StorageTag>(new_block, alloc_);
 				throw;
 			}
 
 			h.block = new_block;
 			release_heap_block_impl(old_block, n);
 		}
+#endif
 	}
 
 	void reset_storage_impl() noexcept {
@@ -783,10 +826,13 @@ private:
 
 		bool can_move_from_source = other.is_inline_impl();
 		if (!can_move_from_source && other.is_heap_impl() && other.heap_storage_impl().block) {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 			if constexpr (EnableCow) {
 				can_move_from_source =
-					sso_vector_detail::ownership_header_is_unique<T, CowSharingKind>(other.heap_storage_impl().block);
-			} else {
+					sso_vector_detail::ownership_header_is_unique(other.heap_storage_impl().block);
+			} else
+#endif
+			{
 				can_move_from_source = true;
 			}
 		}
@@ -810,8 +856,8 @@ private:
 		}
 
 		const size_type new_cap = other.is_heap_impl() ? other.capacity_impl() : growth_capacity(n, N);
-		auto* new_block = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(new_cap, alloc_);
-		T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(new_block);
+		auto* new_block = sso_vector_detail::allocate_block<T, StorageTag>(new_cap, alloc_);
+		T* dst = sso_vector_detail::block_data<T, StorageTag>(new_block);
 		try {
 			if (can_move_from_source) {
 				move_construct_range_impl(*new_block, dst, other.data_mut_no_cow_impl(), n);
@@ -819,7 +865,7 @@ private:
 				copy_construct_range_impl(*new_block, dst, other.data_const_impl(), n);
 			}
 		} catch (...) {
-			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(new_block, alloc_);
+			sso_vector_detail::deallocate_block<T, StorageTag>(new_block, alloc_);
 			throw;
 		}
 
@@ -860,14 +906,14 @@ private:
 		assert(is_inline_impl());
 		if (new_cap < 1) new_cap = 1;
 
-		auto* b = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(new_cap, alloc_);
-		T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(b);
+		auto* b = sso_vector_detail::allocate_block<T, StorageTag>(new_cap, alloc_);
+		T* dst = sso_vector_detail::block_data<T, StorageTag>(b);
 		T* src = inline_storage_impl().data();
 		const size_type n = size_impl();
 		try {
 			move_construct_range_impl(*b, dst, src, n);
 		} catch (...) {
-			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(b, alloc_);
+			sso_vector_detail::deallocate_block<T, StorageTag>(b, alloc_);
 			throw;
 		}
 
@@ -888,18 +934,18 @@ private:
 		const size_type n = size_impl();
 		assert(new_cap >= n);
 
-		auto* new_block = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(new_cap, alloc_);
-		T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(new_block);
-		T* src = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(old_block);
+		auto* new_block = sso_vector_detail::allocate_block<T, StorageTag>(new_cap, alloc_);
+		T* dst = sso_vector_detail::block_data<T, StorageTag>(new_block);
+		T* src = sso_vector_detail::block_data<T, StorageTag>(old_block);
 		try {
 			move_construct_range_impl(*new_block, dst, src, n);
 		} catch (...) {
-			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(new_block, alloc_);
+			sso_vector_detail::deallocate_block<T, StorageTag>(new_block, alloc_);
 			throw;
 		}
 
 		destroy_range_impl(*old_block, src, 0, n);
-		sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(old_block, alloc_);
+		sso_vector_detail::deallocate_block<T, StorageTag>(old_block, alloc_);
 
 		h.block = new_block;
 	}
@@ -954,21 +1000,23 @@ private:
 		auto* b = other.heap_storage_impl().block;
 		assert(b);
 
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
-			if (sso_vector_detail::try_add_shared_owner<T, CowSharingKind>(b)) {
+			if (sso_vector_detail::try_add_shared_owner(b)) {
 				heap_storage_impl().block = b;
 				set_size_impl(other.size());
 				return;
 			}
 		}
+#endif
 
-		auto* nb = sso_vector_detail::allocate_block<T, EnableCow, CowSharingKind>(b->capacity, alloc_);
-		T* dst = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(nb);
-		const T* src = sso_vector_detail::block_data<T, EnableCow, CowSharingKind>(b);
+		auto* nb = sso_vector_detail::allocate_block<T, StorageTag>(b->capacity, alloc_);
+		T* dst = sso_vector_detail::block_data<T, StorageTag>(nb);
+		const T* src = sso_vector_detail::block_data<T, StorageTag>(b);
 		try {
 			copy_construct_range_impl(*nb, dst, src, other.size());
 		} catch (...) {
-			sso_vector_detail::deallocate_block<T, EnableCow, CowSharingKind>(nb, alloc_);
+			sso_vector_detail::deallocate_block<T, StorageTag>(nb, alloc_);
 			throw;
 		}
 		heap_storage_impl().block = nb;
@@ -988,8 +1036,9 @@ private:
 			return;
 		}
 
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
-			const auto hdr = sso_vector_detail::load_ownership_header_snapshot<T, CowSharingKind>(heap_storage_impl().block);
+			const auto hdr = sso_vector_detail::load_ownership_header_snapshot(heap_storage_impl().block);
 			if (sso_vector_detail::ownership_header_share_count(hdr) > 1) {
 				release_heap_impl();
 				state_.template emplace<0>();
@@ -997,21 +1046,24 @@ private:
 				return;
 			}
 		}
+#endif
 
 		destroy_range_impl(*heap_storage_impl().block, heap_storage_impl().data(), 0, n);
 		set_size_impl(0);
 	}
 
 	void privatize_heap_impl() {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			if (auto* block = heap_block_impl()) {
-				if (!sso_vector_detail::ownership_header_is_unique<T, CowSharingKind>(block)) {
+				if (!sso_vector_detail::ownership_header_is_unique(block)) {
 					ensure_unique_heap_impl();
 					block = heap_block_impl();
 				}
-				sso_vector_detail::mark_unshareable<T, CowSharingKind>(block);
+				sso_vector_detail::mark_unshareable(block);
 			}
 		}
+#endif
 	}
 
 	template<class... Args>
@@ -1254,22 +1306,29 @@ private:
 		}
 	}
 
-	decltype(auto) mutable_reference_at_impl(size_type index) noexcept {
+	reference mutable_reference_at_impl(size_type index) noexcept {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			return reference_proxy(this, index);
 		} else {
 			return ref_at_unchecked(index);
 		}
+#else
+		return ref_at_unchecked(index);
+#endif
 	}
 
 	decltype(auto) mutable_data_impl() {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			privatize_heap_impl();
 		}
+#endif
 		return data_mut_no_cow_impl();
 	}
 
 public:
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 	class reference_proxy {
 	public:
 		reference_proxy() = delete;
@@ -1365,14 +1424,14 @@ public:
 		self_type* owner_ = nullptr;
 		size_type index_ = 0;
 	};
+#endif
 
-	using reference = std::conditional_t<EnableCow, reference_proxy, T&>;
 	using const_iterator = const T*;
-	using iterator = std::conditional_t<EnableCow, iterator_proxy, T*>;
 	using reverse_iterator = std::reverse_iterator<iterator>;
 	using const_reverse_iterator = std::reverse_iterator<const_iterator>;
 
 private:
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 	void debug_assert_valid_iterator_position(const iterator_proxy& pos, const char* message) const noexcept {
 		assert(pos.owner() == this && message);
 		assert(pos.index() <= size_impl() && message);
@@ -1384,6 +1443,7 @@ private:
 		assert(first.index() <= last.index() && message);
 		assert(last.index() <= size_impl() && message);
 	}
+#endif
 
 	void debug_assert_valid_const_iterator_position(const T* pos, const char* message) const noexcept {
 		assert(debug_const_iterator_in_closed_range(pos, cbegin(), cend()) && message);
@@ -1404,10 +1464,12 @@ private:
 		return static_cast<size_type>(pos - cbegin());
 	}
 
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 	size_type iterator_index_impl(const iterator_proxy& pos, const char* message) const noexcept {
 		debug_assert_valid_iterator_position(pos, message);
 		return pos.index();
 	}
+#endif
 
 	size_type const_iterator_index_impl(const T* pos, const char* message) const noexcept {
 		debug_assert_valid_const_iterator_position(pos, message);
@@ -1421,37 +1483,51 @@ private:
 
 	template<typename It>
 	size_type mutable_iterator_index_impl(It pos, const char* message) const noexcept {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			return iterator_index_impl(pos, message);
 		} else {
 			return const_iterator_index_impl(pos, message);
 		}
+#else
+		return const_iterator_index_impl(pos, message);
+#endif
 	}
 
 	template<typename It>
 	std::pair<size_type, size_type> mutable_iterator_range_indices_impl(It first, It last, const char* message) const noexcept {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			debug_assert_valid_iterator_range(first, last, message);
 			return {first.index(), last.index()};
 		} else {
 			return const_iterator_range_indices_impl(first, last, message);
 		}
+#else
+		return const_iterator_range_indices_impl(first, last, message);
+#endif
 	}
 
 	iterator make_iterator_at(size_type index) noexcept {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			return iterator(this, index);
 		} else {
 			return data_mut_no_cow_impl() + index;
 		}
+#else
+		return data_mut_no_cow_impl() + index;
+#endif
 	}
 
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 	void debug_assert_not_self_range(const iterator_proxy& first, const iterator_proxy& last, const char* message) const noexcept {
 		if (first.owner() == this || last.owner() == this) {
 			assert(first.owner() == this && last.owner() == this && message);
 			assert(false && message);
 		}
 	}
+#endif
 
 	void debug_assert_not_self_range(const T* first, const T* last, const char* message) const noexcept {
 		if (debug_const_iterator_in_closed_range(first, cbegin(), cend()) ||
@@ -1587,19 +1663,27 @@ public:
 	}
 
 	iterator begin() noexcept {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			return iterator(this, 0);
 		} else {
 			return data_mut_no_cow_impl();
 		}
+#else
+		return data_mut_no_cow_impl();
+#endif
 	}
 
 	iterator end() noexcept {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			return iterator(this, size());
 		} else {
 			return data_mut_no_cow_impl() + size();
 		}
+#else
+		return data_mut_no_cow_impl() + size();
+#endif
 	}
 
 	const_iterator begin() const noexcept { return data_const_impl(); }
@@ -1617,31 +1701,34 @@ public:
 	bool is_inline() const noexcept { return is_inline_impl(); }
 
 	bool is_shared() const noexcept {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			return share_count() > 1;
-		} else {
-			return false;
 		}
+#endif
+		return false;
 	}
 
 	bool is_shareable() const noexcept {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			if (!is_heap_impl()) return true;
 			return sso_vector_detail::ownership_header_is_shareable(
-				sso_vector_detail::load_ownership_header_snapshot<T, CowSharingKind>(heap_storage_impl().block));
-		} else {
-			return true;
+				sso_vector_detail::load_ownership_header_snapshot(heap_storage_impl().block));
 		}
+#endif
+		return true;
 	}
 
 	size_type share_count() const noexcept {
+#if SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
 		if constexpr (EnableCow) {
 			if (!is_heap_impl()) return 1;
 			return static_cast<size_type>(sso_vector_detail::ownership_header_share_count(
-				sso_vector_detail::load_ownership_header_snapshot<T, CowSharingKind>(heap_storage_impl().block)));
-		} else {
-			return 1;
+				sso_vector_detail::load_ownership_header_snapshot(heap_storage_impl().block)));
 		}
+#endif
+		return 1;
 	}
 
 	void detach()
@@ -1818,9 +1905,9 @@ template<typename T, std::size_t N, typename Allocator = std::allocator<T>,
          zero_inline_policy ZeroInlinePolicy = zero_inline_policy::disallow>
 class sso_vector final
 	: public sso_vector_detail::basic_sso_vector_core<
-		T, N, Allocator, false, sso_vector_detail::cow_sharing_kind::synchronized, ZeroInlinePolicy> {
+		T, N, Allocator, sso_vector_detail::non_cow_storage_tag, ZeroInlinePolicy> {
 	using base = sso_vector_detail::basic_sso_vector_core<
-		T, N, Allocator, false, sso_vector_detail::cow_sharing_kind::synchronized, ZeroInlinePolicy>;
+		T, N, Allocator, sso_vector_detail::non_cow_storage_tag, ZeroInlinePolicy>;
 public:
 	using base::base;
 	using base::operator=;
@@ -1831,9 +1918,9 @@ template<typename T, std::size_t N, typename Allocator = std::allocator<T>,
          zero_inline_policy ZeroInlinePolicy = zero_inline_policy::disallow>
 class sso_cow_vector final
 	: public sso_vector_detail::basic_sso_vector_core<
-		T, N, Allocator, true, sso_vector_detail::cow_sharing_kind::synchronized, ZeroInlinePolicy> {
+		T, N, Allocator, sso_vector_detail::cow_storage_tag<sso_vector_detail::cow_sharing_kind::synchronized>, ZeroInlinePolicy> {
 	using base = sso_vector_detail::basic_sso_vector_core<
-		T, N, Allocator, true, sso_vector_detail::cow_sharing_kind::synchronized, ZeroInlinePolicy>;
+		T, N, Allocator, sso_vector_detail::cow_storage_tag<sso_vector_detail::cow_sharing_kind::synchronized>, ZeroInlinePolicy>;
 public:
 	using base::base;
 	using base::operator=;
@@ -1849,9 +1936,9 @@ template<typename T, std::size_t N, typename Allocator = std::allocator<T>,
          zero_inline_policy ZeroInlinePolicy = zero_inline_policy::disallow>
 class sso_cow_vector_with_unsynchronized_sharing final
 	: public sso_vector_detail::basic_sso_vector_core<
-		T, N, Allocator, true, sso_vector_detail::cow_sharing_kind::unsynchronized, ZeroInlinePolicy> {
+		T, N, Allocator, sso_vector_detail::cow_storage_tag<sso_vector_detail::cow_sharing_kind::unsynchronized>, ZeroInlinePolicy> {
 	using base = sso_vector_detail::basic_sso_vector_core<
-		T, N, Allocator, true, sso_vector_detail::cow_sharing_kind::unsynchronized, ZeroInlinePolicy>;
+		T, N, Allocator, sso_vector_detail::cow_storage_tag<sso_vector_detail::cow_sharing_kind::unsynchronized>, ZeroInlinePolicy>;
 public:
 	using base::base;
 	using base::operator=;
