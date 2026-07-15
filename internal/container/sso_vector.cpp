@@ -29,6 +29,7 @@
 #include <vector>
 
 #include <universal/internal/container/sso_vector.hpp>
+#include <universal/internal/container/deprecated/sso_cow_vector.hpp>
 #include <universal/verification/test_status.hpp>
 
 namespace {
@@ -433,18 +434,18 @@ static_assert(!sw::universal::internal::zero_inline_policy_matches_v<0, sw::univ
 static_assert(!sw::universal::internal::zero_inline_policy_matches_v<4, sw::universal::internal::zero_inline_policy::allow>);
 static_assert(!sw::universal::internal::has_mediated_indexed_write<std::vector<int>>);
 static_assert(!sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::sso_vector_default<int>>);
-static_assert(sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::sso_cow_vector_default<int>>);
-static_assert(sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::sso_cow_vector_with_unsynchronized_sharing_default<int>>);
+static_assert(sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::deprecated::sso_cow_vector_default<int>>);
+static_assert(sw::universal::internal::has_mediated_indexed_write<sw::universal::internal::deprecated::sso_cow_vector_with_unsynchronized_sharing_default<int>>);
 
 template<class T, class Allocator>
 using sso_vector_auto = sw::universal::internal::sso_vector_default<T, Allocator>;
 
 template<class T, class Allocator>
-using sso_cow_vector_auto = sw::universal::internal::sso_cow_vector_default<T, Allocator>;
+using sso_cow_vector_auto = sw::universal::internal::deprecated::sso_cow_vector_default<T, Allocator>;
 
 template<class T, class Allocator>
 using sso_cow_vector_unsync_auto =
-	sw::universal::internal::sso_cow_vector_with_unsynchronized_sharing_default<T, Allocator>;
+	sw::universal::internal::deprecated::sso_cow_vector_with_unsynchronized_sharing_default<T, Allocator>;
 
 struct AllocState {
 	int alloc_calls = 0;
@@ -797,7 +798,7 @@ template<class T, class Alloc>
 using sso_vector_small = sw::universal::internal::sso_vector<T, 4, Alloc>;
 
 template<class T, class Alloc>
-using sso_cow_vector_small = sw::universal::internal::sso_cow_vector<T, 4, Alloc>;
+using sso_cow_vector_small = sw::universal::internal::deprecated::sso_cow_vector<T, 4, Alloc>;
 
 template<class V>
 concept has_sso_vector_count_constructor = requires {
@@ -1053,7 +1054,7 @@ void run_vector_std_parity_suite(int& failures) {
 }
 
 void run_sso_proxy_suite(int& failures) {
-	using Vec = sw::universal::internal::sso_cow_vector_default<int>;
+	using Vec = sw::universal::internal::deprecated::sso_cow_vector_default<int>;
 	TestContext ctx{"sso_vector(proxy)", failures};
 
 	// Custom-only behavior: non-const indexing/iteration uses proxy objects instead of raw references.
@@ -1084,7 +1085,7 @@ void run_sso_proxy_suite(int& failures) {
 }
 
 void run_sso_unsynchronized_proxy_suite(int& failures) {
-	using Vec = sw::universal::internal::sso_cow_vector_with_unsynchronized_sharing_default<int>;
+	using Vec = sw::universal::internal::deprecated::sso_cow_vector_with_unsynchronized_sharing_default<int>;
 	TestContext ctx{"sso_vector(proxy_unsync)", failures};
 
 	Vec v;
@@ -1113,7 +1114,7 @@ void run_sso_unsynchronized_proxy_suite(int& failures) {
 }
 
 void run_sso_cow_suite(int& failures) {
-	using Vec = sw::universal::internal::sso_cow_vector_default<int>;
+	using Vec = sw::universal::internal::deprecated::sso_cow_vector_default<int>;
 	TestContext ctx{"sso_vector(cow)", failures};
 
 	{
@@ -1208,7 +1209,8 @@ void run_sso_cow_suite(int& failures) {
 	}
 
 	{
-		using ZeroVec = sw::universal::internal::sso_cow_vector<std::string, 0, std::allocator<std::string>, sw::universal::internal::zero_inline_policy::allow>;
+		using ZeroVec = sw::universal::internal::deprecated::sso_cow_vector<
+			std::string, 0, std::allocator<std::string>, sw::universal::internal::deprecated::zero_inline_policy::allow>;
 		ZeroVec left;
 		left.push_back("cow");
 		left.push_back("zero");
@@ -2870,7 +2872,7 @@ void run_sso_vector_allocator_provenance_suite(int& failures) {
 
 void run_sso_vector_ownership_header_suite(int& failures) {
 	TestContext ctx{"sso_vector_ownership_header", failures};
-	namespace detail = sw::universal::internal::sso_vector_detail;
+	namespace detail = sw::universal::internal::deprecated::sso_vector_detail;
 
 	{
 		// The heap block now owns the atomic-backed bitfield pack directly. This smoke test exercises

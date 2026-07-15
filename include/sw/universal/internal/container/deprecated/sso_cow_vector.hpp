@@ -1,0 +1,15 @@
+#pragma once
+
+#define SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW 1
+#define SW_UNIVERSAL_SSO_VECTOR_NAMESPACE_OPEN namespace sw { namespace universal { namespace internal { namespace deprecated {
+#define SW_UNIVERSAL_SSO_VECTOR_NAMESPACE_CLOSE }}}}
+#define SW_UNIVERSAL_SSO_VECTOR_IF_COW_ENABLED(...) __VA_ARGS__
+#define SW_UNIVERSAL_SSO_VECTOR_IF_COW_DISABLED(...)
+
+#include "universal/internal/container/sso_vector_impl.hpp"
+
+#undef SW_UNIVERSAL_SSO_VECTOR_ENABLE_COW
+#undef SW_UNIVERSAL_SSO_VECTOR_NAMESPACE_OPEN
+#undef SW_UNIVERSAL_SSO_VECTOR_NAMESPACE_CLOSE
+#undef SW_UNIVERSAL_SSO_VECTOR_IF_COW_ENABLED
+#undef SW_UNIVERSAL_SSO_VECTOR_IF_COW_DISABLED

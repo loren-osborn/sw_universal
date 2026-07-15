@@ -23,16 +23,16 @@
 #include <vector>
 
 #include <universal/internal/container/sso_vector.hpp>
+#include <universal/internal/container/deprecated/sso_cow_vector.hpp>
 
 #include "sso_vector_performance_common.hpp"
 
 namespace {
 
-using sw::universal::internal::sso_cow_vector;
-using sw::universal::internal::sso_cow_vector_with_unsynchronized_sharing;
 using sw::universal::internal::sso_vector;
 using sw::universal::internal::has_mediated_indexed_write;
 using sw::universal::internal::zero_inline_policy;
+namespace deprecated_internal = sw::universal::internal::deprecated;
 namespace perf = sw::universal::internal::sso_vector_perf_detail;
 
 enum class indexed_write_path {
@@ -276,12 +276,12 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 	using sso_zero_t = sso_vector<T, 0, std::allocator<T>, zero_inline_policy::allow>;
 	using sso_inline_t = sso_vector<T, benchmark_inline>;
 	using sso_double_t = sso_vector<T, benchmark_double_inline>;
-	using sso_cow_zero_t = sso_cow_vector<T, 0, std::allocator<T>, zero_inline_policy::allow>;
-	using sso_cow_inline_t = sso_cow_vector<T, benchmark_inline>;
-	using sso_cow_double_t = sso_cow_vector<T, benchmark_double_inline>;
-	using sso_cow_unsync_zero_t = sso_cow_vector_with_unsynchronized_sharing<T, 0, std::allocator<T>, zero_inline_policy::allow>;
-	using sso_cow_unsync_inline_t = sso_cow_vector_with_unsynchronized_sharing<T, benchmark_inline>;
-	using sso_cow_unsync_double_t = sso_cow_vector_with_unsynchronized_sharing<T, benchmark_double_inline>;
+	using sso_cow_zero_t = deprecated_internal::sso_cow_vector<T, 0, std::allocator<T>, deprecated_internal::zero_inline_policy::allow>;
+	using sso_cow_inline_t = deprecated_internal::sso_cow_vector<T, benchmark_inline>;
+	using sso_cow_double_t = deprecated_internal::sso_cow_vector<T, benchmark_double_inline>;
+	using sso_cow_unsync_zero_t = deprecated_internal::sso_cow_vector_with_unsynchronized_sharing<T, 0, std::allocator<T>, deprecated_internal::zero_inline_policy::allow>;
+	using sso_cow_unsync_inline_t = deprecated_internal::sso_cow_vector_with_unsynchronized_sharing<T, benchmark_inline>;
+	using sso_cow_unsync_double_t = deprecated_internal::sso_cow_vector_with_unsynchronized_sharing<T, benchmark_double_inline>;
 
 	static_assert(!has_mediated_indexed_write<std_vector_t>);
 	static_assert(!has_mediated_indexed_write<sso_zero_t>);
@@ -306,24 +306,24 @@ perf::persisted_summary run_payload_benchmark(std::string_view payload_name, std
 	const std::string zero_inline_label = "sso_vector inline=0";
 	const std::string inline_label = "sso_vector inline=" + std::to_string(benchmark_inline);
 	const std::string double_inline_label = "sso_vector inline=" + std::to_string(benchmark_double_inline);
-	const std::string cow_zero_inline_proxy_label = "sso_cow_vector inline=0 [proxy]";
-	const std::string cow_inline_proxy_label = "sso_cow_vector inline=" + std::to_string(benchmark_inline) + " [proxy]";
-	const std::string cow_double_inline_proxy_label = "sso_cow_vector inline=" + std::to_string(benchmark_double_inline) + " [proxy]";
-	const std::string cow_zero_inline_set_at_label = "sso_cow_vector inline=0 [set_at]";
-	const std::string cow_inline_set_at_label = "sso_cow_vector inline=" + std::to_string(benchmark_inline) + " [set_at]";
-	const std::string cow_double_inline_set_at_label = "sso_cow_vector inline=" + std::to_string(benchmark_double_inline) + " [set_at]";
+	const std::string cow_zero_inline_proxy_label = "deprecated::sso_cow_vector inline=0 [proxy]";
+	const std::string cow_inline_proxy_label = "deprecated::sso_cow_vector inline=" + std::to_string(benchmark_inline) + " [proxy]";
+	const std::string cow_double_inline_proxy_label = "deprecated::sso_cow_vector inline=" + std::to_string(benchmark_double_inline) + " [proxy]";
+	const std::string cow_zero_inline_set_at_label = "deprecated::sso_cow_vector inline=0 [set_at]";
+	const std::string cow_inline_set_at_label = "deprecated::sso_cow_vector inline=" + std::to_string(benchmark_inline) + " [set_at]";
+	const std::string cow_double_inline_set_at_label = "deprecated::sso_cow_vector inline=" + std::to_string(benchmark_double_inline) + " [set_at]";
 	const std::string cow_unsync_zero_inline_proxy_label =
-		"sso_cow_vector_with_unsynchronized_sharing inline=0 [proxy]";
+		"deprecated::sso_cow_vector_with_unsynchronized_sharing inline=0 [proxy]";
 	const std::string cow_unsync_inline_proxy_label =
-		"sso_cow_vector_with_unsynchronized_sharing inline=" + std::to_string(benchmark_inline) + " [proxy]";
+		"deprecated::sso_cow_vector_with_unsynchronized_sharing inline=" + std::to_string(benchmark_inline) + " [proxy]";
 	const std::string cow_unsync_double_inline_proxy_label =
-		"sso_cow_vector_with_unsynchronized_sharing inline=" + std::to_string(benchmark_double_inline) + " [proxy]";
+		"deprecated::sso_cow_vector_with_unsynchronized_sharing inline=" + std::to_string(benchmark_double_inline) + " [proxy]";
 	const std::string cow_unsync_zero_inline_set_at_label =
-		"sso_cow_vector_with_unsynchronized_sharing inline=0 [set_at]";
+		"deprecated::sso_cow_vector_with_unsynchronized_sharing inline=0 [set_at]";
 	const std::string cow_unsync_inline_set_at_label =
-		"sso_cow_vector_with_unsynchronized_sharing inline=" + std::to_string(benchmark_inline) + " [set_at]";
+		"deprecated::sso_cow_vector_with_unsynchronized_sharing inline=" + std::to_string(benchmark_inline) + " [set_at]";
 	const std::string cow_unsync_double_inline_set_at_label =
-		"sso_cow_vector_with_unsynchronized_sharing inline=" + std::to_string(benchmark_double_inline) + " [set_at]";
+		"deprecated::sso_cow_vector_with_unsynchronized_sharing inline=" + std::to_string(benchmark_double_inline) + " [set_at]";
 
 	constexpr int label_width = 64;
 	constexpr int time_width = 16;
